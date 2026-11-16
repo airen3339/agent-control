@@ -417,6 +417,8 @@ const state = {
   remoteStatus: null,
   tunnelStatus: null,
   tunnelBusy: false,
+  fixedTunnelStatus: null,
+  fixedTunnelBusy: false,
   localApps: [],
   batchSelect: {
     active: false,
@@ -4108,11 +4110,92 @@ function renderRemoteStatus(status) {
     qrWrap.hidden = true;
   }
 
-  if (status.paired && $("relayAdvancedSection")) {
+  if ($("relayAdvancedSection") && status.paired) {
     $("relayAdvancedSection").open = true;
   }
   if (status.tunnel) {
     renderTunnelStatus(status.tunnel);
+  }
+  if (status.fixedTunnel) {
+    renderFixedTunnelStatus(status.fixedTunnel);
+  }
+}
+
+function renderFixedTunnelStatus(fixed) {
+  if (!fixed || typeof fixed !== "object") return;
+  state.fixedTunnelStatus = fixed;
+
+  const canManage = fixed.canManage !== false;
+  const pill = $("tsFunnelStateText");
+  if (pill) {
+    if (!fixed.installed) {
+      pill.textContent = "未安装";
+      pill.className = "tunnel-state-pill";
+    } else if (fixed.active) {
+      pill.textContent = "Funnel 运行中";
+      pill.className = "tunnel-state-pill is-running";
+    } else if (fixed.dnsName) {
+      pill.textContent = "已就绪（未开启）";
+      pill.className = "tunnel-state-pill";
+    } else {
+      pill.textContent = "未登录 / 未启用 MagicDNS";
+      pill.className = "tunnel-state-pill is-error";
+    }
+  }
+
+  if ($("tsMissingBox")) {
+    $("tsMissingBox").hidden = !(canManage && fixed.installed === false);
+  }
+  if ($("tsInstallCmdCode") && fixed.installHint) {
+    $("tsInstallCmdCode").textContent = fixed.installHint;
+  }
+  if ($("tsErrorText")) {
+    const showErr = canManage && Boolean(fixed.lastError);
+    $("tsErrorText").hidden = !showErr;
+    $("tsErrorText").textContent = showErr ? fixed.lastError : "";
+  }
+  if ($("startTsFunnelBtn")) {
+    $("startTsFunnelBtn").disabled = !canManage || state.fixedTunnelBusy || !fixed.installed;
+    $("startTsFunnelBtn").textContent = state.fixedTunnelBusy
+      ? "正在处理…"
+      : fixed.active
+        ? "刷新 Tailscale Funnel 二维码"
+        : "一键开启 Tailscale Funnel";
+  }
+  if ($("stopTsFunnelBtn")) {
+    $("stopTsFunnelBtn").hidden = !(canManage && fixed.active);
+    $("stopTsFunnelBtn").disabled = state.fixedTunnelBusy;
+  }
+
+  const input = $("fixedPublicUrlInput");
+  if (input && document.activeElement !== input) {
+    if (fixed.fixedPublicUrl) {
+      input.value = fixed.fixedPublicUrl;
+    } else if (!input.value && fixed.publicUrl) {
+      input.value = fixed.publicUrl;
+    }
+  }
+  if ($("saveFixedPairBtn")) {
+    $("saveFixedPairBtn").disabled = !canManage || state.fixedTunnelBusy;
+  }
+  const hasPairedFixed = Boolean(canManage && fixed.fixedPublicUrl && fixed.pairUrl);
+  if ($("rotateFixedPairBtn")) {
+    $("rotateFixedPairBtn").hidden = !hasPairedFixed;
+    $("rotateFixedPairBtn").disabled = state.fixedTunnelBusy;
+  }
+  if ($("clearFixedPairBtn")) {
+    $("clearFixedPairBtn").hidden = !(canManage && fixed.fixedPublicUrl);
+    $("clearFixedPairBtn").disabled = state.fixedTunnelBusy;
+  }
+  const qrWrap = $("fixedQrWrap");
+  if (qrWrap) {
+    if (hasPairedFixed && fixed.qrDataUrl) {
+      qrWrap.hidden = false;
+      $("fixedQrImg").src = fixed.qrDataUrl;
+      $("fixedPairUrlInput").value = fixed.pairUrl;
+    } else {
+      qrWrap.hidden = true;
+    }
   }
 }
 
@@ -7315,6 +7398,7 @@ function bindEvents() {
       const status = await apiPost("api/tunnel/rotate", {});
       state.tunnelBusy = false;
       renderTunnelStatus(status);
+      if (status.fixedTunnel) renderFixedTunnelStatus(status.fixedTunnel);
       showToastBanner("已重置配对二维码", { detail: "旧手机会话已立即失效" });
     } catch (error) {
       state.tunnelBusy = false;
@@ -7336,6 +7420,120 @@ function bindEvents() {
     await navigator.clipboard?.writeText(cmd).catch(() => {});
     $("copyBrewCmdBtn").textContent = "已复制";
     setTimeout(() => { if ($("copyBrewCmdBtn")) $("copyBrewCmdBtn").textContent = "复制命令"; }, 1500);
+  });
+
+  $("startTsFunnelBtn")?.addEventListener("click", async () => {
+    if (state.fixedTunnelBusy) return;
+    state.fixedTunnelBusy = true;
+    renderFixedTunnelStatus(state.fixedTunnelStatus || {});
+    try {
+      const res = await apiPost("api/tunnel/tailscale/start", {});
+      state.fixedTunnelBusy = false;
+      renderFixedTunnelStatus(res);
+      showToastBanner("Tailscale Funnel 固定链接已就绪", { detail: res.fixedPublicUrl || "可扫码连接" });
+    } catch (error) {
+      state.fixedTunnelBusy = false;
+      const latest = await apiGet("api/remote").catch(() => null);
+      if (latest) {
+        renderRemoteStatus(latest);
+      } else {
+        renderFixedTunnelStatus({
+          ...(state.fixedTunnelStatus || {}),
+          lastError: formatActionError(error, "开启 Tailscale Funnel 失败"),
+        });
+      }
+      if ($("tsErrorText")) {
+        $("tsErrorText").hidden = false;
+        $("tsErrorText").textContent = formatActionError(error, "开启 Tailscale Funnel 失败");
+      }
+    }
+  });
+
+  $("stopTsFunnelBtn")?.addEventListener("click", async () => {
+    if (state.fixedTunnelBusy) return;
+    state.fixedTunnelBusy = true;
+    renderFixedTunnelStatus(state.fixedTunnelStatus || {});
+    try {
+      const res = await apiPost("api/tunnel/tailscale/stop", {});
+      state.fixedTunnelBusy = false;
+      renderFixedTunnelStatus(res);
+      showToastBanner("已关闭 Tailscale Funnel 并废止旧会话");
+    } catch (error) {
+      state.fixedTunnelBusy = false;
+      renderFixedTunnelStatus(state.fixedTunnelStatus || {});
+      showToastBanner("关闭 Funnel 失败", { detail: formatActionError(error), error: true });
+    }
+  });
+
+  $("copyTsCmdBtn")?.addEventListener("click", async () => {
+    const cmd = state.fixedTunnelStatus?.installHint || $("tsInstallCmdCode")?.textContent || "brew install --cask tailscale";
+    await navigator.clipboard?.writeText(cmd).catch(() => {});
+    $("copyTsCmdBtn").textContent = "已复制";
+    setTimeout(() => { if ($("copyTsCmdBtn")) $("copyTsCmdBtn").textContent = "复制命令"; }, 1500);
+  });
+
+  $("fixedPairForm")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    if (state.fixedTunnelBusy) return;
+    const publicUrl = String($("fixedPublicUrlInput")?.value || "").trim();
+    if (!publicUrl) {
+      showToastBanner("请输入固定公网域名（如 https://agent.example.com）", { error: true });
+      return;
+    }
+    state.fixedTunnelBusy = true;
+    renderFixedTunnelStatus(state.fixedTunnelStatus || {});
+    try {
+      const res = await apiPost("api/tunnel/fixed-pair", { publicUrl });
+      state.fixedTunnelBusy = false;
+      renderFixedTunnelStatus(res);
+      showToastBanner("固定链接配对二维码已生成");
+    } catch (error) {
+      state.fixedTunnelBusy = false;
+      renderFixedTunnelStatus(state.fixedTunnelStatus || {});
+      showToastBanner("生成配对二维码失败", { detail: formatActionError(error), error: true });
+    }
+  });
+
+  $("rotateFixedPairBtn")?.addEventListener("click", async () => {
+    if (state.fixedTunnelBusy) return;
+    state.fixedTunnelBusy = true;
+    renderFixedTunnelStatus(state.fixedTunnelStatus || {});
+    try {
+      const status = await apiPost("api/tunnel/rotate", {});
+      state.fixedTunnelBusy = false;
+      renderTunnelStatus(status);
+      if (status.fixedTunnel) renderFixedTunnelStatus(status.fixedTunnel);
+      showToastBanner("已重置固定链接配对二维码", { detail: "旧手机会话已立即失效" });
+    } catch (error) {
+      state.fixedTunnelBusy = false;
+      renderFixedTunnelStatus(state.fixedTunnelStatus || {});
+      showToastBanner("重置二维码失败", { detail: formatActionError(error), error: true });
+    }
+  });
+
+  $("clearFixedPairBtn")?.addEventListener("click", async () => {
+    if (state.fixedTunnelBusy) return;
+    state.fixedTunnelBusy = true;
+    renderFixedTunnelStatus(state.fixedTunnelStatus || {});
+    try {
+      const res = await apiPost("api/tunnel/fixed-pair", { publicUrl: "" });
+      state.fixedTunnelBusy = false;
+      if ($("fixedPublicUrlInput")) $("fixedPublicUrlInput").value = "";
+      renderFixedTunnelStatus(res);
+      showToastBanner("已清除固定链接记录");
+    } catch (error) {
+      state.fixedTunnelBusy = false;
+      renderFixedTunnelStatus(state.fixedTunnelStatus || {});
+      showToastBanner("清除失败", { detail: formatActionError(error), error: true });
+    }
+  });
+
+  $("copyFixedUrlBtn")?.addEventListener("click", async () => {
+    const val = $("fixedPairUrlInput")?.value;
+    if (!val) return;
+    await navigator.clipboard?.writeText(val).catch(() => {});
+    $("copyFixedUrlBtn").textContent = "已复制";
+    setTimeout(() => { if ($("copyFixedUrlBtn")) $("copyFixedUrlBtn").textContent = "复制"; }, 1500);
   });
 
   $("remotePairForm").addEventListener("submit", async (e) => {

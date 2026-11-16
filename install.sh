@@ -25,7 +25,7 @@ Agent Control 一键安装脚本 (macOS / Linux)
   或本地仓库运行: ./install.sh [选项]
 
 选项:
-  --remote <模式>   远程隧道方案: cloudflare | relay | local（默认交互选择，非交互默认 cloudflare）
+  --remote <模式>   远程隧道方案: cloudflare | tailscale | named | relay | local（默认交互选择，非交互默认 cloudflare）
   --relay-url <URL> 自托管固定中继地址（配合 --remote relay 使用）
   --invite <邀请码> 自托管固定中继配对邀请码
   --label <名称>    本机在远程列表的显示名称
@@ -41,7 +41,7 @@ EOF
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --remote)
-      REMOTE_MODE="${2:?--remote 需要提供模式: cloudflare|relay|local}"
+      REMOTE_MODE="${2:?--remote 需要提供模式: cloudflare|tailscale|named|relay|local}"
       shift 2
       ;;
     --relay-url)
@@ -95,9 +95,9 @@ if [[ "$OS_NAME" != "Darwin" && "$OS_NAME" != "Linux" ]]; then
 fi
 
 case "$REMOTE_MODE" in
-  auto|cloudflare|relay|local) ;;
+  auto|cloudflare|tailscale|named|relay|local) ;;
   *)
-    echo "[错误] --remote 仅支持 cloudflare | relay | local，收到: $REMOTE_MODE" >&2
+    echo "[错误] --remote 仅支持 cloudflare | tailscale | named | relay | local，收到: $REMOTE_MODE" >&2
     exit 1
     ;;
 esac
@@ -106,15 +106,19 @@ if [[ "$REMOTE_MODE" == "auto" ]]; then
   if [[ -r /dev/tty && -w /dev/tty && "${AGENT_CONTROL_NONINTERACTIVE:-0}" != "1" ]]; then
     echo "" > /dev/tty
     echo "请选择手机远程接入方案（安装后可随时在页面或命令行切换）：" > /dev/tty
-    echo "  [1] Cloudflare 免费临时隧道（推荐，安装 cloudflared；免服务器免注册，每次地址随机）" > /dev/tty
-    echo "  [2] 自托管固定中继（连接自己的 relay 服务器；域名固定、自动重连，需自备服务器）" > /dev/tty
-    echo "  [3] 仅本机使用（不安装额外隧道组件，后续可随时用 agent-control remote 切换）" > /dev/tty
-    printf "请输入选项 [1/2/3]（默认 1）: " > /dev/tty
+    echo "  [1] Cloudflare 免费临时隧道（默认推荐，安装 cloudflared；免服务器免注册，每次地址随机）" > /dev/tty
+    echo "  [2] Tailscale Funnel 固定链接（0 元免域名，永久 https://*.ts.net）" > /dev/tty
+    echo "  [3] Cloudflare Named Tunnel 固定隧道（0 元隧道，需 1 个自有 Cloudflare 域名）" > /dev/tty
+    echo "  [4] 自托管固定中继（Sealos 约 ¥5~15/月 或 Docker 一键容器）" > /dev/tty
+    echo "  [5] 仅本机使用（不安装额外隧道组件，后续可随时用 agent-control remote 切换）" > /dev/tty
+    printf "请输入选项 [1-5]（默认 1）: " > /dev/tty
     IFS= read -r choice < /dev/tty || choice=""
     case "${choice:-1}" in
       1) REMOTE_MODE="cloudflare" ;;
-      2) REMOTE_MODE="relay" ;;
-      3) REMOTE_MODE="local" ;;
+      2) REMOTE_MODE="tailscale" ;;
+      3) REMOTE_MODE="named" ;;
+      4) REMOTE_MODE="relay" ;;
+      5) REMOTE_MODE="local" ;;
       *) REMOTE_MODE="cloudflare" ;;
     esac
   else
@@ -282,6 +286,7 @@ Agent Control 命令行工具
   remote <子命令>      切换或查看远程隧道方案:
                          status              查看当前隧道与中继状态
                          cloudflare [--start] 准备 Cloudflare 免费隧道（可选立即启动）
+                         tailscale [--start]  准备并可选开启 Tailscale Funnel 固定链接
                          relay [--url U --code C] 绑定自托管固定中继
                          unpair              解除固定中继配对
                          stop                停止当前 Cloudflare 临时隧道
@@ -342,6 +347,14 @@ handle_remote() {
         echo ""
       else
         echo "已准备 Cloudflare 免费隧道，可在界面「手机远程」点击一键开启，或执行: agent-control remote cloudflare --start"
+      fi
+      ;;
+    tailscale)
+      if [[ "\${1:-}" == "--start" ]]; then
+        api_req POST "/api/tunnel/tailscale/start" "{}"
+        echo ""
+      else
+        echo "可在界面「手机远程 -> 固定链接隧道」一键开启 Tailscale Funnel，或执行: agent-control remote tailscale --start"
       fi
       ;;
     relay)
@@ -445,8 +458,8 @@ esac
 EOF
 chmod +x "$CLI_PATH"
 
-if [[ "$REMOTE_MODE" == "cloudflare" ]]; then
-  echo "[3/5] 正在配置 Cloudflare 免费临时隧道 (cloudflared)..."
+if [[ "$REMOTE_MODE" == "cloudflare" || "$REMOTE_MODE" == "named" ]]; then
+  echo "[3/5] 正在配置 cloudflared ($REMOTE_MODE 模式)..."
   install_cloudflared_if_missing || true
 else
   echo "[3/5] 已选择远程模式: $REMOTE_MODE（跳过自动安装 cloudflared，后续随时可用 agent-control remote cloudflare 补装）"
@@ -522,6 +535,7 @@ echo "  常用命令:"
 echo "    agent-control open                打开控制台"
 echo "    agent-control remote status       查看当前隧道/中继状态"
 echo "    agent-control remote cloudflare   切换/准备 Cloudflare 免费隧道"
+echo "    agent-control remote tailscale    开启 Tailscale Funnel 固定链接"
 echo "    agent-control remote relay        切换/绑定自托管固定中继"
 echo "    agent-control update              一键升级到最新版"
 echo "    agent-control uninstall           卸载"

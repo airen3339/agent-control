@@ -26,6 +26,7 @@ import {
   isHttpsForwardedRequest,
   isLoopbackSocketAddress,
   QuickTunnelManager,
+  TailscaleFunnelManager,
   TunnelAuthGateway,
 } from "./quick-tunnel.mjs";
 import { RemoteBridge } from "./remote-bridge.mjs";
@@ -192,6 +193,12 @@ export async function createAgentControlServer({
     authGateway: tunnelAuth,
     disabled: disableTunnel,
     onStateChange: (snapshot) => broadcastSse("tunnel_status", snapshot),
+  });
+
+  const tailscaleFunnel = new TailscaleFunnelManager({
+    env,
+    authGateway: tunnelAuth,
+    disabled: disableTunnel,
   });
 
   const heartbeat = setInterval(() => {
@@ -888,7 +895,42 @@ export async function createAgentControlServer({
         }
         await readJsonBody(request);
         const status = await quickTunnel.rotate();
-        sendJson(response, 200, { ...status, canManage: true }, { requestId });
+        const fixedTunnel = await tailscaleFunnel.status({ includeQr: true, includeSecrets: true });
+        sendJson(response, 200, { ...status, fixedTunnel, canManage: true }, { requestId });
+        return;
+      }
+
+      if (pathname === "/api/tunnel/fixed-pair" && request.method === "POST") {
+        if (!canManageRemote) {
+          sendJson(response, 403, { error: { code: "forbidden", message: "仅限在本机控制台配置固定链接配对" } }, { requestId });
+          return;
+        }
+        const body = await readJsonBody(request);
+        await tunnelAuth.setFixedPublicUrl(body.publicUrl || "");
+        const fixedTunnel = await tailscaleFunnel.status({ includeQr: true, includeSecrets: true });
+        sendJson(response, 200, { ...fixedTunnel, canManage: true }, { requestId });
+        return;
+      }
+
+      if (pathname === "/api/tunnel/tailscale/start" && request.method === "POST") {
+        if (!canManageRemote) {
+          sendJson(response, 403, { error: { code: "forbidden", message: "仅限在本机控制台开启或管理隧道" } }, { requestId });
+          return;
+        }
+        await readJsonBody(request);
+        const fixedTunnel = await tailscaleFunnel.start();
+        sendJson(response, 200, { ...fixedTunnel, canManage: true }, { requestId });
+        return;
+      }
+
+      if (pathname === "/api/tunnel/tailscale/stop" && request.method === "POST") {
+        if (!canManageRemote) {
+          sendJson(response, 403, { error: { code: "forbidden", message: "仅限在本机控制台开启或管理隧道" } }, { requestId });
+          return;
+        }
+        await readJsonBody(request);
+        const fixedTunnel = await tailscaleFunnel.stop();
+        sendJson(response, 200, { ...fixedTunnel, canManage: true }, { requestId });
         return;
       }
 
@@ -898,14 +940,20 @@ export async function createAgentControlServer({
           status.pairUrl = "";
           delete status.qrDataUrl;
         }
-        const tunnel = await quickTunnel.status({
-          includeQr: canManageRemote,
-          includeSecrets: canManageRemote,
-        });
+        const [tunnel, fixedTunnel] = await Promise.all([
+          quickTunnel.status({
+            includeQr: canManageRemote,
+            includeSecrets: canManageRemote,
+          }),
+          canManageRemote
+            ? tailscaleFunnel.status({ includeQr: true, includeSecrets: true })
+            : Promise.resolve({ fixedPublicUrl: "", pairUrl: "" }),
+        ]);
         sendJson(response, 200, {
           ...status,
           canManage: canManageRemote,
           tunnel: { ...tunnel, canManage: canManageRemote },
+          fixedTunnel: { ...fixedTunnel, canManage: canManageRemote },
         }, { requestId });
         return;
       }
@@ -986,6 +1034,7 @@ export async function createAgentControlServer({
       });
       const localOrigin = `http://${host}:${actualPort}`;
       quickTunnel.setTargetOrigin(localOrigin);
+      tailscaleFunnel.setTargetOrigin(localOrigin);
       bridge.setTargetOrigin(localOrigin);
       bridge.connect();
       leaseHandle = await acquireRuntimeLease({

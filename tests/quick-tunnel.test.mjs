@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import { resolve } from "node:path";
@@ -10,7 +10,10 @@ import {
   extractQuickTunnelUrl,
   isDirectLoopbackRequest,
   isTunnelConnectionRegistered,
+  normalizeFixedPublicUrl,
+  parseTailscaleStatusJson,
   resolveCloudflaredExecutable,
+  resolveTailscaleExecutable,
 } from "../src/quick-tunnel.mjs";
 import { createAgentControlServer } from "../src/server.mjs";
 
@@ -397,4 +400,145 @@ test("RemoteBridge remains authorized via internal bridge token even when X-Forw
   assert.equal(proxiedProviders.status, 200);
   const proxiedJson = await proxiedProviders.json();
   assert.equal(proxiedJson.providers.length, 4);
+});
+
+test("Fixed URL pairing (Cloudflare Named Tunnel) and Tailscale Funnel endpoints enforce gateway security", async (t) => {
+  assert.equal(normalizeFixedPublicUrl("https://agent.example.com/"), "https://agent.example.com");
+  assert.throws(() => normalizeFixedPublicUrl("ftp://agent.example.com"), /https/);
+  assert.throws(() => normalizeFixedPublicUrl("https://user:pass@agent.example.com"), /账号密码/);
+  assert.deepEqual(
+    parseTailscaleStatusJson(JSON.stringify({ BackendState: "Running", Self: { DNSName: "demo-mac.tailnet.ts.net.", Online: true } })),
+    { backendState: "Running", dnsName: "demo-mac.tailnet.ts.net", online: true },
+  );
+  assert.equal(resolveTailscaleExecutable({ TAILSCALE_BIN: "/nonexistent/tailscale-missing" }), null);
+
+  const root = await mkdtemp(resolve(os.tmpdir(), "ac-fixed-tunnel-"));
+  const dataDir = resolve(root, "data");
+  await mkdir(dataDir, { recursive: true });
+  const mockTailscale = resolve(root, "mock-tailscale.mjs");
+  const stateFile = resolve(root, "ts-funnel.txt");
+  await writeFile(mockTailscale, `#!/usr/bin/env node
+import { existsSync, rmSync, writeFileSync } from "node:fs";
+const args = process.argv.slice(2);
+const statePath = ${JSON.stringify(stateFile)};
+if (args[0] === "status" && args[1] === "--json") {
+  process.stdout.write(JSON.stringify({ BackendState: "Running", Self: { DNSName: "demo-mac.tailnet.ts.net.", Online: true } }));
+  process.exit(0);
+}
+if (args[0] === "funnel" && args[1] === "status") {
+  process.stdout.write(existsSync(statePath) ? '{"AllowFunnel":{"demo-mac.tailnet.ts.net:443":true}}' : "{}");
+  process.exit(0);
+}
+if (args[0] === "funnel" && args[1] === "--bg") {
+  writeFileSync(statePath, args[2] || "43310", "utf8");
+  process.exit(0);
+}
+if (args[0] === "funnel" && args.includes("off")) {
+  rmSync(statePath, { force: true });
+  process.exit(0);
+}
+`, "utf8");
+  await chmod(mockTailscale, 0o755);
+
+  const srv = await createAgentControlServer({
+    port: 0,
+    disableRelay: true,
+    dataDir,
+    env: {
+      ...process.env,
+      CODEX_BIN: MOCK_CODEX_BIN,
+      CLAUDE_BIN: MOCK_CLAUDE_BIN,
+      AGY_BIN: MOCK_AGY_BIN,
+      CLOUDFLARED_BIN: "/nonexistent/cloudflared",
+      TAILSCALE_BIN: mockTailscale,
+      AGENT_CONTROL_CODEX_HOMES: JSON.stringify([{ id: "default", label: "Codex 默认", home: resolve(root, "codex") }]),
+      AGENT_CONTROL_CLAUDE_CONFIG_DIRS: JSON.stringify([{ id: "default", label: "Claude 默认", home: resolve(root, "claude") }]),
+      AGENT_CONTROL_AGY_APP_DATA_DIRS: JSON.stringify([{ id: "cli", label: "Antigravity CLI", home: resolve(root, "agy"), profileType: "cli" }]),
+    },
+  });
+  await srv.start();
+  t.after(async () => {
+    await srv.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  // 1. Named Tunnel fixed URL pairing generates QR & pairUrl gated by local loopback.
+  const remoteUnauthAttempt = await rawHttpGet(srv.url, "/api/tunnel/fixed-pair", {
+    Host: "agent.example.com",
+    "X-Forwarded-For": "203.0.113.10",
+  });
+  assert.equal(remoteUnauthAttempt.status, 401);
+
+  const fixedRes = await fetch(`${srv.url}/api/tunnel/fixed-pair`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ publicUrl: "https://agent.example.com/" }),
+  });
+  assert.equal(fixedRes.status, 200);
+  const fixedJson = await fixedRes.json();
+  assert.equal(fixedJson.fixedPublicUrl, "https://agent.example.com");
+  assert.match(fixedJson.pairUrl, /^https:\/\/agent\.example\.com\/connect\/[A-Za-z0-9_-]+$/);
+  assert.match(fixedJson.qrDataUrl, /^data:image\/png;base64,/);
+
+  // Remote requests are blocked without cookie, allowed after redeeming /connect/<token>.
+  const blockedNamed = await rawHttpGet(srv.url, "/api/providers", {
+    Host: "agent.example.com",
+    "X-Forwarded-Proto": "https",
+    "X-Forwarded-For": "203.0.113.10",
+  });
+  assert.equal(blockedNamed.status, 401);
+
+  const connectPath = new URL(fixedJson.pairUrl).pathname;
+  const pairedNamed = await rawHttpGet(srv.url, connectPath, {
+    Host: "agent.example.com",
+    "X-Forwarded-Proto": "https",
+    "X-Forwarded-For": "203.0.113.10",
+  });
+  assert.equal(pairedNamed.status, 302);
+  const cookieHeader = String(pairedNamed.headers["set-cookie"]?.[0] || "").split(";")[0];
+  assert.match(cookieHeader, /^ac_tunnel_/);
+
+  const authedNamed = await rawHttpGet(srv.url, "/api/providers", {
+    Host: "agent.example.com",
+    "X-Forwarded-Proto": "https",
+    "X-Forwarded-For": "203.0.113.10",
+    Cookie: cookieHeader,
+  });
+  assert.equal(authedNamed.status, 200);
+
+  // Paired remote browsers still cannot mutate fixed-tunnel or Tailscale settings (403).
+  const remoteManageForbidden = await fetch(`${srv.url}/api/tunnel/fixed-pair`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Host: "agent.example.com",
+      "X-Forwarded-For": "203.0.113.10",
+      Cookie: cookieHeader,
+    },
+    body: JSON.stringify({ publicUrl: "https://attacker.example.com" }),
+  });
+  assert.equal(remoteManageForbidden.status, 403);
+
+  // 2. Tailscale Funnel start & stop updates fixedPublicUrl and revokes old session cookie.
+  const tsStartRes = await fetch(`${srv.url}/api/tunnel/tailscale/start`, { method: "POST", body: "{}" });
+  assert.equal(tsStartRes.status, 200);
+  const tsStart = await tsStartRes.json();
+  assert.equal(tsStart.installed, true);
+  assert.equal(tsStart.active, true);
+  assert.equal(tsStart.fixedPublicUrl, "https://demo-mac.tailnet.ts.net");
+  assert.match(tsStart.pairUrl, /^https:\/\/demo-mac\.tailnet\.ts\.net\/connect\//);
+
+  const tsStopRes = await fetch(`${srv.url}/api/tunnel/tailscale/stop`, { method: "POST", body: "{}" });
+  assert.equal(tsStopRes.status, 200);
+  const tsStop = await tsStopRes.json();
+  assert.equal(tsStop.active, false);
+  assert.equal(tsStop.fixedPublicUrl, "");
+
+  const revokedNamed = await rawHttpGet(srv.url, "/api/providers", {
+    Host: "demo-mac.tailnet.ts.net",
+    "X-Forwarded-Proto": "https",
+    "X-Forwarded-For": "203.0.113.10",
+    Cookie: cookieHeader,
+  });
+  assert.equal(revokedNamed.status, 401);
 });

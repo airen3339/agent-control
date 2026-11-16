@@ -1,0 +1,147 @@
+# Sealos 一键部署单文件清单（使用公开预构建镜像 ghcr.io/guuguo/agent-control-relay:latest）
+# 用法：将下方 __RELAY_HOST__ 与 __RELAY_KEY__ 替换为你的实际域名和随机密钥（openssl rand -hex 32），
+#       然后在 Sealos 终端执行：kubectl apply -f deploy/sealos/one-click.yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: agent-control-relay-data
+  labels:
+    app: agent-control-relay
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 128Mi
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: agent-control-relay-secret
+type: Opaque
+stringData:
+  relay-key: "__RELAY_KEY__"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agent-control-relay-config
+data:
+  public-url: "https://__RELAY_HOST__"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-control-relay
+  labels:
+    app: agent-control-relay
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: agent-control-relay
+  template:
+    metadata:
+      labels:
+        app: agent-control-relay
+    spec:
+      containers:
+        - name: relay
+          image: ghcr.io/guuguo/agent-control-relay:latest
+          imagePullPolicy: Always
+          env:
+            - name: PORT
+              value: "8080"
+            - name: RELAY_PUBLIC_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: agent-control-relay-config
+                  key: public-url
+            - name: RELAY_DATA_PATH
+              value: /data/state.json
+            - name: RELAY_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: agent-control-relay-secret
+                  key: relay-key
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 192Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      securityContext:
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: agent-control-relay-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-control-relay
+  labels:
+    app: agent-control-relay
+spec:
+  type: ClusterIP
+  selector:
+    app: agent-control-relay
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: agent-control-relay
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+spec:
+  rules:
+    - host: __RELAY_HOST__
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: agent-control-relay
+                port:
+                  number: 80
+  tls:
+    - hosts:
+        - __RELAY_HOST__
+      secretName: agent-control-relay-tls

@@ -1,5 +1,5 @@
 ﻿param(
-  [ValidateSet("auto", "cloudflare", "relay", "local")]
+  [ValidateSet("auto", "cloudflare", "tailscale", "named", "relay", "local")]
   [string]$Remote = "auto",
   [string]$RelayUrl = "",
   [string]$InviteCode = "",
@@ -15,18 +15,22 @@ $RepoUrl = if ($env:AGENT_CONTROL_REPO_URL) { $env:AGENT_CONTROL_REPO_URL } else
 $RepoBranch = if ($env:AGENT_CONTROL_BRANCH) { $env:AGENT_CONTROL_BRANCH } else { "main" }
 
 if ($Remote -eq "auto") {
-  if ($env:AGENT_CONTROL_REMOTE -in @("cloudflare", "relay", "local")) {
+  if ($env:AGENT_CONTROL_REMOTE -in @("cloudflare", "tailscale", "named", "relay", "local")) {
     $Remote = $env:AGENT_CONTROL_REMOTE
   } elseif ([Environment]::UserInteractive) {
     Write-Host ""
     Write-Host "请选择手机远程接入方案（安装后可随时在页面切换）：" -ForegroundColor Cyan
-    Write-Host "  [1] Cloudflare 免费临时隧道（推荐，自动检测安装 cloudflared；免服务器，每次地址随机）"
-    Write-Host "  [2] 自托管固定中继（连接自己的 relay 服务器；域名固定、自动重连，需自备服务器）"
-    Write-Host "  [3] 仅本机使用（不安装额外隧道组件，后续随时可切换）"
-    $choice = Read-Host "请输入选项 [1/2/3]（默认 1）"
+    Write-Host "  [1] Cloudflare 免费临时隧道（默认推荐，自动检测安装 cloudflared；免服务器，每次地址随机）"
+    Write-Host "  [2] Tailscale Funnel 固定链接（0 元免域名，永久 https://*.ts.net）"
+    Write-Host "  [3] Cloudflare Named Tunnel 固定隧道（0 元隧道，需 1 个自有 Cloudflare 域名）"
+    Write-Host "  [4] 自托管固定中继（Sealos 约 ¥5~15/月 或 Docker 一键容器）"
+    Write-Host "  [5] 仅本机使用（不安装额外隧道组件，后续随时可切换）"
+    $choice = Read-Host "请输入选项 [1-5]（默认 1）"
     switch ($choice) {
-      "2" { $Remote = "relay" }
-      "3" { $Remote = "local" }
+      "2" { $Remote = "tailscale" }
+      "3" { $Remote = "named" }
+      "4" { $Remote = "relay" }
+      "5" { $Remote = "local" }
       default { $Remote = "cloudflare" }
     }
   } else {
@@ -85,8 +89,8 @@ try {
   & npm install --omit=dev --no-audit --no-fund
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-  if ($Remote -eq "cloudflare") {
-    Write-Host "[4/5] 正在检查 Cloudflare 免费临时隧道 (cloudflared)..." -ForegroundColor Cyan
+  if ($Remote -eq "cloudflare" -or $Remote -eq "named") {
+    Write-Host "[4/5] 正在检查 cloudflared ($Remote 模式)..." -ForegroundColor Cyan
     if (-not (Get-Command cloudflared -ErrorAction SilentlyContinue)) {
       if (Get-Command winget -ErrorAction SilentlyContinue) {
         try {

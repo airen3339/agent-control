@@ -3313,6 +3313,40 @@ button, input, select, textarea {
   gap: 10px;
 }
 
+.fixed-tunnel-block {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: rgba(15, 21, 30, 0.55);
+}
+
+.tunnel-guide-list {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.tunnel-guide-list code {
+  font-size: 11px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+}
+
+.fixed-pair-form {
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+}
+
 /* --- Agent Realtime Telemetry & Quota HUD --- */
 .agent-telemetry-bar {
   flex-shrink: 0;

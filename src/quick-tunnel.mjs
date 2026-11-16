@@ -6,10 +6,12 @@ import QRCode from "qrcode";
 import { defaultDataDir } from "./instance-identity.mjs";
 import {
   cloudflaredInstallHint,
+  execFileCrossPlatform,
   killProcessTreeCrossPlatform,
   providerCandidatePaths,
   resolveExecutableCrossPlatform,
   spawnCrossPlatform,
+  tailscaleInstallHint,
 } from "./platform.mjs";
 
 export const PROXY_SIGNAL_HEADERS = Object.freeze([
@@ -147,6 +149,52 @@ export function resolveCloudflaredExecutable(env = process.env, {
   });
 }
 
+export function resolveTailscaleExecutable(env = process.env, {
+  platform = process.platform,
+  homeDir = os.homedir(),
+} = {}) {
+  return resolveExecutableCrossPlatform({
+    envVar: "TAILSCALE_BIN",
+    candidates: providerCandidatePaths("tailscale", { env, homeDir, platform }),
+    binaryName: "tailscale",
+    env,
+    platform,
+    strictExplicit: true,
+    preferPath: true,
+  });
+}
+
+export function normalizeFixedPublicUrl(rawUrl) {
+  const input = String(rawUrl || "").trim();
+  if (!input) return "";
+  let parsed;
+  try {
+    parsed = new URL(input);
+  } catch {
+    throw Object.assign(new Error("固定链接格式无效，请输入完整的 https:// 域名地址"), { status: 400 });
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+    throw Object.assign(new Error("固定链接仅支持 https:// 或 http:// 协议"), { status: 400 });
+  }
+  if (parsed.username || parsed.password) {
+    throw Object.assign(new Error("固定链接不能包含内嵌账号密码"), { status: 400 });
+  }
+  return `${parsed.origin}${parsed.pathname.replace(/\/+$/, "")}`;
+}
+
+export function parseTailscaleStatusJson(raw) {
+  if (!raw) return { backendState: "", dnsName: "", online: false };
+  try {
+    const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+    const backendState = String(parsed?.BackendState || "").trim();
+    const dnsName = String(parsed?.Self?.DNSName || "").trim().replace(/\.+$/, "");
+    const online = Boolean(parsed?.Self?.Online ?? (backendState === "Running"));
+    return { backendState, dnsName, online };
+  } catch {
+    return { backendState: "", dnsName: "", online: false };
+  }
+}
+
 export function extractQuickTunnelUrl(text) {
   const input = String(text || "");
   if (!input) return "";
@@ -184,16 +232,21 @@ export class TunnelAuthGateway {
     return this.#state?.browserToken || "";
   }
 
+  get fixedPublicUrl() {
+    return this.#state?.fixedPublicUrl || "";
+  }
+
   cookieName() {
     return `ac_tunnel_${this.#instanceId.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
   }
 
-  #newState({ sessionHashes = [] } = {}) {
+  #newState({ sessionHashes = [], fixedPublicUrl = "" } = {}) {
     const browserToken = randomBytes(24).toString("base64url");
     return {
       browserToken,
       browserTokenHash: hashToken(browserToken),
       sessionHashes: [...sessionHashes].slice(-MAX_TUNNEL_SESSIONS),
+      fixedPublicUrl: String(fixedPublicUrl || ""),
       updatedAt: Date.now(),
     };
   }
@@ -222,10 +275,19 @@ export class TunnelAuthGateway {
         const sessionHashes = Array.isArray(parsed.sessionHashes)
           ? parsed.sessionHashes.filter((item) => typeof item === "string" && item.length > 0).slice(-MAX_TUNNEL_SESSIONS)
           : [];
+        let fixedPublicUrl = "";
+        if (typeof parsed?.fixedPublicUrl === "string" && parsed.fixedPublicUrl.trim()) {
+          try {
+            fixedPublicUrl = normalizeFixedPublicUrl(parsed.fixedPublicUrl);
+          } catch {
+            fixedPublicUrl = "";
+          }
+        }
         this.#state = {
           browserToken: parsed.browserToken,
           browserTokenHash: parsed.browserTokenHash,
           sessionHashes,
+          fixedPublicUrl,
           updatedAt: Number(parsed.updatedAt) || Date.now(),
         };
         return this.#state;
@@ -274,9 +336,39 @@ export class TunnelAuthGateway {
   async rotateToken({ revokeSessions = true } = {}) {
     if (!this.#state) await this.load();
     const preserved = revokeSessions ? [] : (this.#state?.sessionHashes || []);
-    this.#state = this.#newState({ sessionHashes: preserved });
+    const fixedPublicUrl = this.#state?.fixedPublicUrl || "";
+    this.#state = this.#newState({ sessionHashes: preserved, fixedPublicUrl });
     await this.#persist(this.#state);
     return this.#state.browserToken;
+  }
+
+  async setFixedPublicUrl(rawUrl) {
+    if (!this.#state) await this.load();
+    const normalized = normalizeFixedPublicUrl(rawUrl);
+    this.#state = {
+      ...this.#state,
+      fixedPublicUrl: normalized,
+      updatedAt: Date.now(),
+    };
+    await this.#persist(this.#state);
+    return normalized;
+  }
+
+  async fixedPairStatus({ includeQr = false, includeSecrets = false } = {}) {
+    if (!this.#state) await this.load();
+    const fixedPublicUrl = this.#state?.fixedPublicUrl || "";
+    const rawToken = includeSecrets ? (this.#state?.browserToken || "") : "";
+    const pairUrl = (includeSecrets && fixedPublicUrl && rawToken)
+      ? `${fixedPublicUrl}/connect/${encodeURIComponent(rawToken)}`
+      : "";
+    const out = {
+      fixedPublicUrl,
+      pairUrl,
+    };
+    if (includeQr && includeSecrets && pairUrl) {
+      out.qrDataUrl = await QRCode.toDataURL(pairUrl, { margin: 1, width: 260 });
+    }
+    return out;
   }
 
   unauthorizedHtml(detail = "") {
@@ -649,5 +741,185 @@ export class QuickTunnelManager {
     this.#publicUrl = "";
     this.#startedAt = null;
     this.#state = this.#disabled ? "disabled" : "stopped";
+  }
+}
+
+export class TailscaleFunnelManager {
+  #targetOrigin;
+  #env;
+  #platform;
+  #authGateway;
+  #disabled;
+  #lastError = "";
+
+  constructor({
+    targetOrigin = "",
+    env = process.env,
+    platform = process.platform,
+    authGateway = null,
+    disabled = false,
+  } = {}) {
+    this.#targetOrigin = String(targetOrigin || "").trim().replace(/\/+$/, "");
+    this.#env = env;
+    this.#platform = platform;
+    this.#authGateway = authGateway;
+    this.#disabled = Boolean(disabled);
+  }
+
+  setTargetOrigin(origin) {
+    this.#targetOrigin = String(origin || "").trim().replace(/\/+$/, "");
+  }
+
+  #targetPort() {
+    try {
+      const parsed = new URL(this.#targetOrigin);
+      return parsed.port || (parsed.protocol === "https:" ? "443" : "80");
+    } catch {
+      return "43310";
+    }
+  }
+
+  async status({ includeQr = false, includeSecrets = false } = {}) {
+    const fixed = this.#authGateway
+      ? await this.#authGateway.fixedPairStatus({ includeQr, includeSecrets })
+      : { fixedPublicUrl: "", pairUrl: "" };
+    const binPath = resolveTailscaleExecutable(this.#env, { platform: this.#platform });
+    const installHint = tailscaleInstallHint(this.#platform);
+    if (!binPath) {
+      return {
+        disabled: this.#disabled,
+        installed: false,
+        active: false,
+        backendState: "",
+        dnsName: "",
+        publicUrl: "",
+        installHint,
+        lastError: this.#lastError,
+        ...fixed,
+      };
+    }
+
+    let parsedStatus = { backendState: "", dnsName: "", online: false };
+    try {
+      const { stdout } = await execFileCrossPlatform(
+        binPath,
+        ["status", "--json"],
+        { timeout: 2500, env: this.#env },
+        { platform: this.#platform },
+      );
+      parsedStatus = parseTailscaleStatusJson(stdout);
+    } catch {}
+
+    const dnsUrl = parsedStatus.dnsName ? `https://${parsedStatus.dnsName}` : "";
+    let active = false;
+    try {
+      const { stdout } = await execFileCrossPlatform(
+        binPath,
+        ["funnel", "status", "--json"],
+        { timeout: 2500, env: this.#env },
+        { platform: this.#platform },
+      );
+      const rawJson = String(stdout || "").trim();
+      if (rawJson && rawJson !== "{}") {
+        const port = this.#targetPort();
+        active = rawJson.includes(`:${port}`) || rawJson.includes(this.#targetOrigin) || (Boolean(dnsUrl) && rawJson.includes(parsedStatus.dnsName));
+      }
+    } catch {
+      try {
+        const { stdout } = await execFileCrossPlatform(
+          binPath,
+          ["funnel", "status"],
+          { timeout: 2500, env: this.#env },
+          { platform: this.#platform },
+        );
+        const txt = String(stdout || "");
+        active = txt.includes(`:${this.#targetPort()}`) || (Boolean(parsedStatus.dnsName) && txt.includes(parsedStatus.dnsName));
+      } catch {}
+    }
+
+    return {
+      disabled: this.#disabled,
+      installed: true,
+      active,
+      backendState: parsedStatus.backendState,
+      dnsName: parsedStatus.dnsName,
+      publicUrl: dnsUrl,
+      installHint,
+      lastError: this.#lastError,
+      ...fixed,
+    };
+  }
+
+  async start() {
+    if (this.#disabled) {
+      throw Object.assign(new Error("当前实例禁用了隧道管理"), { status: 400 });
+    }
+    const binPath = resolveTailscaleExecutable(this.#env, { platform: this.#platform });
+    if (!binPath) {
+      const hint = tailscaleInstallHint(this.#platform);
+      this.#lastError = `未检测到 tailscale，请先安装：${hint}`;
+      throw Object.assign(new Error(this.#lastError), { status: 400, code: "tailscale_missing" });
+    }
+
+    const before = await this.status({ includeQr: false, includeSecrets: false });
+    if (!before.dnsName) {
+      this.#lastError = "Tailscale 尚未登录或未开启 MagicDNS，请先在 Tailscale 客户端完成登录并启用 HTTPS / MagicDNS。";
+      throw Object.assign(new Error(this.#lastError), { status: 400, code: "tailscale_not_ready" });
+    }
+
+    const port = this.#targetPort();
+    try {
+      await execFileCrossPlatform(
+        binPath,
+        ["funnel", "--bg", port],
+        { timeout: 10_000, env: this.#env },
+        { platform: this.#platform },
+      );
+    } catch (err) {
+      const detail = String(err?.stderr || err?.stdout || err?.message || "").trim();
+      const authLink = detail.match(/https:\/\/login\.tailscale\.com\/[^\s]+/i)?.[0] || "";
+      this.#lastError = authLink
+        ? `请在浏览器打开以启用 Funnel 权限，然后重试：${authLink}`
+        : `开启 Tailscale Funnel 失败：${detail || "请检查 Tailscale 是否已启用 Funnel 权限"}`;
+      throw Object.assign(new Error(this.#lastError), { status: 502, code: "tailscale_funnel_failed" });
+    }
+
+    this.#lastError = "";
+    const publicUrl = `https://${before.dnsName}`;
+    if (this.#authGateway) {
+      await this.#authGateway.setFixedPublicUrl(publicUrl);
+    }
+    return this.status({ includeQr: true, includeSecrets: true });
+  }
+
+  async stop() {
+    const binPath = resolveTailscaleExecutable(this.#env, { platform: this.#platform });
+    if (binPath) {
+      try {
+        await execFileCrossPlatform(
+          binPath,
+          ["funnel", "--https=443", "off"],
+          { timeout: 5000, env: this.#env },
+          { platform: this.#platform },
+        );
+      } catch {
+        try {
+          await execFileCrossPlatform(
+            binPath,
+            ["funnel", "reset"],
+            { timeout: 5000, env: this.#env },
+            { platform: this.#platform },
+          );
+        } catch {}
+      }
+    }
+    if (this.#authGateway) {
+      if (/\.ts\.net$/i.test(this.#authGateway.fixedPublicUrl)) {
+        await this.#authGateway.setFixedPublicUrl("");
+      }
+      await this.#authGateway.rotateToken({ revokeSessions: true });
+    }
+    this.#lastError = "";
+    return this.status({ includeQr: false, includeSecrets: true });
   }
 }

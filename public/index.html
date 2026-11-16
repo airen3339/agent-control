@@ -325,8 +325,70 @@
           </div>
         </section>
 
+        <details id="fixedTunnelSection" class="relay-advanced-details">
+          <summary class="relay-advanced-summary"><span class="btn-icon-glyph" data-icon="external-link" data-icon-size="13" aria-hidden="true"></span> 固定链接隧道（Tailscale Funnel / Cloudflare Named Tunnel）</summary>
+          <div class="relay-advanced-body">
+            <div class="fixed-tunnel-block">
+              <div class="tunnel-card-head">
+                <strong class="tunnel-card-title">Tailscale Funnel（0 元免域名 · 永久 *.ts.net）</strong>
+                <span id="tsFunnelStateText" class="tunnel-state-pill">检测中</span>
+              </div>
+              <p class="tunnel-card-desc">免费个人版即可获得永久固定 HTTPS 域名（手机免装 App 直连），通过本机鉴权网关保护访问。</p>
+              <div id="tsManageWrap" class="tunnel-manage-wrap">
+                <div class="tunnel-actions-row">
+                  <button type="button" id="startTsFunnelBtn" class="btn-secondary btn-sm">一键开启 Tailscale Funnel</button>
+                  <button type="button" id="stopTsFunnelBtn" class="btn-danger btn-sm" hidden>关闭 Funnel</button>
+                </div>
+                <div id="tsMissingBox" class="tunnel-install-box" hidden>
+                  <span>未检测到 <code>tailscale</code>，请先安装并登录账号：</span>
+                  <div class="tunnel-install-cmd">
+                    <code id="tsInstallCmdCode">brew install --cask tailscale</code>
+                    <button type="button" id="copyTsCmdBtn" class="btn-secondary btn-xs">复制命令</button>
+                  </div>
+                </div>
+                <div id="tsErrorText" class="composer-status is-error" role="alert" hidden></div>
+                <ol class="tunnel-guide-list">
+                  <li>安装并登录 Tailscale，在后台 DNS 设置开启 <strong>MagicDNS</strong> 与 <strong>HTTPS Certificates</strong>，并在 ACL 启用 Funnel。</li>
+                  <li>点击上方「一键开启 Tailscale Funnel」（或终端执行 <code>tailscale funnel --bg 43310</code>），会自动识别并生成扫码配对链接。</li>
+                </ol>
+              </div>
+            </div>
+
+            <div class="fixed-tunnel-block">
+              <div class="tunnel-card-head">
+                <strong class="tunnel-card-title">Cloudflare Named Tunnel（0 元隧道 · 自备域名）</strong>
+              </div>
+              <p class="tunnel-card-desc">隧道本身完全免费且不限时长；适合已有 Cloudflare 托管域名的用户作为系统服务 24 小时常驻。</p>
+              <ol class="tunnel-guide-list">
+                <li>登录 Cloudflare Zero Trust → <strong>Networks → Tunnels</strong> 创建隧道，Public Hostname 指向 <code>http://127.0.0.1:43310</code>。</li>
+                <li>本机终端运行 <code>cloudflared service install &lt;你的Token&gt;</code>，再在下方填入你的固定域名生成配对码。</li>
+              </ol>
+            </div>
+
+            <form id="fixedPairForm" class="remote-form fixed-pair-form">
+              <label class="field">
+                <span>固定公网地址（Tailscale / Named Tunnel / 自定义反代）</span>
+                <input id="fixedPublicUrlInput" type="url" placeholder="https://your-host.ts.net 或 https://agent.example.com" />
+              </label>
+              <div class="remote-form-actions">
+                <button type="submit" id="saveFixedPairBtn" class="btn-primary btn-sm">生成固定链接配对二维码</button>
+                <button type="button" id="rotateFixedPairBtn" class="btn-secondary btn-sm" hidden>重置二维码</button>
+                <button type="button" id="clearFixedPairBtn" class="btn-secondary btn-sm" hidden>清除</button>
+              </div>
+            </form>
+            <div id="fixedQrWrap" class="remote-qr-wrap" hidden>
+              <img id="fixedQrImg" alt="固定链接隧道扫码二维码" />
+              <div class="remote-link-row">
+                <input id="fixedPairUrlInput" type="text" readonly />
+                <button type="button" id="copyFixedUrlBtn" class="btn-secondary btn-sm">复制</button>
+              </div>
+              <p class="remote-hint">此固定域名同样受本地鉴权网关保护：首次扫码后可收藏到手机桌面，重置二维码会立即踢掉旧手机。</p>
+            </div>
+          </div>
+        </details>
+
         <details id="relayAdvancedSection" class="relay-advanced-details">
-          <summary class="relay-advanced-summary"><span class="btn-icon-glyph" data-icon="radio" data-icon-size="13" aria-hidden="true"></span> 自托管固定中继（Sealos / 云服务器长期固定域名）</summary>
+          <summary class="relay-advanced-summary"><span class="btn-icon-glyph" data-icon="radio" data-icon-size="13" aria-hidden="true"></span> 自托管固定中继（Sealos 约 ¥5~15/月 · Docker 一键容器）</summary>
           <div class="relay-advanced-body">
             <div class="remote-status-box">
               <span>当前状态：</span>

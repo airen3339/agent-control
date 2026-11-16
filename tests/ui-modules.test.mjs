@@ -3824,10 +3824,14 @@ test("macOS native desktop wrapper files include WKWebView, local networking, an
   }
   const installSh = await readFile(fileURLToPath(new URL("../install.sh", import.meta.url)), "utf8");
   assert.match(installSh, /--remote/);
-  assert.match(installSh, /cloudflare\|relay\|local/);
+  assert.match(installSh, /cloudflare\|tailscale\|named\|relay\|local/);
   assert.match(installSh, /handle_remote\(\)/);
   const installPs1 = await readFile(fileURLToPath(new URL("../install.ps1", import.meta.url)), "utf8");
-  assert.match(installPs1, /"cloudflare", "relay", "local"/);
+  assert.match(installPs1, /"cloudflare", "tailscale", "named", "relay", "local"/);
+  const indexHtmlForRemote = await readFile(fileURLToPath(new URL("../public/index.html", import.meta.url)), "utf8");
+  assert.match(indexHtmlForRemote, /id="fixedTunnelSection"/);
+  assert.match(indexHtmlForRemote, /id="startTsFunnelBtn"/);
+  assert.match(indexHtmlForRemote, /id="fixedPublicUrlInput"/);
 });
 
 test("renderTurnHtml renders Claude <task-notification>, <cross-session-message>, and <bash-input> as clean cards without raw XML or XSS", async () => {

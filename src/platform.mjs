@@ -447,6 +447,13 @@ export function providerCandidatePaths(tool, {
         p.join(home, "scoop", "shims", "cloudflared.exe"),
       ];
     }
+    if (tool === "tailscale") {
+      return [
+        p.join(programFiles, "Tailscale", "tailscale.exe"),
+        p.join(programFilesX86, "Tailscale", "tailscale.exe"),
+        p.join(localAppData, "Microsoft", "WinGet", "Links", "tailscale.exe"),
+      ];
+    }
     if (tool === "edge-tts") {
       const out = [];
       for (const ver of pyVersions) {
@@ -498,6 +505,15 @@ export function providerCandidatePaths(tool, {
         "/usr/bin/cloudflared",
       ];
     }
+    if (tool === "tailscale") {
+      return [
+        "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+        "/opt/homebrew/bin/tailscale",
+        "/usr/local/bin/tailscale",
+        p.join(home, ".local", "bin", "tailscale"),
+        "/usr/bin/tailscale",
+      ];
+    }
     if (tool === "edge-tts") {
       return [
         "/opt/homebrew/bin/edge-tts",
@@ -546,6 +562,20 @@ export function cloudflaredInstallHint(platform = process.platform) {
     return "curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o ~/.local/bin/cloudflared && chmod +x ~/.local/bin/cloudflared";
   }
   return "brew install cloudflared";
+}
+
+/**
+ * Platform-specific install hint shown when tailscale is not found.
+ */
+export function tailscaleInstallHint(platform = process.platform) {
+  const norm = normalizePlatform(platform);
+  if (norm === "win32") {
+    return "winget install --id Tailscale.Tailscale";
+  }
+  if (norm === "linux") {
+    return "curl -fsSL https://tailscale.com/install.sh | sh";
+  }
+  return "brew install --cask tailscale";
 }
 
 /**
