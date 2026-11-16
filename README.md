@@ -3,14 +3,23 @@
 > 在电脑和手机上统一看 **Codex**、**Claude Code**、**Antigravity** 和 **Grok** 的任务进度、随时续跑对话与批复权限 —— 一条命令装好即用，不改动原工具的任何配置与记录。
 > 如果这个工具帮到了你，欢迎点击右上角 **Star ⭐️** 支持一下。
 
-![Agent Control 桌面端主控制台](docs/tutorial/01-desktop-console.png)
+<p align="center">
+  <img src="docs/tutorial/01-desktop-console.png" alt="Agent Control 桌面端主控制台" width="680" />
+</p>
 
 <details>
 <summary>查看更多实拍效果（手机远程总控与对话界面）</summary>
 
-![手机端项目总控](docs/tutorial/05-mobile-paired-console.png)
-
-![手机端远程对话详情](docs/tutorial/06-mobile-session-chat.png)
+<table>
+  <tr>
+    <td align="center"><strong>手机端项目总控</strong></td>
+    <td align="center"><strong>手机端远程对话详情</strong></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/tutorial/05-mobile-paired-console.png" alt="手机端项目总控" width="260" /></td>
+    <td align="center"><img src="docs/tutorial/06-mobile-session-chat.png" alt="手机端远程对话详情" width="260" /></td>
+  </tr>
+</table>
 
 </details>
 
