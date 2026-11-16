@@ -1,12 +1,12 @@
 # Agent Control
 
-> 在电脑和手机上统一查看、续跑与调度本机 **Codex**、**Claude Code**、**Antigravity** 与 **Grok** 会话的自托管控制台 —— 一行命令安装，自动配置后台常驻服务与 macOS 原生桌面端，还支持一键免费隧道手机扫码远程操控。
+> 在电脑和手机上统一看 **Codex**、**Claude Code**、**Antigravity** 和 **Grok** 的任务进度、随时续跑对话与批复权限 —— 一条命令装好即用，不改动原工具的任何配置与记录。
 > 如果这个工具帮到了你，欢迎点击右上角 **Star ⭐️** 支持一下。
 
 ![Agent Control 桌面端主控制台](docs/tutorial/01-desktop-console.png)
 
 <details>
-<summary>查看更多实拍效果（手机远程总控与对话详情）</summary>
+<summary>查看更多实拍效果（手机远程总控与对话界面）</summary>
 
 ![手机端项目总控](docs/tutorial/05-mobile-paired-console.png)
 
@@ -16,60 +16,43 @@
 
 ---
 
-## ⚡ 一行命令接入
+## ⚡ 一行命令装好直接用
 
-环境要求：Node.js `>= 22.0.0` 与 `git`。
+只需要本机有 **Node.js 22+** 和 **Git**（如未安装，脚本会自动提示安装命令）。
 
-**macOS / Linux**（打开「终端」粘贴运行）：
+**macOS / Linux**（打开「终端」粘贴回车）：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/guuguo/agent-control/main/install.sh | bash
 ```
 
-**Windows**（打开 **PowerShell** 粘贴运行）：
+**Windows**（打开 **PowerShell** 粘贴回车）：
 
 ```powershell
 irm https://raw.githubusercontent.com/guuguo/agent-control/main/install.ps1 | iex
 ```
 
-安装完成后会：
-1. 引导选择远程接入方式（**Cloudflare 免费临时隧道** / **自托管固定中继** / **仅本机使用**，安装后可随时切换，无需重装）；
-2. 自动配置开机自启后台服务（macOS LaunchAgent / Linux systemd / Windows 计划任务，默认监听 `http://127.0.0.1:43310`）；
-3. **macOS 额外自动构建并安装 `/Applications/Agent Control.app`**（原生 `WKWebView` 桌面壳，点击 Dock 图标即可打开，关闭窗口自动后台常驻）；
-4. 安装命令行工具 `agent-control`（支持 `open`、`status`、`remote`、`restart`、`logs`、`update`、`uninstall`）。
+---
 
-### 远程方案选择与利弊对比（支持随时切换）
+## ✨ 装完怎么用？
 
-| 方案 | 优点 | 缺点 / 前提 | 适用人群 |
+1. **打开即用**：安装完成后会自动打开控制台（macOS 会在「应用程序」生成 **Agent Control** 独立桌面应用，也可浏览器打开 `http://127.0.0.1:43310`）。
+2. **电脑端统一管理**：左侧按项目查看所有正在跑或历史中的智能体任务，点进去即可续发消息、切换模型、设置自动推进或批量归档。
+3. **手机扫码远程看**：点页面右上角 **「手机远程」** 生成二维码，手机扫一下就能随时看输出、发指令、批权限。👉 [查看手机扫码图文教程](教程.md)
+
+### 手机远程方案怎么选？（装完随时可换）
+
+安装时会让你选一种远程方式，之后在弹窗里或终端随时都能切换，不用重装：
+
+| 方案 | 适合谁 | 优点 | 缺点 |
 | --- | --- | --- | --- |
-| **Cloudflare 免费临时隧道**（默认推荐） | 免服务器、免注册账号、免买域名；安装时自动配好 `cloudflared`，点一下 5 秒生成二维码；关闭即焚更安全 | 每次重新开启隧道域名随机变化（`*.trycloudflare.com`），需重新扫码；依赖本机能访问 Cloudflare 边缘节点 | 临时外出查看进度、零服务器门槛体验 |
-| **自托管固定中继**（Own Relay） | 拥有固定公网域名，扫码配对一次可长期添加到手机桌面；电脑重启后自动重连；国内云主机直连稳定 | 需要自备一台有公网 HTTPS 域名的服务器/容器部署 `relay/relay-server.mjs` 并签发邀请码 | 每天高频手机遥控、团队或长期个人固定入口 |
-| **仅本机使用** | 零外网暴露与额外组件，安装最快 | 仅限当前电脑使用；需要手机远程时可随时切回上面任意一种 | 只在桌面端统一管理本地多智能体 |
-
-> **如何非交互指定或安装后切换**：
-> - 安装时直接指定：`curl -fsSL https://raw.githubusercontent.com/guuguo/agent-control/main/install.sh | bash -s -- --remote cloudflare`（或 `--remote relay --relay-url https://你的中继 --invite 邀请码` / `--remote local`）。
-> - 安装后随时切换：**方法 1** 在界面右上角「手机远程」弹窗内直接点选开启/绑定；**方法 2** 在终端执行 `agent-control remote cloudflare` 或 `agent-control remote relay --url ... --code ...`。
+| **Cloudflare 免费隧道**（默认推荐） | 大多数人、想直接试用的用户 | 不用买服务器、不用注册账号、5 秒出二维码、关闭即失效 | 每次重新开启都会换一个新地址，下次出门需要重新扫码 |
+| **自托管固定中继** | 有自己的云服务器、每天高频用 | 固定域名，扫码一次可收藏到手机桌面长期用，重启自动连回 | 需要自己先准备一台带 HTTPS 域名的服务器 |
+| **仅本机使用** | 只在电脑上用 | 不安装任何隧道工具，最快最干净 | 不能在手机上远程访问（以后需要随时再开） |
 
 ---
 
-## ✨ 核心特性
-
-- **多智能体统一接入（只读无侵入）**：
-  - 自动发现本机多账号/多实例配置（Codex / Claude Code / Antigravity / Grok），所有会话通过 `<provider>:<profileId>:<rawId>` 复合 ID 精确路由，不篡改原客户端数据库。
-  - 重命名、归档、项目置顶、`/goal` 状态均持久化到独立数据目录（macOS: `~/Library/Application Support/Agent Control`）。
-- **PC 原生体验 + 移动端卡片总控**：
-  - macOS 提供独立原生 `.app` 包装（[AgentControl.swift](desktop/macos/AgentControl.swift)），支持自动拉起后台服务、文件选择/预览、原生确认框与麦克风权限。
-  - 手机端自动切换紧凑总控与抽屉式布局，支持 SSE 实时流式推送、`/goal` 自动续跑、任务排队与运行中插话、工具权限审批与语音输入播报。
-- **零门槛手机远程控制（免服务器 · 5 秒扫码）**：
-  - 内置 **一键免费隧道（Cloudflare Quick Tunnel + 本地鉴权网关）**，点一下即可生成 256-bit 一次性配对二维码，未扫码访问一律拦截。
-  - 同时也保留自托管固定中继（`relay/relay-server.mjs` + Docker Compose / Sealos）。
-  - 👉 [查看手机扫码远程控制完整图文教程](教程.md)
-
----
-
-## 🗑️ 一行命令卸载
-
-随时可停止服务并移除安装文件（默认保留你的本地元信息与日志；如需彻底清理可加 `--purge` / `-Purge`）：
+## 🗑️ 不想用了？一行命令卸载
 
 **macOS / Linux：**
 
@@ -85,36 +68,38 @@ irm https://raw.githubusercontent.com/guuguo/agent-control/main/uninstall.ps1 | 
 
 ---
 
-## 进阶用法与开发
-
 <details>
-<summary>展开查看常用命令、中继部署、环境变量与零消耗测试说明</summary>
+<summary>进阶用法、命令行切换、自托管部署与开发者说明（按需展开）</summary>
 
-### 常用命令（macOS / Linux）
-
-```bash
-agent-control open       # 打开桌面应用或控制台
-agent-control status     # 查看服务状态
-agent-control logs       # 查看最近日志
-agent-control restart    # 重启后台服务
-agent-control update     # 从 GitHub 拉取更新并重装服务/桌面端
-agent-control desktop    # 单独重新编译安装 macOS 桌面端
-```
-
-### 手动源码运行与跨平台服务脚本
+### 1. 命令行快捷管理（macOS / Linux）
 
 ```bash
-git clone https://github.com/guuguo/agent-control.git
-cd agent-control
-npm install
-npm start                # 前台启动，默认 http://127.0.0.1:43310
-npm run service -- install
-npm run desktop:install  # macOS 构建安装 /Applications/Agent Control.app
+agent-control open                # 打开桌面应用或控制台
+agent-control status              # 查看服务状态
+agent-control logs                # 查看服务日志
+agent-control restart             # 重启后台服务
+agent-control remote status       # 查看当前隧道/中继状态
+agent-control remote cloudflare   # 切换或补装 Cloudflare 免费隧道
+agent-control remote relay        # 切换并绑定自托管固定中继
+agent-control update              # 拉取最新版本并更新桌面端
 ```
 
-### 自托管固定中继（可选）
+### 2. 非交互指定安装参数
 
-1. 启动中继（Docker Compose + Cloudflare Tunnel 或 Sealos 清单 `deploy/sealos/relay.yaml`）：
+```bash
+# 直接选 Cloudflare 免费隧道
+curl -fsSL https://raw.githubusercontent.com/guuguo/agent-control/main/install.sh | bash -s -- --remote cloudflare
+
+# 直接连接自己的中继服务器
+curl -fsSL https://raw.githubusercontent.com/guuguo/agent-control/main/install.sh | bash -s -- --remote relay --relay-url https://relay.example.com --invite 你的邀请码
+
+# 仅本机使用
+curl -fsSL https://raw.githubusercontent.com/guuguo/agent-control/main/install.sh | bash -s -- --remote local
+```
+
+### 3. 自托管固定中继部署
+
+1. 在服务器上启动中继（Docker Compose 或 Sealos 清单 `deploy/sealos/relay.yaml`）：
 
 ```bash
 cp .env.example .env
@@ -122,34 +107,29 @@ cp .env.example .env
 docker compose up -d relay
 ```
 
-2. 签发一次性配对邀请码并在控制台右上角「手机远程」配对：
+2. 签发一次性配对邀请码并在控制台「手机远程」或 `agent-control remote relay` 中绑定：
 
 ```bash
 RELAY_PUBLIC_URL=https://relay.example.com RELAY_KEY=你的密钥 npm run invite -- "My Mac"
 ```
 
-### 常用环境变量
+### 4. 常用环境变量与数据目录
 
-| 变量 | 默认值 | 说明 |
-| --- | --- | --- |
-| `PORT` | `43310` | 本地控制 HTTP/SSE 监听端口 |
-| `HOST` | `127.0.0.1` | 建议保持仅回环地址 |
-| `AGENT_CONTROL_DATA_DIR` | macOS: `~/Library/Application Support/Agent Control`<br>Windows: `%APPDATA%\Agent Control`<br>Linux: `$XDG_DATA_HOME/agent-control` | 实例标识、元信息、Goal 状态、日志目录 |
-| `AGENT_CONTROL_DISABLE_RELAY` | `0` | 设为 `1` 时禁用远程中继桥 |
-| `AGENT_CONTROL_TITLE_RULES_FILE` | `<dataDir>/title-rules.json` | 可选：自定义项目标题前缀映射规则 |
-| `AGENT_CONTROL_CODEX_HOMES` | 自动发现 | 自定义 Codex 实例列表 |
-| `AGENT_CONTROL_CLAUDE_CONFIG_DIRS` | 自动发现 | 自定义 Claude Code 配置目录列表 |
-| `AGENT_CONTROL_AGY_APP_DATA_DIRS` | 自动发现 | 自定义 Antigravity `app-data-dir` 列表 |
-| `CODEX_BIN` / `CLAUDE_BIN` / `AGY_BIN` | 自动探测 | 显式覆盖各 CLI 可执行文件路径 |
+- 所有会话通过 `<provider>:<profileId>:<rawId>` 复合 ID 只读索引，重命名/归档/置顶持久化于独立数据目录（macOS：`~/Library/Application Support/Agent Control`；Windows：`%APPDATA%\Agent Control`；Linux：`~/.local/share/agent-control`），不会修改原工具数据库。
+- 常用环境变量：`PORT`（默认 `43310`）、`HOST`（默认 `127.0.0.1`）、`AGENT_CONTROL_DATA_DIR`、`AGENT_CONTROL_DISABLE_RELAY`、`AGENT_CONTROL_TITLE_RULES_FILE`、`AGENT_CONTROL_CODEX_HOMES`、`AGENT_CONTROL_CLAUDE_CONFIG_DIRS`、`AGENT_CONTROL_AGY_APP_DATA_DIRS`、`CODEX_BIN`、`CLAUDE_BIN`、`AGY_BIN`。
 
-### 校验与零消耗测试
+### 5. 本地开发与零消耗测试
 
 ```bash
+git clone https://github.com/guuguo/agent-control.git
+cd agent-control
+npm install
 npm run check
 npm test
+npm run desktop:install   # macOS 构建安装 /Applications/Agent Control.app
 ```
 
-全部自动测试均使用 `tests/helpers/mock-*-cli.mjs` 模拟智能体进程，**不消耗任何真实模型 Token**。
+全部自动测试均使用 Mock CLI 模拟智能体进程，**不消耗任何真实模型 Token**。
 
 </details>
 
