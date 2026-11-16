@@ -1,0 +1,680 @@
+import { execFile } from "node:child_process";
+import os from "node:os";
+import { promisify } from "node:util";
+import { formatCompositeThreadId } from "../composite-id.mjs";
+import { codexExecutionPolicy } from "../permissions.mjs";
+import { cleanPreviewText, displayThreadTitle } from "../thread-display.mjs";
+import { visibleControlThreads } from "../thread-access.mjs";
+import { readCodexAccount } from "./codex-account.mjs";
+import {
+  appServerExecutable,
+  CodexAppServerClient,
+  createServerRequestResponse,
+  normalizeServerRequest,
+} from "./codex-app-server-client.mjs";
+import { loadCodexThreadHistory } from "./codex-thread-history.mjs";
+import { readRolloutActivitySnapshot } from "./codex-thread-activity.mjs";
+import {
+  readCodexAutomationNames,
+  readCodexQueuedCountsByThread,
+  readCodexQueuedItems,
+  readIndexedThreads,
+} from "./codex-thread-index.mjs";
+import { CodexThreadWriterRegistry } from "./codex-thread-writer.mjs";
+import { discoverCodexProfiles, readCodexPublicEndpoint } from "./profile-discovery.mjs";
+
+const execFileAsync = promisify(execFile);
+
+function toTimestampSeconds(value, fallback = 0) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value > 1e12 ? Math.floor(value / 1000) : Math.floor(value);
+  }
+  const parsed = Date.parse(String(value || ""));
+  return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : fallback;
+}
+
+function buildCodexInputItems(text, images = []) {
+  const items = [];
+  for (const image of images || []) {
+    if (typeof image === "string" && image) {
+      items.push({ type: "image", url: image });
+    } else if (image?.dataUrl) {
+      items.push({ type: "image", url: image.dataUrl });
+    } else if (image?.url) {
+      items.push({ type: "image", url: image.url });
+    } else if (image?.path) {
+      items.push({ type: "localImage", path: image.path });
+    }
+  }
+  if (String(text || "").trim() || !items.length) {
+    items.push({ type: "text", text: String(text || "") });
+  }
+  return items;
+}
+
+export class CodexProvider {
+  id = "codex";
+  label = "Codex";
+  #env;
+  #profiles = [];
+  #clients = new Map();
+  #writers = new CodexThreadWriterRegistry();
+  #modelsCache = new Map();
+  #modelsRefreshInFlight = new Map();
+  #rateLimitsByProfile = new Map();
+  #resumedThreads = new Set();
+  #execFileImpl;
+  #onEvent;
+  #onServerRequest;
+
+  constructor({
+    env = process.env,
+    execFileImpl = execFileAsync,
+    onEvent = () => {},
+    onServerRequest = () => {},
+  } = {}) {
+    this.#env = env;
+    this.#execFileImpl = execFileImpl;
+    this.#onEvent = onEvent;
+    this.#onServerRequest = onServerRequest;
+  }
+
+  async refreshProfiles() {
+    const discovered = await discoverCodexProfiles({ env: this.#env });
+    this.#profiles = await Promise.all(discovered.map(async (profile) => {
+      const [account, endpoint] = await Promise.all([
+        readCodexAccount(profile.home),
+        readCodexPublicEndpoint(profile.home),
+      ]);
+      return {
+        ...profile,
+        account,
+        modelProvider: endpoint.modelProvider || "",
+        endpointHost: endpoint.endpointHost || "",
+        endpointLabel: endpoint.endpointLabel || "",
+        installed: Boolean(profile.exists || account.signedIn),
+      };
+    }));
+    return this.#profiles;
+  }
+
+  async listProfiles() {
+    if (!this.#profiles.length) await this.refreshProfiles();
+    return this.#profiles.map((profile) => ({
+      ...profile,
+      online: Boolean(this.#clients.get(profile.id)?.isConnected),
+    }));
+  }
+
+  async #getProfile(profileId) {
+    const profiles = await this.listProfiles();
+    const found = profiles.find((item) => item.id === profileId);
+    if (!found) {
+      throw Object.assign(new Error(`未知的 Codex 实例配置：${profileId}`), { status: 404 });
+    }
+    return found;
+  }
+
+  async #getClient(profileId) {
+    const existing = this.#clients.get(profileId);
+    if (existing) return existing;
+    const profile = await this.#getProfile(profileId);
+    const client = new CodexAppServerClient({
+      codexHome: profile.home,
+      env: this.#env,
+    });
+    client.on("notification", (msg) => this.#handleNotification(profileId, msg));
+    client.on("serverRequest", (msg) => this.#handleServerRequest(profileId, msg));
+    client.on("exit", (info) => {
+      this.#resumedThreads.forEach((key) => {
+        if (key.startsWith(`${profileId}:`)) this.#resumedThreads.delete(key);
+      });
+      this.#onEvent({
+        type: "provider_exit",
+        provider: "codex",
+        profileId,
+        info,
+      });
+    });
+    this.#clients.set(profileId, client);
+    return client;
+  }
+
+  #handleNotification(profileId, msg) {
+    const method = msg?.method || "";
+    const params = msg?.params || {};
+    const rawId = params.threadId || params.thread?.id || "";
+    const compositeId = rawId ? formatCompositeThreadId("codex", profileId, rawId) : "";
+
+    if (method === "turn/started" && rawId) {
+      this.#writers.markActive(rawId, { turnId: params.turn?.id || "" });
+    } else if (method === "turn/completed" && rawId) {
+      this.#writers.clearActive(rawId, params.turn?.id || "");
+    } else if (method === "account/rateLimits/updated") {
+      const rl = params?.rateLimits || params?.rate_limits || params;
+      const byLimit = params?.rateLimitsByLimitId || params?.rate_limits_by_limit_id || null;
+      if (rl && typeof rl === "object") {
+        this.#rateLimitsByProfile.set(profileId, {
+          rateLimits: rl,
+          rateLimitsByLimitId: byLimit && typeof byLimit === "object" ? byLimit : null,
+          updatedAt: Math.floor(Date.now() / 1000),
+          source: "rpc-push",
+        });
+      }
+    }
+
+    this.#onEvent({
+      type: "codex_notification",
+      provider: "codex",
+      profileId,
+      rawId,
+      threadId: compositeId,
+      method,
+      params,
+    });
+  }
+
+  #handleServerRequest(profileId, msg) {
+    const normalized = normalizeServerRequest(msg);
+    const rawId = normalized.threadId || "";
+    this.#onServerRequest({
+      ...normalized,
+      provider: "codex",
+      profileId,
+      rawThreadId: rawId,
+      threadId: rawId ? formatCompositeThreadId("codex", profileId, rawId) : "",
+    });
+  }
+
+  respondServerRequest(profileId, rawRequest, input = {}) {
+    const client = this.#clients.get(profileId);
+    if (!client) {
+      throw Object.assign(new Error("Codex 实例客户端未连接"), { status: 409 });
+    }
+    if (input?.rejectError) {
+      client.respondError(rawRequest.rawId, -32000, input.rejectError);
+      return { ok: true };
+    }
+    const payload = input?.payload ?? createServerRequestResponse(rawRequest, input);
+    client.respond(rawRequest.rawId, payload);
+    return { ok: true };
+  }
+
+  #refreshModelsForProfile(profileId = "default") {
+    let pending = this.#modelsRefreshInFlight.get(profileId);
+    if (!pending) {
+      pending = (async () => {
+        const client = await this.#getClient(profileId);
+        const result = await client.request("model/list", { limit: 100 });
+        const items = (result?.data || result?.models || []).map((model) => ({
+          id: model.id || model.model,
+          model: model.model || model.id,
+          displayName: model.displayName || model.model || model.id,
+          description: model.description || "",
+          provider: "codex",
+          profileId,
+          isDefault: Boolean(model.isDefault),
+          defaultReasoningEffort: model.defaultReasoningEffort || "medium",
+          supportedReasoningEfforts: (model.supportedReasoningEfforts || []).map((item) =>
+            typeof item === "string" ? item : item.reasoningEffort,
+          ).filter(Boolean),
+        }));
+        this.#modelsCache.set(profileId, { at: Date.now(), items });
+        return items;
+      })().finally(() => {
+        this.#modelsRefreshInFlight.delete(profileId);
+      });
+      this.#modelsRefreshInFlight.set(profileId, pending);
+    }
+    return pending;
+  }
+
+  async readRateLimits(profileId = "default", { refresh = false, timeoutMs = 3_000 } = {}) {
+    if (!refresh) {
+      const cached = this.#rateLimitsByProfile.get(profileId);
+      if (cached) return cached;
+    }
+
+    const existingClient = this.#clients.get(profileId);
+    const shouldQuery = Boolean(existingClient?.isConnected || refresh);
+    if (!shouldQuery) return null;
+
+    const profile = await this.#getProfile(profileId).catch(() => null);
+    if (!profile?.installed) return null;
+    if (profile.endpointHost && !profile.modelProvider?.includes("openai") && profile.modelProvider) {
+      // Custom third-party endpoints usually do not expose ChatGPT rate limits.
+      if (!existingClient?.isConnected && !refresh) return null;
+    }
+
+    let timer;
+    try {
+      const client = existingClient || await this.#getClient(profileId);
+      const res = await Promise.race([
+        client.request("account/rateLimits/read", {}),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error("Codex rateLimits read timeout")), timeoutMs);
+          timer.unref?.();
+        }),
+      ]);
+      const rateLimits = res?.rateLimits || res?.rate_limits || null;
+      const byLimit = res?.rateLimitsByLimitId || res?.rate_limits_by_limit_id || null;
+      if (!rateLimits || typeof rateLimits !== "object") return null;
+      const entry = {
+        rateLimits,
+        rateLimitsByLimitId: byLimit && typeof byLimit === "object" ? byLimit : null,
+        updatedAt: Math.floor(Date.now() / 1000),
+        source: "rpc",
+      };
+      this.#rateLimitsByProfile.set(profileId, entry);
+      return entry;
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async listModels(profileId = "default") {
+    const cached = this.#modelsCache.get(profileId);
+    if (cached) {
+      if (Date.now() - cached.at >= 60_000) {
+        void this.#refreshModelsForProfile(profileId).catch(() => {});
+      }
+      return cached.items;
+    }
+    return this.#refreshModelsForProfile(profileId);
+  }
+
+  async probeProfile(profileId = "default", { timeoutMs = 8_000 } = {}) {
+    await this.#getProfile(profileId);
+    const started = Date.now();
+    this.#modelsCache.delete(profileId);
+    this.#modelsRefreshInFlight.delete(profileId);
+    let timer;
+    try {
+      const items = await Promise.race([
+        this.listModels(profileId),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`Codex 测通超时 (${timeoutMs}ms)`)), timeoutMs);
+        }),
+      ]);
+      return {
+        ok: true,
+        latencyMs: Math.max(1, Date.now() - started),
+        modelCount: Array.isArray(items) ? items.length : 0,
+      };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  #resolveCleanThreadPreview(rawThread) {
+    const candidates = [
+      rawThread.preview,
+      rawThread.firstUserText,
+      rawThread.firstUserMessage,
+      rawThread.lastUserText,
+      rawThread.name,
+      rawThread.title,
+    ];
+    for (const candidate of candidates) {
+      const clean = cleanPreviewText(candidate, 120);
+      if (clean) return clean;
+    }
+    const hintSources = [...candidates, rawThread.rawPreviewHint];
+    const hadImageHint = hintSources.some((c) => /<image\b|Image attachment:\s*true/i.test(String(c || "")))
+      || (Array.isArray(rawThread.turns) && rawThread.turns.some((turn) => (
+        Array.isArray(turn?.items) && turn.items.some((item) => (
+          item?.type === "userMessage"
+          && Array.isArray(item.content)
+          && item.content.some((part) => part?.type === "localImage" || part?.type === "image")
+        ))
+      )));
+    return hadImageHint ? "[图片]" : "";
+  }
+
+  #normalizeThread(profile, rawThread) {
+    const rawId = String(rawThread.id || "");
+    const preview = this.#resolveCleanThreadPreview(rawThread);
+    const thread = {
+      id: formatCompositeThreadId("codex", profile.id, rawId),
+      rawId,
+      provider: "codex",
+      providerLabel: "Codex",
+      profileId: profile.id,
+      profileLabel: profile.label,
+      name: rawThread.name || "",
+      upstreamTitle: rawThread.name || rawThread.title || "",
+      firstUserText: rawThread.firstUserText || rawThread.firstUserMessage || "",
+      lastUserText: rawThread.lastUserText || "",
+      hasFollowUpTurns: Boolean(rawThread.hasFollowUpTurns),
+      title: displayThreadTitle({ ...rawThread, preview }),
+      preview,
+      cwd: rawThread.cwd || os.homedir(),
+      createdAt: toTimestampSeconds(rawThread.createdAt),
+      updatedAt: toTimestampSeconds(rawThread.updatedAt),
+      model: rawThread.model || "",
+      reasoningEffort: rawThread.reasoningEffort || "",
+      source: rawThread.source || null,
+      threadSource: rawThread.threadSource || "",
+      rolloutPath: rawThread.rolloutPath || rawThread.path || "",
+      archived: Boolean(rawThread.archived),
+      live: Boolean(this.#writers.getActive(rawId) || rawThread.live),
+      gitInfo: rawThread.gitInfo || null,
+      turns: rawThread.turns,
+      largeHistory: Boolean(rawThread.largeHistory),
+      nativeQueuedCount: Number(rawThread.nativeQueuedCount) || 0,
+    };
+    return thread;
+  }
+
+  async listThreads(profileId, { limit = 300, includeArchived = false } = {}) {
+    const profile = await this.#getProfile(profileId);
+    let rows = readIndexedThreads(profile.home, { limit, includeArchived });
+    if (!rows) {
+      const client = await this.#getClient(profileId);
+      const res = await client.request("thread/list", { limit, archived: includeArchived });
+      rows = res?.data || res?.threads || [];
+    }
+    const nativeQueuedCounts = readCodexQueuedCountsByThread(profile.home);
+    return visibleControlThreads(rows.map((row) => this.#normalizeThread(profile, {
+      ...row,
+      nativeQueuedCount: nativeQueuedCounts.get(row.id) || row.nativeQueuedCount || 0,
+    })));
+  }
+
+  async listNativeQueuedTurns(profileId, rawId) {
+    const profile = await this.#getProfile(profileId);
+    const compositeId = formatCompositeThreadId("codex", profile.id, rawId);
+    return readCodexQueuedItems(profile.home, rawId).map((item) => ({ ...item, threadId: compositeId }));
+  }
+
+  async resolveThreadContext(profileId, rawId) {
+    const profile = await this.#getProfile(profileId);
+    const indexed = (readIndexedThreads(profile.home, { limit: 600, includeArchived: true }) || [])
+      .find((item) => item.id === rawId) || null;
+    if (!indexed) return null;
+    return {
+      cwd: indexed.cwd || os.homedir(),
+      rolloutPath: indexed.rolloutPath || indexed.path || "",
+    };
+  }
+
+  async readThread(profileId, rawId, { cursor = null, detail = "auto", limit = 12 } = {}) {
+    const profile = await this.#getProfile(profileId);
+    const indexed = (readIndexedThreads(profile.home, { limit: 600, includeArchived: true }) || [])
+      .find((item) => item.id === rawId) || null;
+    const automationNames = readCodexAutomationNames(profile.home);
+    const client = await this.#getClient(profileId);
+    const { thread, nextCursor } = await loadCodexThreadHistory({
+      client,
+      rawId,
+      indexedThread: indexed,
+      cursor,
+      detail,
+      limit,
+      automationNames,
+    });
+    const compositeId = formatCompositeThreadId("codex", profile.id, rawId);
+    const nativeQueuedTurns = readCodexQueuedItems(profile.home, rawId)
+      .map((item) => ({ ...item, threadId: compositeId }));
+    const normalized = this.#normalizeThread(profile, {
+      ...indexed,
+      ...thread,
+      cwd: indexed?.cwd || thread.cwd || "",
+      firstUserText: thread.firstUserText || indexed?.firstUserText || "",
+      lastUserText: thread.lastUserText || indexed?.lastUserText || "",
+      hasFollowUpTurns: Boolean(thread.hasFollowUpTurns || indexed?.hasFollowUpTurns),
+      nativeQueuedCount: nativeQueuedTurns.length,
+    });
+    const activitySnapshot = await readRolloutActivitySnapshot(normalized.rolloutPath);
+    const queueSig = nativeQueuedTurns.map((item) => item.id).join(",");
+    const baseCursor = String(activitySnapshot.cursor || "");
+    const combinedCursor = queueSig ? `${baseCursor}|q=${queueSig}` : baseCursor;
+    return {
+      thread: normalized,
+      nextCursor,
+      activity: activitySnapshot.activity,
+      activityCursor: combinedCursor,
+      nativeQueuedTurns,
+    };
+  }
+
+  async getActivity(profileId, rawId, { cursor = null, rolloutPath = "" } = {}) {
+    const profile = await this.#getProfile(profileId);
+    const compositeId = formatCompositeThreadId("codex", profile.id, rawId);
+    let resolvedPath = rolloutPath;
+    if (!resolvedPath) {
+      const indexed = (readIndexedThreads(profile.home, { limit: 400, includeArchived: true }) || [])
+        .find((item) => item.id === rawId);
+      resolvedPath = indexed?.rolloutPath || "";
+    }
+    const baseInCursor = typeof cursor === "string" ? cursor.replace(/\|q=.*$/, "") : cursor;
+    const snapshot = await readRolloutActivitySnapshot(resolvedPath, baseInCursor);
+    const nativeQueuedTurns = readCodexQueuedItems(profile.home, rawId)
+      .map((item) => ({ ...item, threadId: compositeId }));
+    const queueSig = nativeQueuedTurns.map((item) => item.id).join(",");
+    const baseCursor = String(snapshot.cursor || "");
+    const combinedCursor = queueSig ? `${baseCursor}|q=${queueSig}` : baseCursor;
+    const live = Boolean(this.#writers.getActive(rawId) || snapshot.activity?.status === "running");
+    const changed = Boolean(snapshot.changed || (cursor && cursor !== combinedCursor));
+    return {
+      ...snapshot,
+      cursor: combinedCursor,
+      changed,
+      live,
+      nativeQueuedTurns,
+    };
+  }
+
+  async #ensureThreadResumed(client, profileId, rawId, cwd = "") {
+    const key = `${profileId}:${rawId}`;
+    if (this.#resumedThreads.has(key)) return;
+    await client.request("thread/resume", {
+      threadId: rawId,
+      ...(cwd ? { cwd } : {}),
+    });
+    this.#resumedThreads.add(key);
+  }
+
+  async startThread({
+    profileId = "default",
+    cwd = os.homedir(),
+    text = "",
+    images = [],
+    model = "",
+    effort = "",
+    permissionMode = "workspace",
+  } = {}) {
+    const profile = await this.#getProfile(profileId);
+    const client = await this.#getClient(profileId);
+    const policy = codexExecutionPolicy(permissionMode);
+    const created = await client.request("thread/start", {
+      cwd,
+      ...(model ? { model } : {}),
+      approvalPolicy: policy.approvalPolicy,
+      sandbox: policy.sandbox,
+    });
+    const rawThread = created?.thread || created;
+    const rawId = String(rawThread.id || "");
+    this.#resumedThreads.add(`${profileId}:${rawId}`);
+    const thread = this.#normalizeThread(profile, rawThread);
+
+    if (String(text || "").trim() || (images && images.length)) {
+      const sent = await this.sendTurn({
+        profileId,
+        rawId,
+        cwd,
+        text,
+        images,
+        model,
+        effort,
+        permissionMode,
+      });
+      return {
+        thread: sent.thread || thread,
+        turn: sent.turn,
+      };
+    }
+    return { thread, turn: null };
+  }
+
+  async sendTurn({
+    profileId = "default",
+    rawId,
+    cwd = "",
+    text = "",
+    images = [],
+    model = "",
+    effort = "",
+    permissionMode = "workspace",
+    steer = false,
+    expectedTurnId = "",
+    writerConflictPolicy = "reject",
+  } = {}) {
+    const profile = await this.#getProfile(profileId);
+    const client = await this.#getClient(profileId);
+    const policy = codexExecutionPolicy(permissionMode);
+    const input = buildCodexInputItems(text, images);
+
+    const indexed = (readIndexedThreads(profile.home, { limit: 400, includeArchived: true }) || [])
+      .find((item) => item.id === rawId);
+    const inMemoryActive = this.#writers.getActive(rawId);
+
+    let activeTurnId = expectedTurnId || inMemoryActive?.turnId || "";
+    if (steer && !activeTurnId && inMemoryActive) {
+      const read = await this.readThread(profileId, rawId, { detail: "auto" }).catch(() => null);
+      const runningTurn = (read?.thread?.turns || []).find((item) => item.status === "inProgress");
+      activeTurnId = runningTurn?.id || "";
+    }
+
+    if (steer && activeTurnId) {
+      const steerRes = await client.request("turn/steer", {
+        threadId: rawId,
+        expectedTurnId: activeTurnId,
+        input,
+      });
+      return {
+        turn: steerRes?.turn || { id: steerRes?.turnId || activeTurnId, status: "inProgress" },
+        steered: true,
+      };
+    }
+
+    if (steer && inMemoryActive) {
+      await this.interrupt({ profileId, rawId }).catch(() => {});
+      this.#writers.clearActive(rawId, inMemoryActive.turnId || "");
+    } else if (!steer && inMemoryActive && writerConflictPolicy === "reject") {
+      throw Object.assign(new Error("当前会话正在运行，请等待完成、插入引导或加入排队"), {
+        status: 409,
+        code: "thread_busy",
+      });
+    }
+
+    if (writerConflictPolicy === "reject") {
+      const conflict = await this.#writers.detectExternalWriter({
+        rolloutPath: indexed?.rolloutPath || "",
+      });
+      if (conflict.busy) {
+        throw Object.assign(new Error(conflict.message || "会话正被本地客户端占用"), {
+          status: 409,
+          code: conflict.source || "writer_conflict",
+        });
+      }
+    }
+
+    await this.#ensureThreadResumed(client, profileId, rawId, cwd || indexed?.cwd || "");
+    const result = await client.request("turn/start", {
+      threadId: rawId,
+      input,
+      ...(model ? { model } : {}),
+      ...(effort ? { effort } : {}),
+      approvalPolicy: policy.approvalPolicy,
+      sandbox: policy.sandbox,
+    });
+    const turn = result?.turn || result || { id: `turn-${Date.now()}`, status: "inProgress" };
+    this.#writers.markActive(rawId, { turnId: turn.id || "" });
+    return {
+      turn,
+      thread: this.#normalizeThread(profile, indexed || { id: rawId, cwd }),
+    };
+  }
+
+  async queueNative({ profileId = "default", rawId, text = "" } = {}) {
+    const profile = await this.#getProfile(profileId);
+    const env = { ...this.#env, CODEX_HOME: profile.home };
+    const { stdout = "" } = await this.#execFileImpl(
+      appServerExecutable(env),
+      ["queue", "--thread", rawId, "--message", String(text || ""), "--resume"],
+      { env, shell: false, timeout: 15_000, maxBuffer: 64 * 1024 },
+    );
+    const messageId = String(stdout).match(/Queued message\s+(\S+)\s+for thread/i)?.[1] || "";
+    return { supported: true, messageId };
+  }
+
+  async interrupt({ profileId = "default", rawId, turnId = "" } = {}) {
+    const client = await this.#getClient(profileId);
+    const resolvedTurnId = turnId || this.#writers.getActive(rawId)?.turnId || "";
+    if (!resolvedTurnId) {
+      const read = await this.readThread(profileId, rawId, { detail: "auto" }).catch(() => null);
+      const active = (read?.thread?.turns || []).find((item) => item.status === "inProgress");
+      if (!active?.id) return { ok: true, alreadyIdle: true };
+      await client.request("turn/interrupt", { threadId: rawId, turnId: active.id });
+      this.#writers.clearActive(rawId, active.id);
+      return { ok: true, turnId: active.id };
+    }
+    await client.request("turn/interrupt", { threadId: rawId, turnId: resolvedTurnId });
+    this.#writers.clearActive(rawId, resolvedTurnId);
+    return { ok: true, turnId: resolvedTurnId };
+  }
+
+  async renameThread(profileId, rawId, name) {
+    const client = await this.#getClient(profileId);
+    await client.request("thread/name/set", { threadId: rawId, name }).catch((err) => {
+      if (err?.code === -32601) return null;
+      throw err;
+    });
+    return { ok: true };
+  }
+
+  async archiveThread(profileId, rawId) {
+    const client = await this.#getClient(profileId);
+    await client.request("thread/archive", { threadId: rawId }).catch((err) => {
+      if (err?.code === -32601) return null;
+      throw err;
+    });
+    return { ok: true };
+  }
+
+  async unarchiveThread(profileId, rawId) {
+    const client = await this.#getClient(profileId);
+    await client.request("thread/unarchive", { threadId: rawId }).catch((err) => {
+      if (err?.code === -32601) return null;
+      throw err;
+    });
+    return { ok: true };
+  }
+
+  async setNativeGoal(profileId, rawId, enabled, options = {}) {
+    const client = await this.#getClient(profileId);
+    try {
+      const result = await client.request("thread/goal/set", {
+        threadId: rawId,
+        enabled: Boolean(enabled),
+        ...options,
+      });
+      return { supported: true, goalState: result?.goalState || result };
+    } catch (error) {
+      if (error?.code === -32601 || /unknown method|not found/i.test(String(error?.message || ""))) {
+        return { supported: false };
+      }
+      throw error;
+    }
+  }
+
+  async close() {
+    for (const client of this.#clients.values()) {
+      await client.close();
+    }
+    this.#clients.clear();
+  }
+}

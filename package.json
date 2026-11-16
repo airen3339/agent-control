@@ -1,0 +1,25 @@
+{
+  "name": "agent-control",
+  "version": "0.1.0",
+  "description": "Self-hosted remote control console for local Codex, Claude Code, and Antigravity sessions.",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "start": "node src/server.mjs",
+    "service": "node scripts/service.mjs",
+    "relay": "node relay/relay-server.mjs",
+    "invite": "node scripts/create-invite.mjs",
+    "test": "node --test \"tests/*.test.mjs\"",
+    "check": "node scripts/check-syntax.mjs",
+    "desktop:build": "bash desktop/macos/build-app.sh",
+    "desktop:install": "bash desktop/macos/build-app.sh --install"
+  },
+  "dependencies": {
+    "qrcode": "^1.5.4",
+    "ws": "^8.21.1"
+  }
+}

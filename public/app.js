@@ -1,0 +1,7676 @@
+import { apiGet, apiPost, apiUrl } from "./api-client.js?v=20261116g";
+import {
+  extractGoalDirective,
+  renderQueuedTurnsPanelHtml,
+  resolveComposerSubmission,
+} from "./composer-mode.js?v=20261116g";
+import { hydrateDeclarativeIcons, iconSvg, providerIconSvg } from "./icons.js?v=20261116g";
+import {
+  compressImageFileForUpload,
+  formatByteSize,
+  validateImageBatchBudget,
+} from "./image-attachment.js?v=20261116g";
+import {
+  buildSelectableTelemetryItems,
+  compactEffortBadgeLabel,
+  compactModelBadgeLabel,
+  compactProfileChipText,
+  ensurePreferredModelInList,
+  filterProfilesByProvider,
+  findFailoverCandidateProfile,
+  normalizeUiPermissionMode,
+  permissionModeDisplayLabel,
+  permissionVisualMeta,
+  pickBestAvailableProfile,
+  pickDefaultModelForProvider,
+  profileHealthVisualMeta,
+  profileOptionLabel,
+  providerDisplayName,
+  providerShortBadge,
+  providerVisualMeta,
+  renderAgentTelemetryBarHtml,
+  renderProfilePillsHtml,
+  renderQuotaOverviewHtml,
+  resolveModelsForProvider,
+  resolveVisibleTelemetryKeys,
+  sortProfilesByAvailability,
+  summarizeTelemetryMobileBadge,
+} from "./instance-switcher.js?v=20261116g";
+import { bindFollowIntent, humanizeLiveActivity, mergeLiveActivity } from "./live-state.js?v=20261116g";
+import {
+  cleanStreamingAgentText,
+  dedupeAdjacentTurns,
+  escapeHtml,
+  formatToolExecutionError,
+  isRecoverableToolErrorText,
+  isStreamingTextAlreadyPersisted,
+  renderMarkdown,
+  renderTurnHtml,
+  turnEndsWithProcessGroup,
+} from "./markdown.js?v=20261116g";
+import {
+  SIDEBAR_MANUAL_HOLD_MS,
+  buildProjectGroups,
+  computeProjectGroupSelectionState,
+  isSidebarManualPrefActive,
+  normalizeProjectCwd,
+  projectBaseName,
+  renderBatchActionBarHtml,
+  renderProjectBoardHtml,
+  renderProjectTaskStripHtml,
+  renderSidebarThreadListHtml,
+  resolveProjectGroupCollapsed,
+} from "./project-board.js?v=20261116g";
+import { collectUserInputAnswers, renderServerRequestCard } from "./server-request-ui.js?v=20261116g";
+import {
+  base64ToUint8Array,
+  buildLocalProgressBriefing,
+  buildVoiceLiveProgressItems,
+  computeRmsLevel,
+  createVadTurnDetector,
+  downsampleFloat32ToInt16,
+  encodePcm16SamplesToWav,
+  enqueueVoiceBroadcastItem,
+  estimateVoiceDurationMs,
+  evaluateVoicePlaybackOutcome,
+  formatCallDuration,
+  humanizeVoiceDeliveryReason,
+  loadVoiceConfig,
+  normalizeVoiceTtsPayload,
+  pickPreferredChineseSpeechVoice,
+  renderVoiceCallTranscriptHtml,
+  renderVoiceLiveProgressHtml,
+  renderVoiceUnheardBannerHtml,
+  saveVoiceConfig,
+  stripMarkdownForSpeech,
+  uint8ArrayToBase64,
+} from "./voice-copilot.js?v=20261116g";
+
+const $ = (id) => document.getElementById(id);
+
+const PERM_PREF_KEY = "agentControl.permissionMode.v1";
+const THREAD_PREFS_KEY = "agentControl.threadPrefs.v1";
+const MODELS_CACHE_KEY = "agentControl.modelsCache.v3";
+const THREADS_CACHE_KEY = "agentControl.threadsCache.v1";
+const SIDEBAR_FOLD_PREFS_KEY = "agentControl.sidebarFold.v1";
+const TELEMETRY_VISIBLE_PREFS_KEY = "agentControl.telemetryVisibleKeys.v1";
+
+function loadTelemetryVisiblePrefs() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(TELEMETRY_VISIBLE_PREFS_KEY) || "null");
+    if (!parsed || typeof parsed !== "object") return null;
+    if (!Array.isArray(parsed.selectedKeys)) return null;
+    return {
+      selectedKeys: parsed.selectedKeys.map((k) => String(k || "")).filter(Boolean),
+      knownKeys: Array.isArray(parsed.knownKeys)
+        ? parsed.knownKeys.map((k) => String(k || "")).filter(Boolean)
+        : [],
+    };
+  } catch {
+    return null;
+  }
+}
+
+function saveTelemetryVisiblePrefs(prefs) {
+  try {
+    if (!prefs) {
+      localStorage.removeItem(TELEMETRY_VISIBLE_PREFS_KEY);
+    } else {
+      localStorage.setItem(TELEMETRY_VISIBLE_PREFS_KEY, JSON.stringify(prefs));
+    }
+  } catch {
+    // Ignore storage failures in private browsing.
+  }
+}
+
+function loadCachedModels() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(MODELS_CACHE_KEY) || "null");
+    if (!parsed || typeof parsed !== "object") return null;
+    return {
+      allModels: Array.isArray(parsed.allModels) ? parsed.allModels : [],
+      modelsByProvider: parsed.modelsByProvider && typeof parsed.modelsByProvider === "object"
+        ? parsed.modelsByProvider
+        : {},
+    };
+  } catch {
+    return null;
+  }
+}
+
+function saveCachedModels(allModels, modelsByProvider) {
+  try {
+    localStorage.setItem(MODELS_CACHE_KEY, JSON.stringify({
+      allModels: Array.isArray(allModels) ? allModels : [],
+      modelsByProvider: modelsByProvider && typeof modelsByProvider === "object" ? modelsByProvider : {},
+      updatedAt: Date.now(),
+    }));
+  } catch {}
+}
+
+function loadCachedThreads() {
+  try {
+    const parsed = JSON.parse(sessionStorage.getItem(THREADS_CACHE_KEY) || "null");
+    if (!parsed || typeof parsed !== "object") return null;
+    return {
+      threads: Array.isArray(parsed.threads) ? parsed.threads : [],
+      projectsMeta: parsed.projectsMeta && typeof parsed.projectsMeta === "object" ? parsed.projectsMeta : {},
+    };
+  } catch {
+    return null;
+  }
+}
+
+function saveCachedThreads(threads, projectsMeta) {
+  try {
+    const compactThreads = (Array.isArray(threads) ? threads : []).slice(0, 120).map((t) => ({
+      id: t.id,
+      title: t.title,
+      name: t.name,
+      preview: t.preview,
+      cwd: t.cwd,
+      provider: t.provider,
+      profileId: t.profileId,
+      profileLabel: t.profileLabel,
+      updatedAt: t.updatedAt,
+      live: Boolean(t.live),
+      goalState: t.goalState || null,
+      pendingCount: t.pendingCount || 0,
+      queuedCount: t.queuedCount || 0,
+    }));
+    sessionStorage.setItem(THREADS_CACHE_KEY, JSON.stringify({
+      threads: compactThreads,
+      projectsMeta: projectsMeta && typeof projectsMeta === "object" ? projectsMeta : {},
+      updatedAt: Date.now(),
+    }));
+  } catch {}
+}
+
+function loadDefaultPermissionMode() {
+  try {
+    return normalizeUiPermissionMode(localStorage.getItem(PERM_PREF_KEY), "turbo");
+  } catch {
+    return "turbo";
+  }
+}
+
+function saveDefaultPermissionMode(mode) {
+  const clean = normalizeUiPermissionMode(mode, "turbo");
+  try {
+    localStorage.setItem(PERM_PREF_KEY, clean);
+  } catch {}
+  return clean;
+}
+
+function loadThreadPrefsMap() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(THREAD_PREFS_KEY) || "{}");
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function getLocalThreadPrefs(threadId) {
+  if (!threadId) return null;
+  const map = loadThreadPrefsMap();
+  const raw = map[threadId];
+  if (!raw || typeof raw !== "object") return null;
+  if (!raw.modelExplicit && raw.model) {
+    const copy = { ...raw };
+    delete copy.model;
+    return copy;
+  }
+  return raw;
+}
+
+function saveLocalThreadPrefs(threadId, patch = {}) {
+  if (!threadId) return;
+  try {
+    const map = loadThreadPrefsMap();
+    map[threadId] = {
+      ...(map[threadId] || {}),
+      ...patch,
+      updatedAt: Date.now(),
+    };
+    const keys = Object.keys(map);
+    if (keys.length > 200) {
+      keys
+        .sort((a, b) => (map[a]?.updatedAt || 0) - (map[b]?.updatedAt || 0))
+        .slice(0, keys.length - 200)
+        .forEach((k) => delete map[k]);
+    }
+    localStorage.setItem(THREAD_PREFS_KEY, JSON.stringify(map));
+  } catch {}
+}
+
+function loadSidebarFoldState(nowMs = Date.now()) {
+  const sidebarFoldPrefs = {};
+  const expandedThreadsAt = {};
+  const expandedSidebarGroups = new Set();
+  let showStaleProjects = false;
+  let staleProjectsOpenedAt = 0;
+  try {
+    const parsed = JSON.parse(localStorage.getItem(SIDEBAR_FOLD_PREFS_KEY) || "null");
+    if (parsed && typeof parsed === "object") {
+      if (parsed.groups && typeof parsed.groups === "object") {
+        for (const [cwd, pref] of Object.entries(parsed.groups)) {
+          if (cwd && isSidebarManualPrefActive(pref, nowMs, SIDEBAR_MANUAL_HOLD_MS)) {
+            sidebarFoldPrefs[cwd] = {
+              action: pref.action,
+              updatedAt: Number(pref.updatedAt),
+            };
+          }
+        }
+      }
+      if (parsed.expandedThreads && typeof parsed.expandedThreads === "object") {
+        for (const [cwd, tsRaw] of Object.entries(parsed.expandedThreads)) {
+          const ts = Number(tsRaw);
+          if (cwd && Number.isFinite(ts) && ts > 0 && (nowMs < ts || (nowMs - ts) < SIDEBAR_MANUAL_HOLD_MS)) {
+            expandedThreadsAt[cwd] = ts;
+            expandedSidebarGroups.add(cwd);
+          }
+        }
+      }
+      const staleTs = Number(parsed.staleProjectsOpenedAt || 0);
+      if (Number.isFinite(staleTs) && staleTs > 0 && (nowMs < staleTs || (nowMs - staleTs) < SIDEBAR_MANUAL_HOLD_MS)) {
+        showStaleProjects = true;
+        staleProjectsOpenedAt = staleTs;
+      }
+    }
+  } catch {}
+  return {
+    sidebarFoldPrefs,
+    expandedThreadsAt,
+    expandedSidebarGroups,
+    showStaleProjects,
+    staleProjectsOpenedAt,
+  };
+}
+
+function saveSidebarFoldState() {
+  try {
+    const trimEntries = (obj, tsSelector, limit = 120) => {
+      const entries = Object.entries(obj || {});
+      if (entries.length <= limit) return Object.fromEntries(entries);
+      return Object.fromEntries(
+        entries
+          .sort((a, b) => (Number(tsSelector(b[1])) || 0) - (Number(tsSelector(a[1])) || 0))
+          .slice(0, limit),
+      );
+    };
+    localStorage.setItem(SIDEBAR_FOLD_PREFS_KEY, JSON.stringify({
+      groups: trimEntries(state.sidebarFoldPrefs, (v) => v?.updatedAt),
+      expandedThreads: trimEntries(state.expandedThreadsAt, (v) => v),
+      staleProjectsOpenedAt: state.showStaleProjects ? (Number(state.staleProjectsOpenedAt) || Date.now()) : 0,
+    }));
+  } catch {}
+}
+
+function pruneExpiredSidebarPrefs(nowMs = Date.now()) {
+  let changed = false;
+  for (const [cwd, pref] of Object.entries(state.sidebarFoldPrefs || {})) {
+    if (!isSidebarManualPrefActive(pref, nowMs, SIDEBAR_MANUAL_HOLD_MS)) {
+      delete state.sidebarFoldPrefs[cwd];
+      changed = true;
+    }
+  }
+  for (const [cwd, tsRaw] of Object.entries(state.expandedThreadsAt || {})) {
+    const ts = Number(tsRaw);
+    if (!Number.isFinite(ts) || ts <= 0 || (nowMs >= ts && (nowMs - ts) >= SIDEBAR_MANUAL_HOLD_MS)) {
+      delete state.expandedThreadsAt[cwd];
+      state.expandedSidebarGroups.delete(cwd);
+      changed = true;
+    }
+  }
+  if (state.showStaleProjects) {
+    const staleTs = Number(state.staleProjectsOpenedAt || 0);
+    if (!Number.isFinite(staleTs) || staleTs <= 0 || (nowMs >= staleTs && (nowMs - staleTs) >= SIDEBAR_MANUAL_HOLD_MS)) {
+      state.showStaleProjects = false;
+      state.staleProjectsOpenedAt = 0;
+      changed = true;
+    }
+  }
+  if (changed) saveSidebarFoldState();
+  return changed;
+}
+
+function setSidebarGroupManualPref(cwd, action, nowMs = Date.now()) {
+  const cleanCwd = normalizeProjectCwd(cwd) || "默认工作区";
+  if (action !== "expand" && action !== "collapse") return;
+  state.sidebarFoldPrefs[cleanCwd] = { action, updatedAt: nowMs };
+  state.collapsedGroups.delete(cleanCwd);
+  if (action === "collapse") {
+    state.expandedSidebarGroups.delete(cleanCwd);
+    delete state.expandedThreadsAt[cleanCwd];
+  }
+  saveSidebarFoldState();
+}
+
+const initialModelsCache = loadCachedModels();
+const initialSidebarFold = loadSidebarFoldState();
+
+const state = {
+  providers: [],
+  profiles: [],
+  modelsByProvider: initialModelsCache?.modelsByProvider || {},
+  allModels: initialModelsCache?.allModels || [],
+  defaultProvider: "antigravity",
+  defaultProfileId: "cli",
+  defaultPermissionMode: loadDefaultPermissionMode(),
+  threads: [],
+  projectsMeta: {},
+  warnings: [],
+  providerFilter: "all",
+  profileFilter: "all",
+  quotaExpanded: false,
+  quotaRefreshing: false,
+  telemetry: null,
+  telemetryExpanded: false,
+  telemetryVisiblePrefs: loadTelemetryVisiblePrefs(),
+  telemetryPickerOpen: false,
+  mobileTelemetryOpen: false,
+  searchText: "",
+  showArchived: false,
+  showAllProjects: false,
+  expandedProjects: new Set(),
+  expandedSidebarGroups: initialSidebarFold.expandedSidebarGroups,
+  sidebarFoldPrefs: initialSidebarFold.sidebarFoldPrefs,
+  expandedThreadsAt: initialSidebarFold.expandedThreadsAt,
+  showStaleProjects: initialSidebarFold.showStaleProjects,
+  staleProjectsOpenedAt: initialSidebarFold.staleProjectsOpenedAt,
+  boardOpen: true,
+  initialThreadLoading: false,
+  activeThreadId: "",
+  activeThread: null,
+  nextCursor: null,
+  liveActivity: null,
+  activityCursor: "",
+  streamingText: "",
+  streamingThought: "",
+  streamingTurnId: "",
+  pendingRequests: [],
+  pendingRequestsSynced: false,
+  queuedTurns: [],
+  queuedPanelCollapsed: false,
+  images: [],
+  imageProcessingCount: 0,
+  composerGoal: false,
+  isSubmitting: false,
+  composerStatusTimer: null,
+  autoFollow: true,
+  sseConnected: false,
+  eventSource: null,
+  collapsedGroups: new Set(),
+  lastModelProvider: "",
+  userPickedDraftModel: false,
+  topbarMenuOpen: false,
+  composerConfigOpen: false,
+  toastTimer: null,
+  toastActive: false,
+  probingProfileKeys: new Set(),
+  lastFailoverContext: null,
+  liveActivityByThread: new Map(),
+  recentCompletedByThread: new Map(),
+  useHotExtension: false,
+  hotExtensionRoutes: new Set(),
+  remoteStatus: null,
+  tunnelStatus: null,
+  tunnelBusy: false,
+  localApps: [],
+  batchSelect: {
+    active: false,
+    selectedIds: new Set(),
+    submitting: false,
+    lastTouchedThreadId: "",
+  },
+  voice: {
+    config: loadVoiceConfig(),
+    callId: "",
+    callActive: false,
+    minimized: false,
+    callStartedAt: 0,
+    callTimerId: null,
+    isMuted: false,
+    isRecording: false,
+    isSpeaking: false,
+    isProcessing: false,
+    audioCtx: null,
+    micStream: null,
+    micSource: null,
+    processorNode: null,
+    vadDetector: null,
+    currentRms: 0,
+    levelRafId: null,
+    resumeListenTimer: null,
+    audioEl: null,
+    audioObjectUrl: "",
+    activePlaybackAbort: null,
+    activeBufferSource: null,
+    activeUtterance: null,
+    webAudioUnlocked: false,
+    audioElUnlocked: false,
+    wakeLock: null,
+    transcript: [],
+    broadcastQueue: [],
+    broadcastDraining: false,
+    unheardQueue: [],
+    approvalReminderTimers: new Map(),
+    remindedRequestIds: new Set(),
+    pendingBatches: new Map(),
+    watchedThreads: new Map(),
+    progressHeartbeatTimer: null,
+    processingStageTimer: null,
+    processingPhaseText: "",
+    lastUserActivityAt: 0,
+    modelName: "gemini-4-hydrogen-low",
+    backendMissing: false,
+  },
+  dictation: {
+    active: false,
+    transcribing: false,
+    stream: null,
+    audioCtx: null,
+    source: null,
+    processor: null,
+    chunks: [],
+    maxTimer: null,
+  },
+};
+
+function toHotExtensionPath(path) {
+  const clean = String(path || "").replace(/^\/+/, "");
+  return clean.startsWith("apps/ac-hot/") ? clean : `apps/ac-hot/${clean}`;
+}
+
+function routeBaseOfPath(path) {
+  return String(path || "").replace(/^\/+/, "").split("?")[0];
+}
+
+async function apiGetWithHotFallback(path) {
+  const routeKey = routeBaseOfPath(path);
+  if (state.hotExtensionRoutes.has(routeKey)) {
+    try {
+      return await apiGet(toHotExtensionPath(path));
+    } catch (hotErr) {
+      if (Number(hotErr?.status) !== 404 && Number(hotErr?.status) !== 502) throw hotErr;
+      state.hotExtensionRoutes.delete(routeKey);
+    }
+  }
+  try {
+    return await apiGet(path);
+  } catch (error) {
+    if (Number(error?.status) !== 404) throw error;
+    const res = await apiGet(toHotExtensionPath(path));
+    state.hotExtensionRoutes.add(routeKey);
+    return res;
+  }
+}
+
+async function apiPostWithHotFallback(path, body) {
+  const routeKey = routeBaseOfPath(path);
+  if (state.hotExtensionRoutes.has(routeKey)) {
+    try {
+      return await apiPost(toHotExtensionPath(path), body);
+    } catch (hotErr) {
+      if (Number(hotErr?.status) !== 404 && Number(hotErr?.status) !== 502) throw hotErr;
+      state.hotExtensionRoutes.delete(routeKey);
+    }
+  }
+  try {
+    return await apiPost(path, body);
+  } catch (error) {
+    if (Number(error?.status) !== 404) throw error;
+    const res = await apiPost(toHotExtensionPath(path), body);
+    state.hotExtensionRoutes.add(routeKey);
+    return res;
+  }
+}
+
+async function fetchThreadRead(path) {
+  return apiGetWithHotFallback(path);
+}
+
+function isInternalVoiceThreadClient(thread) {
+  if (!thread) return false;
+  const cwd = String(thread.cwd || "").replace(/\\/g, "/");
+  if (cwd.endsWith("/voice-call") || cwd.includes("/voice-call/")) return true;
+  const title = String(thread.title || thread.name || "");
+  const preview = String(thread.preview || "");
+  return title.includes("[AC_VOICE_CALL]") || preview.includes("[AC_VOICE_CALL]");
+}
+
+function isBoardViewActive() {
+  if (state.initialThreadLoading && state.activeThreadId) return false;
+  return Boolean(state.boardOpen || !state.activeThread);
+}
+
+function syncWorkspaceVisibility() {
+  const onBoard = isBoardViewActive();
+  $("appShell")?.classList.toggle("is-board-open", onBoard);
+  const composer = $("composerArea");
+  if (composer) composer.hidden = onBoard;
+  if (onBoard) {
+    setComposerConfigOpen(false);
+    if ($("pendingRequestsDock")) $("pendingRequestsDock").hidden = true;
+    if ($("queuedTurnsBar")) $("queuedTurnsBar").hidden = true;
+  }
+  renderBatchActionBars();
+}
+
+function formatRelativeTime(epochSeconds) {
+  const ts = Number(epochSeconds || 0);
+  if (!ts) return "";
+  const diff = Math.max(0, Math.floor(Date.now() / 1000) - ts);
+  if (diff < 60) return "刚刚";
+  if (diff < 3600) return `${Math.floor(diff / 60)}分钟前`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}小时前`;
+  return `${Math.floor(diff / 86400)}天前`;
+}
+
+function getProjectGroups({ ignoreFilters = false, includeSearch = true } = {}) {
+  return buildProjectGroups(state.threads, {
+    pendingRequests: state.pendingRequests,
+    pendingRequestsSynced: state.pendingRequestsSynced,
+    projectsMeta: state.projectsMeta,
+    searchText: (ignoreFilters || !includeSearch) ? "" : state.searchText,
+    providerFilter: ignoreFilters ? "all" : state.providerFilter,
+    profileFilter: "all",
+  });
+}
+
+function syncThreadsPendingCounts() {
+  const counts = new Map();
+  for (const req of state.pendingRequests) {
+    if (!req?.threadId) continue;
+    counts.set(req.threadId, (counts.get(req.threadId) || 0) + 1);
+  }
+  for (const t of state.threads) {
+    if (!t?.id) continue;
+    t.pendingCount = counts.get(t.id) || 0;
+    t.pendingCountSynced = true;
+  }
+  if (state.activeThread?.id) {
+    state.activeThread.pendingCount = counts.get(state.activeThread.id) || 0;
+    state.activeThread.pendingCountSynced = true;
+  }
+}
+
+function syncThreadSummaryIntoList(thread) {
+  if (!thread?.id) return;
+  const target = state.threads.find((t) => t.id === thread.id);
+  if (!target) return;
+  if (typeof thread.live === "boolean") target.live = thread.live;
+  if (typeof thread.queuedCount === "number") target.queuedCount = thread.queuedCount;
+  if (thread.updatedAt) target.updatedAt = thread.updatedAt;
+  if (thread.title) target.title = thread.title;
+  if (thread.preview) target.preview = thread.preview;
+}
+
+function defaultProviderValue() {
+  return state.defaultProvider || "antigravity";
+}
+
+function defaultProfileForProvider(provider) {
+  const list = filterProfilesByProvider(state.profiles, provider);
+  const preferred = provider === state.defaultProvider
+    ? state.defaultProfileId
+    : (provider === "antigravity" ? "cli" : "");
+  return pickBestAvailableProfile(list, preferred)?.id || (provider === "antigravity" ? "cli" : "default");
+}
+
+function setTopbarMenuOpen(open) {
+  const next = Boolean(open);
+  state.topbarMenuOpen = next;
+  if (next) state.composerConfigOpen = false;
+  $("topbarMoreMenu")?.classList.toggle("is-open", next);
+  $("topbarMoreBtn")?.setAttribute("aria-expanded", next ? "true" : "false");
+  $("composerConfigPopover")?.classList.toggle("is-open", state.composerConfigOpen);
+  $("composerConfigBtn")?.setAttribute("aria-expanded", state.composerConfigOpen ? "true" : "false");
+}
+
+function setComposerConfigOpen(open) {
+  const next = Boolean(open);
+  state.composerConfigOpen = next;
+  if (next) state.topbarMenuOpen = false;
+  $("composerConfigPopover")?.classList.toggle("is-open", next);
+  $("composerConfigBtn")?.setAttribute("aria-expanded", next ? "true" : "false");
+  $("topbarMoreMenu")?.classList.toggle("is-open", state.topbarMenuOpen);
+  $("topbarMoreBtn")?.setAttribute("aria-expanded", state.topbarMenuOpen ? "true" : "false");
+}
+
+function setSidebarOpen(open) {
+  if (open) {
+    setTopbarMenuOpen(false);
+    setComposerConfigOpen(false);
+  }
+  const sidebar = $("sidebar");
+  const backdrop = $("sidebarBackdrop");
+  sidebar.classList.toggle("is-open", open);
+  backdrop.hidden = !open;
+}
+
+function syncConnectionDots(mode = "connecting") {
+  const clsSuffix = mode === "connected" ? "is-connected" : mode === "error" ? "is-error" : "is-connecting";
+  const sidebarDot = $("sseStatusDot");
+  if (sidebarDot) sidebarDot.className = `brand-dot ${clsSuffix}`;
+  const topDot = $("topbarConnDot");
+  if (topDot) {
+    topDot.className = `topbar-conn-dot ${clsSuffix}`;
+    topDot.title = mode === "connected" ? "实时连接正常" : mode === "error" ? "连接异常或离线" : "正在连接…";
+  }
+}
+
+function showToastBanner(message, { detail = "", sticky = false, error = false } = {}) {
+  if (state.toastTimer) {
+    clearTimeout(state.toastTimer);
+    state.toastTimer = null;
+  }
+  state.toastActive = true;
+  const banner = $("liveBanner");
+  banner.classList.remove("is-ambient");
+  banner.classList.toggle("is-error", Boolean(error));
+  $("livePhaseText").textContent = message;
+  $("liveDetailText").textContent = detail;
+  banner.hidden = false;
+  if (!sticky) {
+    state.toastTimer = setTimeout(() => {
+      state.toastTimer = null;
+      state.toastActive = false;
+      renderLiveBanner();
+    }, 3500);
+  }
+}
+
+function clearComposerStatus() {
+  if (state.composerStatusTimer) {
+    clearTimeout(state.composerStatusTimer);
+    state.composerStatusTimer = null;
+  }
+  state.lastFailoverContext = null;
+  const el = $("composerStatus");
+  if (!el) return;
+  el.hidden = true;
+  el.className = "composer-status";
+  el.innerHTML = "";
+}
+
+function setComposerStatus(kind, message, { autoClearMs = 0, failoverContext = null } = {}) {
+  const el = $("composerStatus");
+  if (!el) return;
+  if (state.composerStatusTimer) {
+    clearTimeout(state.composerStatusTimer);
+    state.composerStatusTimer = null;
+  }
+  const cleanMsg = String(message || "").trim();
+  if (!cleanMsg) {
+    clearComposerStatus();
+    return;
+  }
+  state.lastFailoverContext = kind === "error" ? failoverContext : null;
+  const cls = ["composer-status"];
+  if (kind === "error") cls.push("is-error");
+  else if (kind === "success") cls.push("is-success");
+  else cls.push("is-pending");
+  el.className = cls.join(" ");
+  let actionHtml = "";
+  if (kind === "error" && failoverContext?.altProfile) {
+    const altMeta = profileHealthVisualMeta(failoverContext.altProfile);
+    const altLabel = failoverContext.altProfile.health?.alias
+      || failoverContext.altProfile.label
+      || failoverContext.altProfile.id;
+    actionHtml = `<button type="button" class="status-failover-btn" data-failover-trigger><span class="profile-status-dot ${escapeHtml(altMeta.dotClass)}" aria-hidden="true"></span>切到 ${escapeHtml(altLabel)} 继续</button>`;
+  }
+  el.innerHTML = `<span class="composer-status-text">${escapeHtml(cleanMsg)}</span>`
+    + actionHtml
+    + (kind === "error" ? `<button type="button" class="composer-status-close" data-dismiss-composer-status aria-label="关闭提示">${iconSvg("close", { size: 12 })}</button>` : "");
+  el.hidden = false;
+  if (autoClearMs > 0) {
+    state.composerStatusTimer = setTimeout(() => {
+      state.composerStatusTimer = null;
+      clearComposerStatus();
+    }, autoClearMs);
+  }
+}
+
+function formatActionError(error, fallback = "操作失败") {
+  if (error?.status === 401 || error?.code === "unauthorized") {
+    return "远程登录凭证已失效，请在本机控制台重新扫码配对";
+  }
+  return error?.message || fallback;
+}
+
+function isActiveThreadRunning() {
+  if (!state.activeThread) return false;
+  const actStatus = state.liveActivity?.status;
+  if (actStatus === "running" || actStatus === "inProgress") return true;
+  if (actStatus && actStatus !== "running" && actStatus !== "inProgress") return false;
+  if (state.activeThread.live) return true;
+  const turns = state.activeThread.turns || [];
+  return turns[turns.length - 1]?.status === "inProgress";
+}
+
+function currentComposerProvider() {
+  if (state.activeThread?.provider) return state.activeThread.provider;
+  return $("composerProviderSelect").value || defaultProviderValue();
+}
+
+function currentComposerProfileId() {
+  if (state.activeThread?.profileId) return state.activeThread.profileId;
+  return $("composerProfileSelect").value || defaultProfileForProvider(currentComposerProvider());
+}
+
+function syncProfileSelectors() {
+  state.profileFilter = "all";
+
+  const providerSelect = $("composerProviderSelect");
+  const newProviderSelect = $("newProviderSelect");
+  const providerOpts = ["antigravity", "codex", "claude", "grok"].map((id) =>
+    `<option value="${id}">${escapeHtml(providerDisplayName(id))}</option>`,
+  ).join("");
+  const prevCompProvider = providerSelect.dataset.initialized ? providerSelect.value : defaultProviderValue();
+  const prevNewProvider = newProviderSelect.dataset.initialized ? newProviderSelect.value : defaultProviderValue();
+  providerSelect.innerHTML = providerOpts;
+  newProviderSelect.innerHTML = providerOpts;
+  const hasActiveThread = Boolean(state.activeThread);
+  providerSelect.value = state.activeThread?.provider || prevCompProvider || defaultProviderValue();
+  providerSelect.dataset.initialized = "1";
+  providerSelect.disabled = hasActiveThread;
+  providerSelect.hidden = hasActiveThread;
+  newProviderSelect.value = prevNewProvider || defaultProviderValue();
+  newProviderSelect.dataset.initialized = "1";
+
+  syncComposerProfileSelect();
+  syncNewProfileSelect();
+  syncNewModelSelect();
+  syncPermissionSelectors();
+  syncCfgFieldVisibility();
+  renderComposerConfigChip();
+  renderQuotaStrip();
+}
+
+const CLIENT_TELEMETRY_WINDOW_MS = 6000;
+const clientStreamSamplesByProvider = new Map();
+const clientStreamSamplesByProfile = new Map();
+let clientTelemetryDecayTimer = null;
+let telemetryRefreshTimer = null;
+let telemetryRenderScheduled = false;
+
+function estimateClientTokens(text = "") {
+  const s = String(text || "");
+  if (!s) return 0;
+  let cjk = 0;
+  for (let i = 0; i < s.length; i += 1) {
+    if (s.charCodeAt(i) > 0x2e80) cjk += 1;
+  }
+  const other = s.length - cjk;
+  return Math.max(1, Math.round(cjk * 0.72 + other * 0.28));
+}
+
+function pruneClientSampleMap(sampleMap, nowMs) {
+  const cutoff = nowMs - CLIENT_TELEMETRY_WINDOW_MS;
+  for (const [key, arr] of sampleMap.entries()) {
+    const kept = arr.filter((s) => s.at >= cutoff);
+    if (kept.length) sampleMap.set(key, kept);
+    else sampleMap.delete(key);
+  }
+}
+
+function pruneClientStreamSamples(nowMs = Date.now()) {
+  pruneClientSampleMap(clientStreamSamplesByProvider, nowMs);
+  pruneClientSampleMap(clientStreamSamplesByProfile, nowMs);
+  if (!clientStreamSamplesByProvider.size && !clientStreamSamplesByProfile.size && clientTelemetryDecayTimer) {
+    clearInterval(clientTelemetryDecayTimer);
+    clientTelemetryDecayTimer = null;
+  }
+}
+
+function computeClientStreamTpsFromMap(sampleMap, key, nowMs = Date.now()) {
+  const arr = sampleMap.get(key);
+  if (!arr?.length) return 0;
+  const cutoff = nowMs - CLIENT_TELEMETRY_WINDOW_MS;
+  let tokens = 0;
+  let earliest = nowMs;
+  for (const s of arr) {
+    if (s.at < cutoff) continue;
+    tokens += s.tokens;
+    if (s.at < earliest) earliest = s.at;
+  }
+  if (tokens <= 0) return 0;
+  const elapsedSec = Math.max(1.2, (nowMs - earliest) / 1000);
+  return Math.round((tokens / elapsedSec) * 10) / 10;
+}
+
+function scheduleTelemetryBarRender() {
+  if (telemetryRenderScheduled) return;
+  telemetryRenderScheduled = true;
+  requestAnimationFrame(() => {
+    telemetryRenderScheduled = false;
+    renderAgentTelemetryBar();
+  });
+}
+
+function pushClientSample(sampleMap, key, nowMs, tokens) {
+  const arr = sampleMap.get(key) || [];
+  arr.push({ at: nowMs, tokens });
+  if (arr.length > 240) arr.splice(0, arr.length - 240);
+  sampleMap.set(key, arr);
+}
+
+function extractProfileKeyFromThreadId(threadId = "") {
+  const parts = String(threadId || "").split(":");
+  if (parts.length < 2) return "";
+  const prov = String(parts[0] || "").trim().toLowerCase();
+  const profId = String(parts[1] || "").trim();
+  if (!prov || !profId) return "";
+  return `${prov}:${profId}`;
+}
+
+function recordClientStreamDelta(provider, delta, threadId = "") {
+  const prov = String(provider || "").trim().toLowerCase();
+  const tokens = estimateClientTokens(delta);
+  if (!prov || tokens <= 0) return;
+  const nowMs = Date.now();
+  pushClientSample(clientStreamSamplesByProvider, prov, nowMs, tokens);
+  const pKey = extractProfileKeyFromThreadId(threadId);
+  if (pKey) {
+    pushClientSample(clientStreamSamplesByProfile, pKey, nowMs, tokens);
+  }
+  if (!clientTelemetryDecayTimer) {
+    clientTelemetryDecayTimer = setInterval(() => {
+      pruneClientStreamSamples(Date.now());
+      renderAgentTelemetryBar();
+    }, 1000);
+  }
+  scheduleTelemetryBarRender();
+}
+
+function buildMergedTelemetrySnapshot(nowMs = Date.now()) {
+  pruneClientStreamSamples(nowMs);
+  const base = state.telemetry?.byProvider ? state.telemetry : null;
+  const byProvider = {};
+  let runningCount = 0;
+  let queuedCount = 0;
+  let tokensPerSec = 0;
+
+  for (const prov of ["codex", "claude", "antigravity", "grok"]) {
+    const serverStat = base?.byProvider?.[prov] || {};
+    const liveThreadsFallback = base
+      ? []
+      : state.threads.filter((t) => t.provider === prov && t.live);
+    const activeThreads = Array.isArray(serverStat.activeThreads) && serverStat.activeThreads.length
+      ? serverStat.activeThreads
+      : liveThreadsFallback.map((t) => ({ id: t.id, title: t.title || t.name || t.id }));
+    const provRunning = base
+      ? Number(serverStat.runningCount || 0)
+      : liveThreadsFallback.length;
+    const provQueued = base
+      ? Number(serverStat.queuedCount || 0)
+      : state.threads.filter((t) => t.provider === prov && Number(t.queuedCount || 0) > 0)
+        .reduce((acc, t) => acc + Number(t.queuedCount || 0), 0);
+    const clientTps = computeClientStreamTpsFromMap(clientStreamSamplesByProvider, prov, nowMs);
+    const provTps = Math.max(Number(serverStat.tokensPerSec || 0), clientTps);
+
+    byProvider[prov] = {
+      provider: prov,
+      runningCount: provRunning,
+      queuedCount: provQueued,
+      tokensPerSec: Math.round(provTps * 10) / 10,
+      activeThreads,
+    };
+    runningCount += provRunning;
+    queuedCount += provQueued;
+    tokensPerSec += byProvider[prov].tokensPerSec;
+  }
+
+  const byProfile = {};
+  const profileKeys = new Set(Object.keys(base?.byProfile || {}));
+  for (const p of state.profiles || []) {
+    if (p?.key) profileKeys.add(p.key);
+    else if (p?.provider && p?.id) profileKeys.add(`${p.provider}:${p.id}`);
+  }
+  for (const pKey of clientStreamSamplesByProfile.keys()) {
+    profileKeys.add(pKey);
+  }
+  for (const pKey of profileKeys) {
+    const serverProf = base?.byProfile?.[pKey] || null;
+    const [prov, profId] = pKey.split(":");
+    const prefix = `${pKey}:`;
+    const liveFallback = base
+      ? []
+      : state.threads.filter((t) => t.live && String(t.id || "").startsWith(prefix));
+    const profThreads = Array.isArray(serverProf?.activeThreads) && serverProf.activeThreads.length
+      ? serverProf.activeThreads
+      : liveFallback.map((t) => ({ id: t.id, title: t.title || t.name || t.id }));
+    const profRunning = base && serverProf
+      ? Number(serverProf.runningCount || 0)
+      : liveFallback.length;
+    const profQueued = base && serverProf
+      ? Number(serverProf.queuedCount || 0)
+      : state.threads.filter((t) => Number(t.queuedCount || 0) > 0 && String(t.id || "").startsWith(prefix))
+        .reduce((acc, t) => acc + Number(t.queuedCount || 0), 0);
+    const clientProfTps = computeClientStreamTpsFromMap(clientStreamSamplesByProfile, pKey, nowMs);
+    const profTps = Math.max(Number(serverProf?.tokensPerSec || 0), clientProfTps);
+    byProfile[pKey] = {
+      key: pKey,
+      provider: serverProf?.provider || prov || "",
+      profileId: serverProf?.profileId || profId || "",
+      runningCount: profRunning,
+      queuedCount: profQueued,
+      tokensPerSec: Math.round(profTps * 10) / 10,
+      activeThreads: profThreads,
+    };
+  }
+
+  return {
+    updatedAt: base?.updatedAt || nowMs,
+    totals: {
+      runningCount,
+      queuedCount,
+      tokensPerSec: Math.round(tokensPerSec * 10) / 10,
+    },
+    byProvider,
+    byProfile,
+  };
+}
+
+function applyTelemetrySnapshot(snap) {
+  if (!snap || typeof snap !== "object" || !snap.byProvider) return;
+  state.telemetry = snap;
+  renderAgentTelemetryBar();
+}
+
+async function refreshTelemetry() {
+  try {
+    const res = await apiGetWithHotFallback("api/telemetry");
+    if (res?.byProvider) {
+      applyTelemetrySnapshot(res);
+    }
+  } catch {
+    // Ignore transient telemetry polling failures; SSE push keeps recovering.
+  }
+}
+
+function scheduleTelemetryRefresh(delayMs = 150) {
+  if (telemetryRefreshTimer) clearTimeout(telemetryRefreshTimer);
+  telemetryRefreshTimer = setTimeout(() => {
+    telemetryRefreshTimer = null;
+    void refreshTelemetry();
+  }, Math.max(50, Number(delayMs) || 150));
+}
+
+function renderAgentTelemetryBar() {
+  const el = $("agentTelemetryBar");
+  const desktopSlot = $("topbarTelemetrySlot");
+  const merged = buildMergedTelemetrySnapshot();
+  const items = buildSelectableTelemetryItems(state.profiles);
+  const visibleKeys = resolveVisibleTelemetryKeys(items, state.telemetryVisiblePrefs);
+  summarizeTelemetryMobileBadge(state.profiles, merged, visibleKeys);
+
+  const topbarBtn = $("telemetryTopbarBtn");
+  const isDetailOpen = Boolean(state.telemetryExpanded || state.telemetryPickerOpen);
+  if (topbarBtn) {
+    topbarBtn.hidden = true;
+    topbarBtn.setAttribute("aria-hidden", "true");
+    topbarBtn.classList.toggle("is-open", isDetailOpen || Boolean(state.mobileTelemetryOpen));
+    topbarBtn.setAttribute("aria-expanded", isDetailOpen ? "true" : "false");
+  }
+
+  const activeProvider = state.activeThread?.provider || $("composerProviderSelect")?.value || "";
+  const activeProfileId = state.activeThread?.profileId || $("composerProfileSelect")?.value || "";
+  const html = renderAgentTelemetryBarHtml(state.profiles, merged, {
+    providerFilter: state.providerFilter,
+    expanded: state.telemetryExpanded,
+    refreshing: state.quotaRefreshing,
+    visibleKeys,
+    pickerOpen: state.telemetryPickerOpen,
+    activeProvider,
+    activeProfileId,
+  });
+
+  if (desktopSlot) {
+    const compactSlotHtml = !isDetailOpen ? html : "";
+    desktopSlot.innerHTML = compactSlotHtml;
+    desktopSlot.hidden = !compactSlotHtml;
+  }
+
+  if (!el) return;
+  el.innerHTML = html;
+  el.hidden = !html;
+  el.classList.toggle("is-expanded", Boolean(html && isDetailOpen));
+  el.classList.toggle("is-mobile-open", Boolean(html && (state.mobileTelemetryOpen || isDetailOpen)));
+}
+
+function renderQuotaStrip() {
+  const el = $("agentQuotaStrip");
+  if (el) {
+    el.innerHTML = "";
+    el.hidden = true;
+  }
+  renderAgentTelemetryBar();
+}
+
+async function refreshQuotasManual() {
+  if (state.quotaRefreshing) return;
+  state.quotaRefreshing = true;
+  renderQuotaStrip();
+  try {
+    let res = await apiPost("api/quotas/refresh", {});
+    if ((!Array.isArray(res?.quotas) || !res.quotas.length) && state.useHotExtension) {
+      res = await apiPost("apps/ac-hot/api/quotas/refresh", {}).catch(() => res);
+    }
+    const byKey = res?.byKey && typeof res.byKey === "object" ? res.byKey : null;
+    if (byKey && Array.isArray(state.profiles) && state.profiles.length) {
+      state.profiles = state.profiles.map((p) => {
+        const key = p.key || `${p.provider}:${p.id}`;
+        return byKey[key] ? { ...p, quota: byKey[key] } : p;
+      });
+      syncProfileSelectors();
+      renderTopbarAndControls();
+    } else {
+      await refreshProviders();
+    }
+  } catch (err) {
+    showToastBanner("刷新额度失败", { detail: formatActionError(err), error: true });
+  } finally {
+    state.quotaRefreshing = false;
+    renderQuotaStrip();
+  }
+}
+
+function syncComposerProfileSelect() {
+  const select = $("composerProfileSelect");
+  const provider = currentComposerProvider();
+  const rawList = filterProfilesByProvider(state.profiles, provider);
+  const list = sortProfilesByAvailability(rawList);
+  const prev = select.value;
+  select.innerHTML = (list.length ? list : [{ id: defaultProfileForProvider(provider), label: "默认" }])
+    .map((p) => `<option value="${escapeHtml(p.id)}">${escapeHtml(profileOptionLabel(p))}</option>`)
+    .join("");
+  if (state.activeThread?.profileId) {
+    select.value = state.activeThread.profileId;
+  } else if ([...select.options].some((o) => o.value === prev)) {
+    select.value = prev;
+  } else {
+    select.value = defaultProfileForProvider(provider);
+  }
+  const hasActiveThread = Boolean(state.activeThread);
+  select.disabled = hasActiveThread;
+  select.hidden = list.length === 0;
+
+  const pillsEl = $("composerProfilePills");
+  if (pillsEl) {
+    pillsEl.innerHTML = renderProfilePillsHtml(list, {
+      selectedId: select.value,
+      probingKeys: state.probingProfileKeys,
+      activeLocked: hasActiveThread,
+    });
+  }
+  const probeBtn = $("composerProbeProfilesBtn");
+  if (probeBtn) {
+    const anyProbing = list.some((p) => state.probingProfileKeys.has(p.key || `${p.provider}:${p.id}`));
+    probeBtn.disabled = anyProbing || !list.length;
+    probeBtn.innerHTML = anyProbing ? "测通中…" : `${iconSvg("bolt", { size: 11 })}<span>测通</span>`;
+  }
+
+  syncCfgFieldVisibility();
+  renderComposerConfigChip();
+}
+
+function syncNewProfileSelect() {
+  const provider = $("newProviderSelect").value || defaultProviderValue();
+  const list = sortProfilesByAvailability(filterProfilesByProvider(state.profiles, provider));
+  const select = $("newProfileSelect");
+  const prev = select.value;
+  select.innerHTML = (list.length ? list : [{ id: defaultProfileForProvider(provider), label: "默认" }])
+    .map((p) => `<option value="${escapeHtml(p.id)}">${escapeHtml(profileOptionLabel(p))}</option>`)
+    .join("");
+  if ([...select.options].some((o) => o.value === prev && !list.find((p) => p.id === prev)?.health?.disabled)) {
+    select.value = prev;
+  } else {
+    select.value = defaultProfileForProvider(provider);
+  }
+  const pillsEl = $("newProfilePills");
+  if (pillsEl) {
+    pillsEl.innerHTML = renderProfilePillsHtml(list, {
+      selectedId: select.value,
+      probingKeys: state.probingProfileKeys,
+      activeLocked: false,
+    });
+  }
+  const probeBtn = $("newModalProbeProfilesBtn");
+  if (probeBtn) {
+    const anyProbing = list.some((p) => state.probingProfileKeys.has(p.key || `${p.provider}:${p.id}`));
+    probeBtn.disabled = anyProbing || !list.length;
+    probeBtn.innerHTML = anyProbing ? "测通中…" : `${iconSvg("bolt", { size: 11 })}<span>测通</span>`;
+  }
+  syncNewModelSelect();
+}
+
+function renderModelOptionsHtml(models = []) {
+  const renderOption = (m) =>
+    `<option value="${escapeHtml(m.id || m.model)}">${escapeHtml(m.displayName || m.model || m.id)}</option>`;
+  const mainItems = models.filter((m) => m?.section !== "overflow");
+  const overflowItems = models.filter((m) => m?.section === "overflow");
+  if (mainItems.length && overflowItems.length) {
+    return `<optgroup label="主力模型">${mainItems.map(renderOption).join("")}</optgroup>`
+      + `<optgroup label="更多版本">${overflowItems.map(renderOption).join("")}</optgroup>`;
+  }
+  return models.map(renderOption).join("");
+}
+
+function syncNewModelSelect(preferredModel = "") {
+  const modelSelect = $("newModelSelect");
+  if (!modelSelect) return;
+  const provider = $("newProviderSelect").value || defaultProviderValue();
+  const rawModels = resolveModelsForProvider(state.modelsByProvider, state.allModels, provider);
+  const models = ensurePreferredModelInList(rawModels, provider, preferredModel);
+  if (!models.length) {
+    modelSelect.innerHTML = `<option value="">默认模型</option>`;
+    return;
+  }
+  modelSelect.innerHTML = renderModelOptionsHtml(models);
+  const selected = pickDefaultModelForProvider(models, provider, preferredModel);
+  if (selected) modelSelect.value = selected.id || selected.model;
+}
+
+function effectivePermissionModeForThread(threadId = state.activeThreadId, threadObj = state.activeThread) {
+  const localPref = getLocalThreadPrefs(threadId);
+  return normalizeUiPermissionMode(
+    localPref?.permissionMode || threadObj?.permissionMode || state.defaultPermissionMode || "turbo",
+    "turbo",
+  );
+}
+
+function syncPermissionSelectors() {
+  const permSelect = $("permissionSelect");
+  if (permSelect) {
+    const effective = effectivePermissionModeForThread();
+    permSelect.disabled = false;
+    permSelect.hidden = false;
+    permSelect.value = effective;
+    permSelect.classList.toggle("is-turbo", effective === "turbo");
+  }
+  const newPermSelect = $("newPermissionSelect");
+  if (newPermSelect && !$("newThreadModal")?.open) {
+    newPermSelect.value = normalizeUiPermissionMode(state.defaultPermissionMode || "turbo", "turbo");
+  }
+  renderComposerConfigChip();
+}
+
+function syncModelAndEffortSelectors() {
+  const provider = currentComposerProvider();
+  const modelSelect = $("modelSelect");
+  const effortSelect = $("effortSelect");
+  const keepDraftModel = !state.activeThread && state.lastModelProvider === provider && state.userPickedDraftModel;
+  const localPref = getLocalThreadPrefs(state.activeThreadId);
+  const preferredModel = localPref?.model
+    || state.activeThread?.model
+    || (keepDraftModel ? modelSelect.value : "")
+    || "";
+  const rawModels = resolveModelsForProvider(state.modelsByProvider, state.allModels, provider);
+  const models = ensurePreferredModelInList(rawModels, provider, preferredModel);
+  state.lastModelProvider = provider;
+
+  modelSelect.disabled = false;
+  modelSelect.hidden = false;
+
+  if (!models.length) {
+    modelSelect.innerHTML = `<option value="">默认模型</option>`;
+    effortSelect.hidden = true;
+    effortSelect.disabled = true;
+    syncCfgFieldVisibility();
+    renderComposerConfigChip();
+    return;
+  }
+
+  modelSelect.innerHTML = renderModelOptionsHtml(models);
+
+  const selected = pickDefaultModelForProvider(models, provider, preferredModel);
+  if (selected) modelSelect.value = selected.id || selected.model;
+
+  syncEffortSelectForModel(selected);
+  syncCfgFieldVisibility();
+  renderComposerConfigChip();
+}
+
+function syncEffortSelectForModel(selected) {
+  const effortSelect = $("effortSelect");
+  const efforts = selected?.supportedReasoningEfforts?.length
+    ? selected.supportedReasoningEfforts
+    : [];
+  const effortLabels = { low: "低思考", medium: "中思考", high: "高思考", xhigh: "超高思考", max: "最高思考" };
+  if (!efforts.length) {
+    effortSelect.innerHTML = `<option value="">默认强度</option>`;
+    effortSelect.value = "";
+    effortSelect.disabled = true;
+    effortSelect.hidden = true;
+    syncCfgFieldVisibility();
+    renderComposerConfigChip();
+    return;
+  }
+  effortSelect.hidden = false;
+  effortSelect.disabled = false;
+  effortSelect.innerHTML = efforts.map((e) =>
+    `<option value="${escapeHtml(e)}">${escapeHtml(effortLabels[e] || e)}</option>`,
+  ).join("");
+  const localPref = getLocalThreadPrefs(state.activeThreadId);
+  const preferredEffort = localPref?.effort || state.activeThread?.reasoningEffort || selected?.defaultReasoningEffort || "medium";
+  if (efforts.includes(preferredEffort)) effortSelect.value = preferredEffort;
+  syncCfgFieldVisibility();
+  renderComposerConfigChip();
+}
+
+function syncCfgFieldVisibility() {
+  for (const id of ["composerProviderSelect", "effortSelect"]) {
+    const el = $(id);
+    const field = el?.closest(".cfg-field");
+    if (field) field.hidden = Boolean(el.hidden);
+  }
+  const profileField = $("composerProfileField");
+  if (profileField) {
+    const provider = currentComposerProvider();
+    const list = filterProfilesByProvider(state.profiles, provider);
+    profileField.hidden = list.length === 0;
+  }
+}
+
+function renderComposerConfigChip() {
+  const btn = $("composerConfigBtn");
+  if (!btn) return;
+  const permMode = $("permissionSelect")?.value || effectivePermissionModeForThread() || "turbo";
+  const permMeta = permissionVisualMeta(permMode);
+  const provider = currentComposerProvider();
+  const profileId = currentComposerProfileId();
+  const providerProfiles = filterProfilesByProvider(state.profiles, provider);
+  const activeProfile = providerProfiles.find((p) => p.id === profileId) || null;
+  const profMeta = activeProfile ? profileHealthVisualMeta(activeProfile) : null;
+  const hasProfileIssue = Boolean(profMeta && profMeta.status !== "unknown" && profMeta.status !== "healthy");
+  const showProfileTag = Boolean(
+    activeProfile && (providerProfiles.length >= 2 || hasProfileIssue || String(activeProfile.health?.alias || "").trim()),
+  );
+  const profileTag = showProfileTag ? compactProfileChipText(activeProfile) : "";
+
+  const modelSelect = $("modelSelect");
+  const rawModel = modelSelect?.selectedOptions?.[0]?.textContent || modelSelect?.value || "";
+  const modelShort = compactModelBadgeLabel(rawModel);
+  const effortSelect = $("effortSelect");
+  const effortShort = (!effortSelect || effortSelect.hidden)
+    ? ""
+    : compactEffortBadgeLabel(effortSelect.value || "");
+  const goalActive = Boolean(state.composerGoal || state.activeThread?.goalState?.active);
+
+  btn.className = `composer-config-chip mobile-only tone-${permMeta.tone}`;
+  btn.title = `权限: ${permMeta.label}${activeProfile ? ` · 实例: ${profileOptionLabel(activeProfile)}` : ""} · 模型: ${rawModel || "默认"}${effortShort ? ` · 思考: ${effortShort}` : ""}${goalActive ? " · Goal 开启" : ""}`;
+
+  const permIconEl = $("cfgChipPermIcon");
+  if (permIconEl) permIconEl.innerHTML = permMeta.icon;
+  const profTextEl = $("cfgChipProfileText");
+  if (profTextEl) {
+    profTextEl.textContent = profileTag;
+    profTextEl.hidden = !profileTag;
+    profTextEl.className = `cfg-chip-profile${profMeta ? ` ${profMeta.dotClass}` : ""}`;
+  }
+  const modelEl = $("cfgChipModelText");
+  if (modelEl) modelEl.textContent = modelShort;
+  const effortEl = $("cfgChipEffortText");
+  if (effortEl) {
+    effortEl.textContent = effortShort;
+    effortEl.hidden = !effortShort;
+  }
+  const goalDotEl = $("cfgChipGoalDot");
+  if (goalDotEl) goalDotEl.hidden = !goalActive;
+}
+
+function autoResizePromptInput() {
+  const input = $("promptInput");
+  if (!input) return;
+  input.style.height = "auto";
+  if (!input.value) {
+    input.style.height = "";
+    return;
+  }
+  const maxHeight = window.innerWidth <= 960 ? 116 : 180;
+  const nextHeight = Math.min(maxHeight, Math.max(36, input.scrollHeight));
+  input.style.height = `${nextHeight}px`;
+}
+
+function syncBoardAttentionDot() {
+  const dot = $("boardAttentionDot");
+  if (!dot) return;
+  const hasPending = state.pendingRequests.length > 0;
+  const hasOtherLive = state.threads.some(
+    (t) => t.id !== state.activeThreadId && (t.live || t.turns?.[t.turns.length - 1]?.status === "inProgress"),
+  );
+  if (hasPending) {
+    dot.hidden = false;
+    dot.className = "btn-attention-dot is-pending";
+    dot.title = `有 ${state.pendingRequests.length} 项待确认请求`;
+  } else if (hasOtherLive) {
+    dot.hidden = false;
+    dot.className = "btn-attention-dot is-live";
+    dot.title = "有后台任务运行中";
+  } else {
+    dot.hidden = true;
+    dot.className = "btn-attention-dot";
+  }
+}
+
+function renderBatchActionBars() {
+  const sidebarBar = $("sidebarBatchBar");
+  const boardBar = $("boardBatchBar");
+  const toggleBtn = $("sidebarBatchSelectBtn");
+  if (toggleBtn) {
+    toggleBtn.classList.toggle("is-active", Boolean(state.batchSelect.active));
+    toggleBtn.textContent = state.batchSelect.active ? "退出" : "多选";
+  }
+  if (!state.batchSelect.active) {
+    if (sidebarBar) {
+      sidebarBar.hidden = true;
+      sidebarBar.innerHTML = "";
+    }
+    if (boardBar) {
+      boardBar.hidden = true;
+      boardBar.innerHTML = "";
+    }
+    return;
+  }
+  const groups = getProjectGroups({ includeSearch: isBoardViewActive() });
+  const visibleThreads = groups.flatMap((g) => g.threads || []);
+  const idleVisibleCount = visibleThreads.filter((t) => !t.live && !(t.pendingCount > 0)).length;
+  const barHtml = renderBatchActionBarHtml({
+    selectedCount: state.batchSelect.selectedIds.size,
+    totalVisibleCount: visibleThreads.length,
+    idleVisibleCount,
+    archivedView: Boolean(state.showArchived),
+    submitting: Boolean(state.batchSelect.submitting),
+  });
+  if (sidebarBar) {
+    sidebarBar.hidden = false;
+    sidebarBar.innerHTML = barHtml;
+  }
+  const onBoard = isBoardViewActive();
+  if (boardBar) {
+    boardBar.hidden = !onBoard;
+    boardBar.innerHTML = onBoard ? barHtml : "";
+  }
+}
+
+function enterBatchSelectMode({ threadId = "", projectCwd = "" } = {}) {
+  state.batchSelect.active = true;
+  if (threadId) {
+    state.batchSelect.selectedIds.add(threadId);
+    state.batchSelect.lastTouchedThreadId = threadId;
+  } else if (projectCwd) {
+    const group = getProjectGroups().find((g) => g.cwd === projectCwd);
+    for (const t of group?.threads || []) {
+      if (t?.id) state.batchSelect.selectedIds.add(t.id);
+    }
+    state.batchSelect.lastTouchedThreadId = "";
+  }
+  renderThreadList();
+  renderProjectBoard();
+  renderBatchActionBars();
+}
+
+function exitBatchSelectMode() {
+  if (!state.batchSelect.active && !state.batchSelect.selectedIds.size) return;
+  state.batchSelect.active = false;
+  state.batchSelect.submitting = false;
+  state.batchSelect.selectedIds.clear();
+  state.batchSelect.lastTouchedThreadId = "";
+  renderThreadList();
+  renderProjectBoard();
+  renderBatchActionBars();
+}
+
+function toggleBatchThreadSelection(threadId, { shiftKey = false } = {}) {
+  const cleanId = String(threadId || "").trim();
+  if (!cleanId) return;
+  if (shiftKey && state.batchSelect.lastTouchedThreadId) {
+    const orderedIds = getProjectGroups().flatMap((g) => (g.threads || []).map((t) => t.id));
+    const fromIdx = orderedIds.indexOf(state.batchSelect.lastTouchedThreadId);
+    const toIdx = orderedIds.indexOf(cleanId);
+    if (fromIdx >= 0 && toIdx >= 0) {
+      const start = Math.min(fromIdx, toIdx);
+      const end = Math.max(fromIdx, toIdx);
+      for (let i = start; i <= end; i += 1) {
+        if (orderedIds[i]) state.batchSelect.selectedIds.add(orderedIds[i]);
+      }
+      state.batchSelect.lastTouchedThreadId = cleanId;
+      renderThreadList();
+      renderProjectBoard();
+      renderBatchActionBars();
+      return;
+    }
+  }
+  if (state.batchSelect.selectedIds.has(cleanId)) {
+    state.batchSelect.selectedIds.delete(cleanId);
+  } else {
+    state.batchSelect.selectedIds.add(cleanId);
+  }
+  state.batchSelect.lastTouchedThreadId = cleanId;
+  renderThreadList();
+  renderProjectBoard();
+  renderBatchActionBars();
+}
+
+function toggleBatchProjectSelection(cwd) {
+  const group = getProjectGroups().find((g) => g.cwd === cwd);
+  if (!group?.threads?.length) return;
+  const selState = computeProjectGroupSelectionState(group, state.batchSelect.selectedIds);
+  for (const t of group.threads) {
+    if (!t?.id) continue;
+    if (selState.checked) state.batchSelect.selectedIds.delete(t.id);
+    else state.batchSelect.selectedIds.add(t.id);
+  }
+  state.batchSelect.lastTouchedThreadId = "";
+  renderThreadList();
+  renderProjectBoard();
+  renderBatchActionBars();
+}
+
+function pruneBatchSelection() {
+  if (!state.batchSelect.active || !state.batchSelect.selectedIds.size) return;
+  const loadedIds = new Set((state.threads || []).map((t) => t.id).filter(Boolean));
+  let changed = false;
+  for (const id of [...state.batchSelect.selectedIds]) {
+    if (!loadedIds.has(id)) {
+      state.batchSelect.selectedIds.delete(id);
+      changed = true;
+    }
+  }
+  if (state.batchSelect.lastTouchedThreadId && !loadedIds.has(state.batchSelect.lastTouchedThreadId)) {
+    state.batchSelect.lastTouchedThreadId = "";
+  }
+  if (changed) renderBatchActionBars();
+}
+
+async function executeBatchArchive() {
+  if (state.batchSelect.submitting) return;
+  const ids = [...state.batchSelect.selectedIds];
+  if (!ids.length) return;
+  const nextArchived = !state.showArchived;
+  if (nextArchived) {
+    const byId = new Map((state.threads || []).map((t) => [t.id, t]));
+    const liveCount = ids.filter((id) => Boolean(byId.get(id)?.live)).length;
+    if (liveCount > 0) {
+      const ok = window.confirm(`所选 ${ids.length} 个会话中有 ${liveCount} 个正在运行，确定一并归档吗？`);
+      if (!ok) return;
+    }
+  }
+  state.batchSelect.submitting = true;
+  renderBatchActionBars();
+  try {
+    await apiPostWithHotFallback("api/threads/archive", {
+      threadIds: ids,
+      archived: nextArchived,
+    });
+    if (nextArchived && !state.showArchived && ids.includes(state.activeThreadId)) {
+      await selectThread("");
+    }
+    exitBatchSelectMode();
+    await refreshThreads();
+    showToastBanner(nextArchived ? `已归档 ${ids.length} 个会话` : `已恢复 ${ids.length} 个会话`);
+  } catch (error) {
+    state.batchSelect.submitting = false;
+    renderBatchActionBars();
+    const errMsg = formatActionError(error, nextArchived ? "批量归档失败" : "批量恢复失败");
+    setComposerStatus("error", errMsg);
+    showToastBanner("批量操作失败", { detail: errMsg, error: true });
+  }
+}
+
+function handleBatchActionClick(action) {
+  if (!action || state.batchSelect.submitting) return;
+  if (action === "exit") {
+    exitBatchSelectMode();
+    return;
+  }
+  if (action === "clear-all") {
+    state.batchSelect.selectedIds.clear();
+    state.batchSelect.lastTouchedThreadId = "";
+    renderThreadList();
+    renderProjectBoard();
+    renderBatchActionBars();
+    return;
+  }
+  if (action === "select-all" || action === "select-idle") {
+    const visibleThreads = getProjectGroups().flatMap((g) => g.threads || []);
+    const targets = action === "select-idle"
+      ? visibleThreads.filter((t) => !t.live && !(t.pendingCount > 0))
+      : visibleThreads;
+    for (const t of targets) {
+      if (t?.id) state.batchSelect.selectedIds.add(t.id);
+    }
+    renderThreadList();
+    renderProjectBoard();
+    renderBatchActionBars();
+    return;
+  }
+  if (action === "submit-archive") {
+    void executeBatchArchive();
+  }
+}
+
+function bindLongPressMultiSelect(containerEl, resolveTarget) {
+  if (!containerEl) return;
+  const LONG_PRESS_MS = 420;
+  const MOVE_CANCEL_PX = 10;
+  let timerId = null;
+  let activePointerId = null;
+  let startX = 0;
+  let startY = 0;
+  let suppressClickUntil = 0;
+
+  const clearPending = () => {
+    if (timerId) {
+      clearTimeout(timerId);
+      timerId = null;
+    }
+    activePointerId = null;
+  };
+
+  containerEl.addEventListener("pointerdown", (e) => {
+    if (state.batchSelect.active) return;
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+    if (e.target.closest(
+      "[data-new-in-cwd], [data-alias-cwd], [data-toggle-pin-cwd], [data-batch-fold-cwd], [data-sidebar-expand-cwd], [data-sidebar-collapse-cwd], [data-sidebar-stale-projects], [data-expand-project-cwd], [data-collapse-project-cwd], [data-board-action], input, select, textarea, a",
+    )) {
+      return;
+    }
+    const target = resolveTarget(e.target);
+    if (!target) return;
+    clearPending();
+    activePointerId = e.pointerId;
+    startX = Number(e.clientX) || 0;
+    startY = Number(e.clientY) || 0;
+    timerId = setTimeout(() => {
+      timerId = null;
+      activePointerId = null;
+      suppressClickUntil = Date.now() + 850;
+      try { navigator.vibrate?.(18); } catch {}
+      enterBatchSelectMode(target);
+    }, LONG_PRESS_MS);
+  }, { passive: true });
+
+  containerEl.addEventListener("pointermove", (e) => {
+    if (!timerId || (activePointerId !== null && e.pointerId !== activePointerId)) return;
+    const dx = Math.abs((Number(e.clientX) || 0) - startX);
+    const dy = Math.abs((Number(e.clientY) || 0) - startY);
+    if (dx > MOVE_CANCEL_PX || dy > MOVE_CANCEL_PX) {
+      clearPending();
+    }
+  }, { passive: true });
+
+  containerEl.addEventListener("pointerup", clearPending, { passive: true });
+  containerEl.addEventListener("pointercancel", clearPending, { passive: true });
+  containerEl.addEventListener("wheel", clearPending, { passive: true });
+  containerEl.addEventListener("scroll", clearPending, { passive: true, capture: true });
+
+  containerEl.addEventListener("click", (e) => {
+    if (Date.now() < suppressClickUntil) {
+      e.preventDefault();
+      e.stopPropagation();
+      suppressClickUntil = 0;
+    }
+  }, true);
+
+  containerEl.addEventListener("contextmenu", (e) => {
+    if ((state.batchSelect.active || timerId || Date.now() < suppressClickUntil) && resolveTarget(e.target)) {
+      e.preventDefault();
+    }
+  });
+}
+
+function toggleSidebarGroupCollapse(cwd) {
+  if (!cwd) return;
+  const nowMs = Date.now();
+  pruneExpiredSidebarPrefs(nowMs);
+  const group = getProjectGroups().find((g) => g.cwd === cwd);
+  const currentlyCollapsed = group
+    ? resolveProjectGroupCollapsed(group, {
+      activeThreadId: state.activeThreadId,
+      hasQuery: Boolean(String(state.searchText || "").trim()),
+      collapsedGroups: state.collapsedGroups,
+      sidebarFoldPrefs: state.sidebarFoldPrefs,
+      nowMs,
+      liveActivityByThread: state.liveActivityByThread,
+    })
+    : state.collapsedGroups.has(cwd);
+  state.collapsedGroups.delete(cwd);
+  setSidebarGroupManualPref(cwd, currentlyCollapsed ? "expand" : "collapse", nowMs);
+  renderThreadList();
+}
+
+function renderThreadList() {
+  const listEl = $("threadList");
+  const warningsEl = $("threadWarnings");
+  if (state.warnings.length) {
+    warningsEl.hidden = false;
+    warningsEl.textContent = state.warnings.map((w) => `${w.provider}/${w.profileId}: ${w.message}`).join("；");
+  } else {
+    warningsEl.hidden = true;
+  }
+
+  const nowMs = Date.now();
+  pruneExpiredSidebarPrefs(nowMs);
+  const groups = getProjectGroups({ includeSearch: false });
+  listEl.innerHTML = renderSidebarThreadListHtml(groups, {
+    activeThreadId: state.activeThreadId,
+    collapsedGroups: state.collapsedGroups,
+    expandedSidebarGroups: state.expandedSidebarGroups,
+    sidebarFoldPrefs: state.sidebarFoldPrefs,
+    showStaleProjects: state.showStaleProjects,
+    nowMs,
+    providerFilter: state.providerFilter,
+    profileFilter: "all",
+    profiles: state.profiles,
+    liveActivityByThread: state.liveActivityByThread,
+    recentCompletedByThread: state.recentCompletedByThread,
+    searchText: "",
+    selectionMode: state.batchSelect.active,
+    selectedThreadIds: state.batchSelect.selectedIds,
+  });
+
+  // Populate recent CWDs datalist for modal.
+  const cwds = groups.map((g) => g.cwd).filter(Boolean).slice(0, 24);
+  $("recentCwdsList").innerHTML = cwds.map((c) => `<option value="${escapeHtml(c)}"></option>`).join("");
+  syncBoardAttentionDot();
+  renderBatchActionBars();
+}
+
+function renderProjectBoard() {
+  const boardEl = $("projectBoard");
+  if (!boardEl) return;
+  const shouldShowBoard = !(state.initialThreadLoading && state.activeThreadId) && (state.boardOpen || !state.activeThread);
+  if (!shouldShowBoard) {
+    boardEl.hidden = true;
+    boardEl.innerHTML = "";
+    renderBatchActionBars();
+    return;
+  }
+
+  const activeInput = document.activeElement?.id === "boardSearchInput" ? document.activeElement : null;
+  const selStart = activeInput ? activeInput.selectionStart : null;
+  const selEnd = activeInput ? activeInput.selectionEnd : null;
+
+  const groups = getProjectGroups();
+  const allGroups = getProjectGroups({ ignoreFilters: true });
+  boardEl.hidden = false;
+  boardEl.innerHTML = renderProjectBoardHtml({
+    groups,
+    allGroups,
+    pendingRequests: state.pendingRequests,
+    showAllProjects: state.showAllProjects,
+    expandedProjects: state.expandedProjects,
+    activeThreadId: state.activeThreadId,
+    searchText: state.searchText,
+    selectionMode: state.batchSelect.active,
+    selectedThreadIds: state.batchSelect.selectedIds,
+  });
+
+  if (activeInput) {
+    const nextInput = $("boardSearchInput");
+    if (nextInput) {
+      nextInput.focus({ preventScroll: true });
+      if (typeof selStart === "number" && typeof selEnd === "number") {
+        nextInput.setSelectionRange(selStart, selEnd);
+      }
+    }
+  }
+  renderBatchActionBars();
+}
+
+function renderProjectTaskStrip() {
+  const stripEl = $("projectTaskStrip");
+  if (!stripEl) return;
+  stripEl.hidden = true;
+  stripEl.classList.remove("is-single-task");
+  stripEl.innerHTML = "";
+}
+
+function renderTopbarAndControls() {
+  const thread = state.activeThread;
+  const topbar = $("topbar");
+  const provBadge = $("activeProviderBadge");
+  const profBadge = $("activeProfileBadge");
+  const projectCrumb = $("activeProjectCrumb");
+  const goalBadge = $("activeGoalBadge");
+  const goalBtn = $("goalToggleBtn");
+  const interruptBtn = $("interruptBtn");
+  const renameBtn = $("renameThreadBtn");
+  const archiveBtn = $("archiveThreadBtn");
+  const boardIcon = $("boardToggleIcon");
+  const boardLabel = $("boardToggleLabel");
+  const moreDot = $("topbarMoreDot");
+  const moreProjCard = $("topbarMoreProjectCard");
+
+  if (boardIcon && boardLabel) {
+    const showReturn = Boolean(state.boardOpen && thread);
+    boardIcon.innerHTML = showReturn ? iconSvg("chat", { size: 14 }) : iconSvg("board", { size: 14 });
+    boardLabel.textContent = showReturn ? "回到对话" : "项目面板";
+  } else if ($("boardToggleBtn")) {
+    $("boardToggleBtn").innerHTML = (state.boardOpen && thread)
+      ? `${iconSvg("chat", { size: 14 })}<span>回到对话</span>`
+      : `${iconSvg("board", { size: 14 })}<span>项目面板</span>`;
+  }
+
+  if (!thread) {
+    topbar?.classList.remove("is-running");
+    provBadge.hidden = true;
+    profBadge.hidden = true;
+    if (projectCrumb) projectCrumb.hidden = true;
+    goalBadge.hidden = true;
+    goalBtn.hidden = true;
+    interruptBtn.hidden = true;
+    renameBtn.hidden = true;
+    archiveBtn.hidden = true;
+    if (moreDot) moreDot.hidden = true;
+    if (moreProjCard) moreProjCard.hidden = true;
+    $("activeTitle").textContent = "项目与多任务总控";
+    $("activeCwd").textContent = "选择关注项目或点击语音说话直达对话";
+    syncBoardAttentionDot();
+    syncWorkspaceVisibility();
+    renderLiveBanner();
+    renderProjectTaskStrip();
+    renderComposerControls();
+    return;
+  }
+
+  const running = isActiveThreadRunning();
+  topbar?.classList.toggle("is-running", running);
+
+  const meta = providerVisualMeta(thread.provider);
+  const activeProfile = state.profiles.find((p) => p.provider === thread.provider && p.id === thread.profileId) || null;
+  const scopedProfiles = filterProfilesByProvider(state.profiles, thread.provider).filter((p) => p?.installed !== false);
+  const profVisual = activeProfile ? profileHealthVisualMeta(activeProfile) : null;
+  const profileLabel = activeProfile
+    ? profileOptionLabel(activeProfile)
+    : (thread.profileLabel || thread.profileId || "");
+  const compactProfileText = activeProfile
+    ? compactProfileChipText(activeProfile)
+    : String(thread.profileLabel || thread.profileId || "")
+        .replace(/^(Codex|Claude|Antigravity)\s*[·:/\-]?\s*/i, "")
+        .trim()
+        .slice(0, 9);
+  provBadge.hidden = false;
+  provBadge.className = `provider-badge is-${thread.provider}`;
+  provBadge.innerHTML = `<span class="provider-glyph" aria-hidden="true">${providerIconSvg(thread.provider, { size: 12 })}</span><span class="provider-text">${escapeHtml(meta.short)}</span>`;
+  provBadge.title = `${meta.label}${profileLabel ? ` · ${profileLabel}` : ""}`;
+
+  const hasProfAlert = Boolean(profVisual && profVisual.status !== "unknown" && profVisual.status !== "healthy");
+  const hasProfAlias = Boolean(String(activeProfile?.health?.alias || "").trim());
+  const hideRedundantProfBadge = scopedProfiles.length <= 1 && !hasProfAlert && !hasProfAlias;
+  if (hideRedundantProfBadge || !compactProfileText) {
+    profBadge.hidden = true;
+    profBadge.textContent = "";
+    profBadge.className = "profile-badge";
+  } else {
+    profBadge.hidden = false;
+    profBadge.textContent = compactProfileText;
+    profBadge.className = `profile-badge${profVisual ? ` ${profVisual.dotClass}` : ""}`;
+    profBadge.title = `当前实例：${profileLabel}（点击查看全部实例健康状态、手动测通或同目录接力）`;
+  }
+
+  const cwdKey = normalizeProjectCwd(thread.cwd);
+  const projMeta = state.projectsMeta[cwdKey] || {};
+  const isPinned = Boolean(projMeta.pinned);
+  if (projectCrumb) {
+    projectCrumb.hidden = true;
+    projectCrumb.setAttribute("aria-hidden", "true");
+    projectCrumb.textContent = "";
+    projectCrumb.classList.remove("is-pinned");
+  }
+
+  $("activeTitle").textContent = thread.title || "新会话";
+  $("activeCwd").textContent = thread.cwd || "";
+
+  const goalActive = Boolean(thread.goalState?.active);
+  goalBadge.hidden = !goalActive;
+  goalBadge.classList.remove("is-active", "is-done");
+  if (goalActive) {
+    const turnCount = thread.goalState?.turnCount || 1;
+    const maxTurns = thread.goalState?.maxTurns || 20;
+    goalBadge.innerHTML = `${iconSvg("target", { size: 11 })}<span>${turnCount}/${maxTurns}</span>`;
+    goalBadge.classList.add("is-active");
+    goalBadge.title = `Goal 自动推进中 (${turnCount}/${maxTurns})，点击可切换`;
+  } else if (thread.goalState?.status === "completed") {
+    goalBadge.hidden = false;
+    goalBadge.innerHTML = `${iconSvg("target", { size: 11 })}${iconSvg("check", { size: 11 })}`;
+    goalBadge.classList.add("is-done");
+    goalBadge.title = "Goal 已达成";
+  }
+
+  if (moreDot) moreDot.hidden = !goalActive;
+
+  if (moreProjCard) {
+    moreProjCard.hidden = !thread.cwd;
+    const pinBtn = $("topbarPinProjectBtn");
+    if (pinBtn) {
+      pinBtn.innerHTML = `${isPinned ? iconSvg("star-filled", { size: 12 }) : iconSvg("star", { size: 12 })}<span>${isPinned ? "已关注" : "关注项目"}</span>`;
+      pinBtn.classList.toggle("is-pinned", isPinned);
+    }
+    const cwdEl = $("topbarMoreCwd");
+    if (cwdEl) cwdEl.textContent = thread.cwd || "";
+  }
+
+  goalBtn.hidden = false;
+  goalBtn.textContent = goalActive ? "关闭 Goal" : "开启 Goal";
+
+  interruptBtn.hidden = !running;
+  renameBtn.hidden = false;
+  archiveBtn.hidden = false;
+  archiveBtn.textContent = thread.archived ? "取消归档" : "归档";
+
+  syncBoardAttentionDot();
+  syncWorkspaceVisibility();
+  renderLiveBanner();
+  renderProjectTaskStrip();
+  renderComposerControls();
+}
+
+function renderLiveBanner() {
+  const banner = $("liveBanner");
+  if (state.toastActive) {
+    banner.classList.remove("is-ambient");
+    return;
+  }
+  const running = isActiveThreadRunning();
+  if (!running) {
+    banner.classList.remove("is-error", "is-ambient");
+    banner.hidden = true;
+    return;
+  }
+  // When actively following an open chat thread, live streaming progress is already shown inline below messages.
+  if (!state.boardOpen && state.autoFollow && state.activeThread) {
+    banner.classList.remove("is-error", "is-ambient");
+    banner.hidden = true;
+    return;
+  }
+  banner.classList.remove("is-error");
+  banner.hidden = false;
+  const { phase, detail } = humanizeLiveActivity(state.liveActivity, {
+    isStreamingText: Boolean(state.streamingText),
+  });
+  const isAmbient = !detail && (/执行中$/.test(phase) || (Boolean(state.streamingText) && phase === "正在生成回复…"));
+  banner.classList.toggle("is-ambient", isAmbient);
+  $("livePhaseText").textContent = phase;
+  $("liveDetailText").textContent = detail;
+}
+
+function currentInlineLivePhase() {
+  if (!isActiveThreadRunning()) return "";
+  const { phase, detail } = humanizeLiveActivity(state.liveActivity, {
+    isStreamingText: Boolean(state.streamingText),
+  });
+  if (!phase && !detail) return "";
+  return detail && detail !== phase ? `${phase} · ${detail}` : (phase || detail || "");
+}
+
+function captureTurnListOpenKeys(blocks, startIdx = 0) {
+  const keys = new Set();
+  for (let i = 0; i < blocks.length; i += 1) {
+    const block = blocks[i];
+    if (!block) continue;
+    const turnKey = block.getAttribute("data-turn-id") || `idx:${startIdx + i}`;
+    const boxes = block.querySelectorAll(".process-summary-box, .heartbeat-disclosure");
+    for (let b = 0; b < boxes.length; b += 1) {
+      if (boxes[b].open) keys.add(`${turnKey}:${b}`);
+    }
+  }
+  return keys;
+}
+
+function restoreTurnListOpenKeys(blocks, openKeys, startIdx = 0) {
+  if (!openKeys || !openKeys.size) return;
+  for (let i = 0; i < blocks.length; i += 1) {
+    const block = blocks[i];
+    if (!block) continue;
+    const turnKey = block.getAttribute("data-turn-id") || `idx:${startIdx + i}`;
+    const boxes = block.querySelectorAll(".process-summary-box, .heartbeat-disclosure");
+    for (let b = 0; b < boxes.length; b += 1) {
+      if (openKeys.has(`${turnKey}:${b}`)) boxes[b].open = true;
+    }
+  }
+}
+
+function activeDisplayTurns() {
+  if (!state.activeThread || state.boardOpen) return [];
+  return dedupeAdjacentTurns(Array.isArray(state.activeThread.turns) ? state.activeThread.turns : []);
+}
+
+function buildTurnRenderOptions(turns, idx) {
+  const agentLabel = providerDisplayName(state.activeThread?.provider);
+  const running = isActiveThreadRunning();
+  const isLastTurn = idx === turns.length - 1;
+  const hasStreamingReply = Boolean(state.streamingText);
+  const turnRunning = isLastTurn && running && !hasStreamingReply;
+  const targetTurn = turns[idx];
+  const foldCompletedThoughtIntoLastProcess = Boolean(
+    isLastTurn
+    && hasStreamingReply
+    && state.streamingThought
+    && turnEndsWithProcessGroup(targetTurn),
+  );
+  return {
+    agentLabel,
+    threadId: state.activeThread?.id || state.activeThreadId || "",
+    forceRunning: turnRunning,
+    suppressRunning: !turnRunning,
+    liveThought: turnRunning ? state.streamingThought : "",
+    livePhase: turnRunning ? currentInlineLivePhase() : "",
+    trailingThought: foldCompletedThoughtIntoLastProcess ? state.streamingThought : "",
+    hideSyntheticLiveReply: Boolean(isLastTurn && hasStreamingReply),
+    showIncompleteSummaryHint: true,
+    supersededByNextTurn: !isLastTurn,
+    hasExternalStreamingReply: Boolean(isLastTurn && hasStreamingReply),
+  };
+}
+
+function syncLiveTurnFrontier() {
+  if (state.streamingText || !isActiveThreadRunning()) {
+    renderStreamingTurn();
+    return;
+  }
+  const turns = activeDisplayTurns();
+  const turnListEl = $("turnList");
+  if (!turns.length || !turnListEl || turnListEl.hidden || turnListEl.children.length !== turns.length) {
+    if (turns.length) {
+      renderActiveMessages();
+    } else {
+      renderStreamingTurn();
+    }
+    return;
+  }
+  const lastIdx = turns.length - 1;
+  const lastBlock = turnListEl.lastElementChild;
+  if (!lastBlock) {
+    renderActiveMessages();
+    return;
+  }
+  const openKeys = captureTurnListOpenKeys([lastBlock], lastIdx);
+  lastBlock.outerHTML = renderTurnHtml(turns[lastIdx], buildTurnRenderOptions(turns, lastIdx));
+  if (turnListEl.lastElementChild) {
+    restoreTurnListOpenKeys([turnListEl.lastElementChild], openKeys, lastIdx);
+  }
+  renderStreamingTurn();
+  scrollViewportIfFollowing();
+}
+
+function renderStreamingTurn() {
+  const el = $("streamingTurn");
+  const turns = activeDisplayTurns();
+  if (!state.streamingText && turns.length > 0 && isActiveThreadRunning()) {
+    el.hidden = true;
+    el.innerHTML = "";
+    return;
+  }
+  if (!state.streamingText && !state.streamingThought) {
+    el.hidden = true;
+    el.innerHTML = "";
+    return;
+  }
+  el.hidden = false;
+  const agentLabel = providerDisplayName(state.activeThread?.provider || currentComposerProvider());
+  const parts = [];
+  const hasStreamingReply = Boolean(state.streamingText);
+  const thoughtAlreadyFolded = Boolean(
+    hasStreamingReply
+    && state.streamingThought
+    && turns.length > 0
+    && turnEndsWithProcessGroup(turns[turns.length - 1]),
+  );
+  if (state.streamingThought && !thoughtAlreadyFolded) {
+    const thoughtLabel = hasStreamingReply ? "已完成思考分析" : "执行过程 · 正在思考分析";
+    const compactThought = state.streamingThought.replace(/\s+/g, " ").trim();
+    const thoughtTail = compactThought.length > 180 ? `…${compactThought.slice(-180).trim()}` : compactThought;
+    if (hasStreamingReply) {
+      parts.push(`
+        <div class="process-card">
+          <details class="process-summary-box">
+            <summary>
+              <span class="process-summary-dot"></span>
+              <span class="process-summary-text">${thoughtLabel}</span>
+              <span class="process-summary-hint">查看推理</span>
+            </summary>
+            <div class="process-summary-body">
+              <div class="tool-body md-body">${renderMarkdown(state.streamingThought)}</div>
+            </div>
+          </details>
+        </div>
+      `);
+    } else {
+      const liveThoughtPreviewHtml = thoughtTail
+        ? `<div class="live-progress-feed" aria-live="polite"><div class="live-thought-preview" data-live-frontier="1"><span class="live-frontier-dot" aria-hidden="true"></span><span class="tool-kind">思考中</span><span class="live-thought-text">${escapeHtml(thoughtTail)}</span></div></div>`
+        : "";
+      parts.push(`
+        <div class="process-card is-live">
+          <details class="process-summary-box is-live">
+            <summary>
+              <span class="process-summary-dot"></span>
+              <span class="process-summary-text">${thoughtLabel}</span>
+              <span class="process-summary-hint">查看推理</span>
+            </summary>
+            <div class="process-summary-body">
+              <div class="tool-body md-body">${renderMarkdown(state.streamingThought)}</div>
+            </div>
+          </details>
+          ${liveThoughtPreviewHtml}
+        </div>
+      `);
+    }
+  }
+  if (state.streamingText) {
+    const streamThreadId = state.activeThread?.id || state.activeThreadId || "";
+    const cleanStreamText = cleanStreamingAgentText(state.streamingText);
+    parts.push(`
+      <div class="msg-row msg-agent">
+        <div class="msg-meta">
+          <span class="msg-role">${escapeHtml(agentLabel)}</span>
+          <span class="phase-tag is-streaming"><span class="live-frontier-dot" aria-hidden="true"></span>正在回复…</span>
+        </div>
+        <div class="msg-bubble agent-bubble md-body">${renderMarkdown(cleanStreamText, { threadId: streamThreadId })}</div>
+      </div>
+    `);
+  }
+  el.innerHTML = parts.join("");
+  scrollViewportIfFollowing();
+}
+
+function renderActiveMessages() {
+  const thread = state.activeThread;
+  const turnListEl = $("turnList");
+  const loadOlderWrap = $("loadOlderWrap");
+
+  syncWorkspaceVisibility();
+  renderProjectBoard();
+  renderProjectTaskStrip();
+
+  if (state.initialThreadLoading && state.activeThreadId && !thread) {
+    turnListEl.hidden = false;
+    loadOlderWrap.hidden = true;
+    $("streamingTurn").hidden = true;
+    return;
+  }
+
+  if (!thread || state.boardOpen) {
+    turnListEl.hidden = true;
+    turnListEl.innerHTML = "";
+    loadOlderWrap.hidden = true;
+    $("streamingTurn").hidden = true;
+    if (!state.boardOpen && !thread) {
+      renderStreamingTurn();
+    }
+    return;
+  }
+
+  turnListEl.hidden = false;
+  loadOlderWrap.hidden = !state.nextCursor;
+  const openKeys = captureTurnListOpenKeys(turnListEl.querySelectorAll(":scope > .turn-block"), 0);
+  const turns = dedupeAdjacentTurns(Array.isArray(thread.turns) ? thread.turns : []);
+  turnListEl.innerHTML = turns.map((turn, idx) => renderTurnHtml(turn, buildTurnRenderOptions(turns, idx))).join("");
+  restoreTurnListOpenKeys(turnListEl.querySelectorAll(":scope > .turn-block"), openKeys, 0);
+  renderStreamingTurn();
+  scrollViewportIfFollowing();
+}
+
+function renderPendingRequests() {
+  const dock = $("pendingRequestsDock");
+  const list = state.pendingRequests.filter((r) => !state.activeThreadId || r.threadId === state.activeThreadId);
+  syncBoardAttentionDot();
+  if (isBoardViewActive() || !list.length) {
+    dock.hidden = true;
+    dock.innerHTML = "";
+    return;
+  }
+  dock.hidden = false;
+  dock.innerHTML = list.map((req) => renderServerRequestCard(req)).join("");
+}
+
+function renderQueuedTurns() {
+  const bar = $("queuedTurnsBar");
+  const items = state.queuedTurns || [];
+  if (isBoardViewActive() || !items.length) {
+    bar.hidden = true;
+    bar.innerHTML = "";
+    return;
+  }
+  bar.hidden = false;
+  bar.innerHTML = renderQueuedTurnsPanelHtml(items, {
+    collapsed: state.queuedPanelCollapsed,
+  });
+}
+
+function applyActiveQueuedTurns(threadId, items = []) {
+  if (!threadId) return;
+  const next = Array.isArray(items) ? items : [];
+  const target = state.threads.find((t) => t.id === threadId);
+  const countChanged = target ? (target.queuedCount || 0) !== next.length : false;
+  syncThreadSummaryIntoList({ id: threadId, queuedCount: next.length });
+
+  if (threadId === state.activeThreadId) {
+    const prevSig = (state.queuedTurns || [])
+      .map((q) => `${q.id}:${q.text || ""}:${q.imageCount || 0}:${q.source || ""}:${q.goalMode ? 1 : 0}`)
+      .join("|");
+    const nextSig = next
+      .map((q) => `${q.id}:${q.text || ""}:${q.imageCount || 0}:${q.source || ""}:${q.goalMode ? 1 : 0}`)
+      .join("|");
+    if (state.activeThread) {
+      state.activeThread.queuedCount = next.length;
+    }
+    state.queuedTurns = next;
+    if (prevSig !== nextSig) {
+      renderQueuedTurns();
+    }
+  }
+  if (countChanged) {
+    renderThreadList();
+    renderProjectTaskStrip();
+    renderProjectBoard();
+  }
+}
+
+function renderComposerImages() {
+  const wrap = $("composerImages");
+  if (!state.images.length) {
+    wrap.hidden = true;
+    wrap.innerHTML = "";
+    return;
+  }
+  wrap.hidden = false;
+  wrap.innerHTML = state.images.map((img, idx) => {
+    const caption = img?.name || `图片 ${idx + 1}`;
+    return `
+      <div class="composer-img-chip" title="${escapeHtml(caption)}">
+        <button type="button" class="composer-img-thumb" data-preview-src="${escapeHtml(img.dataUrl)}" data-preview-caption="${escapeHtml(caption)}" aria-label="预览图片 ${escapeHtml(caption)}">
+          <img src="${escapeHtml(img.dataUrl)}" alt="${escapeHtml(caption)}" />
+          <span class="composer-img-name">${escapeHtml(caption)}</span>
+        </button>
+        <button type="button" class="composer-img-remove" data-remove-img="${idx}" aria-label="移除图片">${iconSvg("close", { size: 11 })}</button>
+      </div>
+    `;
+  }).join("");
+}
+
+const PREVIEW_RASTER_RE = /\.(?:png|jpe?g|webp|gif)$/i;
+
+function openImagePreviewModal(src, caption = "", rawSrc = "") {
+  const modal = $("imagePreviewModal");
+  const img = $("imagePreviewImg");
+  const capEl = $("imagePreviewCaption");
+  const metaEl = $("imagePreviewMeta");
+  const loadRawBtn = $("imagePreviewLoadRawBtn");
+  const rawLink = $("imagePreviewOpenRaw");
+  if (!modal || !img || !src) return;
+
+  const isCompressedUrl = !src.startsWith("data:") && /[?&]w=\d+/i.test(src) && !/[?&]raw=1/i.test(src);
+  const resolvedRaw = rawSrc || "";
+  state.imagePreview = { src, rawSrc: resolvedRaw, caption, showingRaw: !isCompressedUrl };
+
+  img.src = src;
+  img.alt = caption || "图片预览";
+  if (capEl) capEl.textContent = caption || "图片预览";
+  if (metaEl) {
+    metaEl.hidden = src.startsWith("data:");
+    metaEl.textContent = isCompressedUrl ? "省流压缩" : "原图";
+  }
+  if (loadRawBtn) {
+    const canUpgradeRaw = Boolean(isCompressedUrl && resolvedRaw && resolvedRaw !== src);
+    loadRawBtn.hidden = !canUpgradeRaw;
+    loadRawBtn.disabled = false;
+    loadRawBtn.textContent = "加载原图";
+  }
+  if (rawLink) {
+    const targetHref = resolvedRaw || src;
+    if (targetHref.startsWith("data:")) {
+      rawLink.hidden = true;
+      rawLink.setAttribute("href", "#");
+    } else {
+      rawLink.hidden = false;
+      rawLink.setAttribute("href", targetHref);
+    }
+  }
+  if (!modal.open && typeof modal.showModal === "function") {
+    modal.showModal();
+  }
+}
+
+function renderFileCodeLinesHtml(content = "", { startLine = null, endLine = null } = {}) {
+  const lines = String(content || "").replace(/\r\n?/g, "\n").split("\n");
+  if (lines.length > 4000) {
+    return `<pre class="file-preview-pre">${escapeHtml(content)}</pre>`;
+  }
+  const hiStart = Number(startLine) > 0 ? Number(startLine) : 0;
+  const hiEnd = Number(endLine) >= hiStart && hiStart > 0 ? Number(endLine) : hiStart;
+  return `
+    <div class="file-code-lines">
+      ${lines.map((ln, idx) => {
+        const lineNo = idx + 1;
+        const isHi = hiStart > 0 && lineNo >= hiStart && lineNo <= hiEnd;
+        return `<div class="file-code-row${isHi ? " is-highlight" : ""}" data-line-no="${lineNo}"><span class="file-line-no">${lineNo}</span><span class="file-line-code">${escapeHtml(ln || " ")}</span></div>`;
+      }).join("")}
+    </div>
+  `;
+}
+
+function renderFilePreviewBody(meta, { threadId = "", rawMode = false } = {}) {
+  const bodyEl = $("filePreviewBody");
+  if (!bodyEl || !meta) return;
+  const targetLine = meta.startLine || 0;
+  if (meta.kind === "markdown" && !rawMode) {
+    bodyEl.innerHTML = `<div class="file-preview-md md-body">${renderMarkdown(meta.content || "", { threadId })}</div>`;
+    return;
+  }
+  if (meta.kind === "video") {
+    const src = `./api/thread/file?threadId=${encodeURIComponent(threadId)}&path=${encodeURIComponent(meta.requestPath || meta.displayPath || meta.name)}&mode=raw`;
+    bodyEl.innerHTML = `<div class="file-preview-media-wrap"><video class="file-preview-video" controls playsinline preload="metadata" src="${escapeHtml(src)}"></video></div>`;
+    return;
+  }
+  if (meta.kind === "audio") {
+    const src = `./api/thread/file?threadId=${encodeURIComponent(threadId)}&path=${encodeURIComponent(meta.requestPath || meta.displayPath || meta.name)}&mode=raw`;
+    bodyEl.innerHTML = `<div class="file-preview-media-wrap"><audio class="file-preview-audio" controls preload="metadata" src="${escapeHtml(src)}"></audio></div>`;
+    return;
+  }
+  if (meta.kind === "pdf") {
+    const src = `./api/thread/file?threadId=${encodeURIComponent(threadId)}&path=${encodeURIComponent(meta.requestPath || meta.displayPath || meta.name)}&mode=raw`;
+    bodyEl.innerHTML = `
+      <div class="file-preview-media-wrap is-pdf">
+        <div class="file-preview-pdf-bar"><a class="btn-secondary btn-xs" href="${escapeHtml(src)}" target="_blank" rel="noopener noreferrer">在新标签页查看完整 PDF</a></div>
+        <iframe class="file-preview-pdf" src="${escapeHtml(src)}" title="${escapeHtml(meta.name || "PDF 预览")}"></iframe>
+      </div>
+    `;
+    return;
+  }
+  if (meta.kind === "binary") {
+    bodyEl.innerHTML = `<div class="file-preview-empty">二进制文件（${escapeHtml(formatByteSize(meta.size || 0))}），请点击右上角「下载」到本地查看。</div>`;
+    return;
+  }
+  const truncBanner = meta.truncated
+    ? `<div class="file-preview-trunc-note">文件较大，仅展示前 ${escapeHtml(formatByteSize(256 * 1024))} 内容（完整文件请点右上角下载）。</div>`
+    : "";
+  bodyEl.innerHTML = `${truncBanner}${renderFileCodeLinesHtml(meta.content || "", { startLine: meta.startLine, endLine: meta.endLine })}`;
+  if (targetLine > 0) {
+    const targetRow = bodyEl.querySelector(`[data-line-no="${targetLine}"]`);
+    targetRow?.scrollIntoView?.({ block: "center" });
+  }
+}
+
+async function openFilePreviewModal(threadId, filePath, lineAnchor = null) {
+  const cleanThreadId = String(threadId || "").trim();
+  const cleanPath = String(filePath || "").trim();
+  if (!cleanThreadId || !cleanPath) return;
+
+  if (PREVIEW_RASTER_RE.test(cleanPath)) {
+    const base = `./api/thread/image?threadId=${encodeURIComponent(cleanThreadId)}&path=${encodeURIComponent(cleanPath)}`;
+    openImagePreviewModal(`${base}&w=1280&q=75`, cleanPath, `${base}&raw=1`);
+    return;
+  }
+
+  const modal = $("filePreviewModal");
+  const nameEl = $("filePreviewName");
+  const pathEl = $("filePreviewPath");
+  const metaEl = $("filePreviewMeta");
+  const toggleBtn = $("filePreviewToggleRawBtn");
+  const copyBtn = $("filePreviewCopyBtn");
+  const dlBtn = $("filePreviewDownloadBtn");
+  const bodyEl = $("filePreviewBody");
+  if (!modal || !bodyEl) return;
+
+  const baseName = cleanPath.split(/[\\/]/).filter(Boolean).pop() || cleanPath;
+  if (nameEl) nameEl.textContent = baseName;
+  if (pathEl) pathEl.textContent = lineAnchor ? `${cleanPath}#L${lineAnchor}` : cleanPath;
+  if (metaEl) metaEl.hidden = true;
+  if (toggleBtn) toggleBtn.hidden = true;
+  if (copyBtn) copyBtn.hidden = true;
+  if (dlBtn) {
+    dlBtn.hidden = false;
+    dlBtn.setAttribute("href", `./api/thread/file?threadId=${encodeURIComponent(cleanThreadId)}&path=${encodeURIComponent(cleanPath)}&mode=raw&download=1`);
+  }
+  bodyEl.innerHTML = `<div class="file-preview-empty">正在读取文件内容…</div>`;
+  state.filePreview = { threadId: cleanThreadId, path: cleanPath, meta: null, rawMode: false };
+  if (!modal.open && typeof modal.showModal === "function") {
+    modal.showModal();
+  }
+
+  try {
+    const refWithLine = lineAnchor ? `${cleanPath}#L${lineAnchor}` : cleanPath;
+    const res = await apiGet(`api/thread/file?threadId=${encodeURIComponent(cleanThreadId)}&path=${encodeURIComponent(refWithLine)}`);
+    const meta = {
+      ...res,
+      requestPath: cleanPath,
+      startLine: Number(res?.startLine) || (Number(lineAnchor) || null),
+      endLine: Number(res?.endLine) || (Number(lineAnchor) || null),
+    };
+    state.filePreview = { threadId: cleanThreadId, path: cleanPath, meta, rawMode: false };
+    if (nameEl && meta.name) nameEl.textContent = meta.name;
+    if (pathEl) {
+      const shown = meta.displayPath || cleanPath;
+      pathEl.textContent = meta.startLine ? `${shown}#L${meta.startLine}` : shown;
+    }
+    if (metaEl) {
+      const parts = [String(meta.language || meta.kind || "").toUpperCase(), formatByteSize(meta.size || 0)];
+      if (meta.lineCount) parts.push(`${meta.lineCount} 行`);
+      metaEl.textContent = parts.filter(Boolean).join(" · ");
+      metaEl.hidden = false;
+    }
+    if (toggleBtn) {
+      toggleBtn.hidden = meta.kind !== "markdown";
+      toggleBtn.textContent = "源码";
+    }
+    if (copyBtn) {
+      copyBtn.hidden = !meta.content;
+      copyBtn.textContent = "复制";
+    }
+    renderFilePreviewBody(meta, { threadId: cleanThreadId, rawMode: false });
+  } catch (error) {
+    const msg = formatActionError(error, "读取文件失败");
+    bodyEl.innerHTML = `<div class="file-preview-error">无法预览该文件：${escapeHtml(msg)}</div>`;
+  }
+}
+
+function renderComposerControls() {
+  const running = isActiveThreadRunning();
+  const modeSelect = $("runningSubmitMode");
+  modeSelect.hidden = !running;
+  const sub = resolveComposerSubmission({
+    hasActiveThread: Boolean(state.activeThreadId),
+    isRunning: running,
+    isSubmitting: state.isSubmitting,
+    mode: modeSelect.value,
+    text: $("promptInput").value,
+    imageCount: state.images.length,
+  });
+  const sendBtn = $("sendBtn");
+  if (state.imageProcessingCount > 0 && !state.isSubmitting) {
+    sendBtn.textContent = "处理图片…";
+    sendBtn.disabled = true;
+    sendBtn.setAttribute("aria-busy", "true");
+  } else {
+    sendBtn.textContent = sub.buttonLabel;
+    sendBtn.disabled = !sub.canSubmit;
+    sendBtn.setAttribute("aria-busy", state.isSubmitting ? "true" : "false");
+  }
+  $("promptInput").readOnly = state.isSubmitting;
+  $("composerGoalBtn").setAttribute("aria-pressed", state.composerGoal ? "true" : "false");
+  const imgBadge = $("imageCountBadge");
+  if (imgBadge) {
+    imgBadge.textContent = String(state.images.length || "");
+    imgBadge.hidden = state.images.length === 0;
+  }
+  renderComposerConfigChip();
+  autoResizePromptInput();
+}
+
+function scrollViewportIfFollowing() {
+  if (!state.autoFollow) return;
+  const vp = $("messagesViewport");
+  vp.scrollTop = vp.scrollHeight;
+}
+
+async function refreshProviders() {
+  let resolvedProv = await apiGet("api/providers");
+  let hasHealthMeta = Array.isArray(resolvedProv?.profiles)
+    && resolvedProv.profiles.some((p) => p?.health && typeof p.health.status === "string");
+  if (!hasHealthMeta) {
+    try {
+      const hotProv = await apiGet("apps/ac-hot/api/providers");
+      if (Array.isArray(hotProv?.profiles) && hotProv.profiles.length) {
+        resolvedProv = hotProv;
+        state.useHotExtension = true;
+        hasHealthMeta = resolvedProv.profiles.some((p) => p?.health && typeof p.health.status === "string");
+      }
+    } catch {
+      // Main server already serves providers natively.
+    }
+  }
+  state.providers = resolvedProv.providers || [];
+  state.profiles = resolvedProv.profiles || [];
+  const agyAvailable = state.profiles.find((p) => p.installed && !p.health?.disabled && p.provider === "antigravity" && p.id === "desktop")
+    || state.profiles.find((p) => p.installed && !p.health?.disabled && p.provider === "antigravity");
+  state.defaultProvider = resolvedProv.defaultProvider || "antigravity";
+  if (!hasHealthMeta && agyAvailable) {
+    state.defaultProvider = "antigravity";
+    state.defaultProfileId = agyAvailable.id || "desktop";
+  } else {
+    state.defaultProfileId = resolvedProv.defaultProfileId || (state.defaultProvider === "antigravity" ? (agyAvailable?.id || "desktop") : "default");
+  }
+  if (resolvedProv.label) $("hostBadge").textContent = resolvedProv.label;
+  syncProfileSelectors();
+}
+
+async function refreshModels() {
+  const modelsRes = await apiGetWithHotFallback("api/models");
+  state.allModels = modelsRes?.data || [];
+  state.modelsByProvider = modelsRes?.byProvider || {};
+  saveCachedModels(state.allModels, state.modelsByProvider);
+  syncModelAndEffortSelectors();
+  renderComposerControls();
+}
+
+async function refreshModelsForProfile(provider, profileId) {
+  if (provider !== "claude" || !profileId) return;
+  try {
+    const res = await apiGetWithHotFallback(
+      `api/models?provider=${encodeURIComponent(provider)}&profileId=${encodeURIComponent(profileId)}`,
+    );
+    const items = Array.isArray(res?.data) ? res.data : [];
+    if (!items.length) return;
+    state.modelsByProvider = {
+      ...(state.modelsByProvider || {}),
+      [provider]: items,
+    };
+    state.allModels = [
+      ...(Array.isArray(state.allModels) ? state.allModels.filter((m) => m.provider !== provider) : []),
+      ...items,
+    ];
+    saveCachedModels(state.allModels, state.modelsByProvider);
+    syncModelAndEffortSelectors();
+    syncNewModelSelect($("newModelSelect")?.value || "");
+    renderComposerControls();
+  } catch {
+    // Preserve existing model list if profile refresh fails.
+  }
+}
+
+async function refreshProvidersAndModels() {
+  await Promise.all([
+    refreshProviders(),
+    refreshModels(),
+  ]);
+}
+
+let refreshThreadsPromise = null;
+let refreshThreadsArchivedKey = "";
+
+async function refreshThreads() {
+  const archivedKey = state.showArchived ? "1" : "0";
+  if (refreshThreadsPromise && refreshThreadsArchivedKey === archivedKey) {
+    return refreshThreadsPromise;
+  }
+  const runPromise = (async () => {
+    const res = await apiGet(`api/threads?archived=${archivedKey}`);
+    if ((state.showArchived ? "1" : "0") !== archivedKey) return;
+    state.threads = (res.threads || []).filter((t) => !isInternalVoiceThreadClient(t));
+    if (state.pendingRequestsSynced) {
+      syncThreadsPendingCounts();
+    }
+    state.projectsMeta = res.projectsMeta || state.projectsMeta || {};
+    state.warnings = res.warnings || [];
+    if (!state.showArchived) {
+      saveCachedThreads(state.threads, state.projectsMeta);
+    }
+    pruneBatchSelection();
+    renderThreadList();
+    renderProjectBoard();
+    renderProjectTaskStrip();
+    renderVoiceLiveProgressIfOpen();
+  })();
+  refreshThreadsPromise = runPromise;
+  refreshThreadsArchivedKey = archivedKey;
+  try {
+    return await runPromise;
+  } finally {
+    if (refreshThreadsPromise === runPromise) {
+      refreshThreadsPromise = null;
+      refreshThreadsArchivedKey = "";
+    }
+  }
+}
+
+function activeThreadLastTurnHasMatchingThought(thread, liveThought = "") {
+  const cleanLive = String(liveThought || "").replace(/\s+/g, " ").trim();
+  if (!cleanLive) return false;
+  const turns = Array.isArray(thread?.turns) ? thread.turns : [];
+  const lastTurn = turns[turns.length - 1];
+  const items = Array.isArray(lastTurn?.items) ? lastTurn.items : [];
+  const tail = cleanLive.slice(-60);
+  for (let i = items.length - 1; i >= 0; i -= 1) {
+    const it = items[i];
+    if (it?.type !== "reasoning") continue;
+    const raw = (
+      (Array.isArray(it.content) && it.content.length ? it.content.join(" ") : "")
+      || (Array.isArray(it.summary) && it.summary.length ? it.summary.join(" ") : "")
+      || it.text
+      || ""
+    ).replace(/\s+/g, " ").trim();
+    if (raw && (raw === cleanLive || (tail.length >= 16 && raw.includes(tail)))) return true;
+  }
+  return false;
+}
+
+function activeThreadLastTurnHasReasoning(thread) {
+  const turns = Array.isArray(thread?.turns) ? thread.turns : [];
+  const lastTurn = turns[turns.length - 1];
+  if (!lastTurn || !Array.isArray(lastTurn.items)) return false;
+  return lastTurn.items.some((it) => (
+    it?.type === "reasoning"
+    && Boolean(
+      (Array.isArray(it.content) ? it.content.join("") : "")
+      || (Array.isArray(it.summary) ? it.summary.join("") : "")
+      || it.text
+      || ""
+    )
+  ));
+}
+
+function activeThreadLastTurnHasFinalReply(thread) {
+  const turns = Array.isArray(thread?.turns) ? thread.turns : [];
+  const lastTurn = turns[turns.length - 1];
+  const items = Array.isArray(lastTurn?.items) ? lastTurn.items : [];
+  if (!items.length) return false;
+  const lastItem = items[items.length - 1];
+  return lastItem?.type === "agentMessage"
+    && lastItem?.phase !== "commentary"
+    && Boolean(String(lastItem?.text || "").trim());
+}
+
+function reconcileStreamingStateWithThread(thread, streamingPayload = null, activityPayload = null) {
+  if (!thread?.live) {
+    state.streamingText = "";
+    state.streamingThought = "";
+    state.streamingTurnId = "";
+    return;
+  }
+
+  const incomingTurnId = String(streamingPayload?.turnId || activityPayload?.turnId || "").trim();
+  if (incomingTurnId && state.streamingTurnId && incomingTurnId !== state.streamingTurnId) {
+    state.streamingText = "";
+    state.streamingThought = "";
+  }
+  if (incomingTurnId) {
+    state.streamingTurnId = incomingTurnId;
+  }
+
+  if (streamingPayload && typeof streamingPayload === "object") {
+    const serverText = String(streamingPayload.text || "");
+    if (!serverText) {
+      state.streamingText = "";
+    } else if (!state.streamingText || incomingTurnId) {
+      state.streamingText = serverText;
+    }
+
+    const lastTurnDone = activeThreadLastTurnHasFinalReply(thread);
+    if (lastTurnDone) {
+      state.streamingThought = "";
+    } else if (!streamingPayload.thought && state.streamingThought && activeThreadLastTurnHasMatchingThought(thread, state.streamingThought)) {
+      state.streamingThought = "";
+    } else if (!state.streamingThought && streamingPayload.thought && !activeThreadLastTurnHasReasoning(thread)) {
+      state.streamingThought = String(streamingPayload.thought);
+    }
+  }
+
+  if (state.streamingText && isStreamingTextAlreadyPersisted(thread.turns, state.streamingText)) {
+    state.streamingText = "";
+  }
+}
+
+function mergeReloadedTurns(existingTurns, latestTurns) {
+  const existing = Array.isArray(existingTurns) ? existingTurns : [];
+  const latest = Array.isArray(latestTurns) ? latestTurns : [];
+  if (!existing.length) return latest;
+  if (!latest.length) return existing;
+  const latestIds = new Set(latest.map((t) => t?.id).filter(Boolean));
+  const firstMatchIdx = existing.findIndex((t) => t?.id && latestIds.has(t.id));
+  if (firstMatchIdx > 0) {
+    return [...existing.slice(0, firstMatchIdx), ...latest];
+  }
+  return latest;
+}
+
+let activeThreadReloadInFlight = false;
+let activeThreadReloadPromise = null;
+let activeThreadReloadTimer = null;
+let pendingReloadCompositeId = "";
+let lastActiveThreadReloadDoneAt = 0;
+
+function scheduleActiveThreadReload(compositeId, delayMs = 900) {
+  if (!compositeId || compositeId !== state.activeThreadId) return;
+  if (activeThreadReloadTimer) clearTimeout(activeThreadReloadTimer);
+  activeThreadReloadTimer = setTimeout(() => {
+    activeThreadReloadTimer = null;
+    if (state.activeThreadId === compositeId) {
+      void reloadActiveThreadProgress(compositeId);
+    }
+  }, delayMs);
+}
+
+async function reloadActiveThreadProgress(compositeId) {
+  if (!compositeId || state.activeThreadId !== compositeId) return;
+  if (activeThreadReloadInFlight) {
+    pendingReloadCompositeId = compositeId;
+    return activeThreadReloadPromise;
+  }
+  if (activeThreadReloadTimer) {
+    clearTimeout(activeThreadReloadTimer);
+    activeThreadReloadTimer = null;
+  }
+  pendingReloadCompositeId = "";
+  activeThreadReloadInFlight = true;
+  const runPromise = (async () => {
+    try {
+      const prevTurns = Array.isArray(state.activeThread?.turns) ? state.activeThread.turns : [];
+      const prevTail = prevTurns.length ? prevTurns[prevTurns.length - 1] : null;
+      const preserveFailedTail = state.liveActivity?.status === "failed" && prevTail?.status === "failed";
+      const persistedPrevCount = prevTurns.filter((t) => t?.id && !String(t.id).startsWith("optimistic-turn-")).length;
+      const useTailLimit = persistedPrevCount >= 2;
+      let res = await fetchThreadRead(
+        `api/thread?id=${encodeURIComponent(compositeId)}&limit=${useTailLimit ? 2 : 12}`,
+        compositeId,
+      );
+      if (state.activeThreadId !== compositeId || !res?.thread) return;
+
+      const prevIds = new Set(prevTurns.map((t) => t?.id).filter(Boolean));
+      let latestTurns = Array.isArray(res.thread.turns) ? res.thread.turns : [];
+      let hasIdOverlap = latestTurns.some((t) => t?.id && prevIds.has(t.id));
+      if (useTailLimit && !hasIdOverlap && res.nextCursor) {
+        res = await fetchThreadRead(
+          `api/thread?id=${encodeURIComponent(compositeId)}&limit=12`,
+          compositeId,
+        );
+        if (state.activeThreadId !== compositeId || !res?.thread) return;
+        latestTurns = Array.isArray(res.thread.turns) ? res.thread.turns : [];
+        hasIdOverlap = latestTurns.some((t) => t?.id && prevIds.has(t.id));
+      }
+
+      let mergedTurns = mergeReloadedTurns(state.activeThread?.turns, latestTurns);
+      if (!res.thread.live && preserveFailedTail && prevTail) {
+        const hasSameOrFailedTail = mergedTurns.some((t) => t?.id && t.id === prevTail.id)
+          || mergedTurns[mergedTurns.length - 1]?.status === "failed";
+        if (!hasSameOrFailedTail) {
+          mergedTurns = [...mergedTurns, prevTail];
+        }
+      }
+      state.activeThread = {
+        ...res.thread,
+        turns: mergedTurns,
+      };
+      if (!hasIdOverlap) {
+        state.nextCursor = res.nextCursor || null;
+      }
+      if (res.activityCursor) state.activityCursor = res.activityCursor;
+      state.queuedTurns = Array.isArray(res.queuedTurns) ? res.queuedTurns : (state.queuedTurns || []);
+      if (state.activeThread) {
+        state.activeThread.queuedCount = state.queuedTurns.length;
+      }
+
+      if (res.thread.live) {
+        state.liveActivity = res.activity
+          ? mergeLiveActivity(state.liveActivity, res.activity)
+          : (state.liveActivity?.status === "running" ? state.liveActivity : { status: "running" });
+        reconcileStreamingStateWithThread(state.activeThread, res.streaming || null, res.activity || null);
+      } else {
+        if (!preserveFailedTail) {
+          state.liveActivity = { status: "completed" };
+        }
+        reconcileStreamingStateWithThread(state.activeThread, null, null);
+      }
+
+      const other = state.pendingRequests.filter((r) => r.threadId !== compositeId);
+      state.pendingRequests = [...other, ...(res.pendingRequests || [])];
+      state.pendingRequestsSynced = true;
+      syncThreadsPendingCounts();
+      syncThreadSummaryIntoList(state.activeThread);
+      lastActiveThreadReloadDoneAt = Date.now();
+
+      if (effectivePermissionModeForThread(compositeId, state.activeThread) === "turbo") {
+        void autoApproveTurboRequestsForThread(compositeId);
+      }
+
+      renderThreadList();
+      renderProjectBoard();
+      renderProjectTaskStrip();
+      renderTopbarAndControls();
+      renderActiveMessages();
+      renderPendingRequests();
+      renderQueuedTurns();
+    } catch {
+      // Ignore transient polling/reload errors so background polling stays resilient.
+    } finally {
+      activeThreadReloadInFlight = false;
+      activeThreadReloadPromise = null;
+      const nextPendingId = pendingReloadCompositeId;
+      pendingReloadCompositeId = "";
+      if (nextPendingId && nextPendingId === state.activeThreadId) {
+        scheduleActiveThreadReload(nextPendingId, 60);
+      }
+    }
+  })();
+  activeThreadReloadPromise = runPromise;
+  return runPromise;
+}
+
+async function reloadActiveThreadAfterTurnCompletion({
+  threadId = "",
+  turnId = "",
+  turnStatus = "completed",
+  errorMessage = "",
+} = {}) {
+  if (!threadId || state.activeThreadId !== threadId) return;
+  const isFailed = turnStatus === "failed";
+  const existingTurns = Array.isArray(state.activeThread?.turns) ? state.activeThread.turns : [];
+  const tailTurn = existingTurns.length ? existingTurns[existingTurns.length - 1] : null;
+  const matchingTurn = turnId
+    ? [...existingTurns].reverse().find((t) => t?.id === turnId)
+    : null;
+  const failedTurnSnapshot = isFailed
+    ? (matchingTurn || ((tailTurn && (tailTurn.status === "inProgress" || tailTurn.status === "running")) ? tailTurn : null))
+    : null;
+
+  const persistedCount = existingTurns.filter((t) => t?.id && !String(t.id).startsWith("optimistic-turn-")).length;
+  if (state.activeThread?.id === threadId && persistedCount >= 2) {
+    if (!isFailed) {
+      clearComposerStatus();
+    }
+    if (activeThreadReloadPromise) {
+      await activeThreadReloadPromise.catch(() => {});
+    }
+    if (state.activeThreadId !== threadId) return;
+    await reloadActiveThreadProgress(threadId).catch(() => {});
+    renderAgentTelemetryBar();
+  } else {
+    await selectThread(threadId, {
+      focusScroll: state.autoFollow,
+      preserveStatus: isFailed,
+    }).catch(() => {});
+  }
+
+  if (!isFailed || state.activeThreadId !== threadId || !state.activeThread) return;
+  state.liveActivity = { status: "failed", ...(turnId ? { turnId } : {}) };
+  const turns = Array.isArray(state.activeThread.turns) ? state.activeThread.turns : [];
+  const reloadedTail = turns.length ? turns[turns.length - 1] : null;
+  if (failedTurnSnapshot) {
+    const alreadySaved = turns.some((t) => t?.id && t.id === failedTurnSnapshot.id)
+      || reloadedTail?.status === "failed";
+    if (!alreadySaved) {
+      state.activeThread.turns = [
+        ...turns,
+        {
+          ...failedTurnSnapshot,
+          status: "failed",
+          error: { message: errorMessage || "执行失败" },
+        },
+      ];
+      renderActiveMessages();
+    }
+  }
+  renderLiveBanner();
+}
+
+async function selectThread(compositeId, { focusScroll = true, preserveStatus = false } = {}) {
+  if (!preserveStatus) {
+    clearComposerStatus();
+  }
+  if (activeThreadReloadTimer) {
+    clearTimeout(activeThreadReloadTimer);
+    activeThreadReloadTimer = null;
+  }
+  const prevThreadId = state.activeThreadId;
+  state.activeThreadId = compositeId;
+  if (compositeId !== prevThreadId) {
+    state.queuedPanelCollapsed = false;
+  }
+  state.boardOpen = !compositeId;
+  state.autoFollow = focusScroll;
+  state.userPickedDraftModel = false;
+  state.activityCursor = "";
+  state.streamingText = "";
+  state.streamingThought = "";
+  state.streamingTurnId = "";
+  lastActiveThreadReloadDoneAt = 0;
+
+  const url = new URL(location.href);
+  if (compositeId) url.searchParams.set("thread", compositeId);
+  else url.searchParams.delete("thread");
+  history.replaceState(null, "", url.toString());
+
+  if (!compositeId) {
+    state.activeThread = null;
+    state.nextCursor = null;
+    state.liveActivity = null;
+    state.queuedTurns = [];
+    syncProfileSelectors();
+    syncModelAndEffortSelectors();
+    renderThreadList();
+    renderTopbarAndControls();
+    renderAgentTelemetryBar();
+    renderActiveMessages();
+    renderPendingRequests();
+    renderQueuedTurns();
+    return;
+  }
+
+  const cachedSummary = state.threads.find((t) => t.id === compositeId);
+  if (cachedSummary?.cwd) {
+    setSidebarGroupManualPref(cachedSummary.cwd, "expand");
+  }
+
+  const res = await fetchThreadRead(
+    `api/thread?id=${encodeURIComponent(compositeId)}&limit=12`,
+    compositeId,
+  );
+  if (state.activeThreadId !== compositeId) return;
+  lastActiveThreadReloadDoneAt = Date.now();
+  state.activeThread = res.thread;
+  state.nextCursor = res.nextCursor || null;
+  state.activityCursor = res.activityCursor || "";
+  state.liveActivity = res.activity || (res.thread?.live ? { status: "running" } : null);
+  state.queuedTurns = Array.isArray(res.queuedTurns) ? res.queuedTurns : [];
+  if (state.activeThread) {
+    state.activeThread.queuedCount = state.queuedTurns.length;
+  }
+
+  reconcileStreamingStateWithThread(state.activeThread, res.streaming || null, res.activity || null);
+
+  // Merge thread-level pending requests into global state.
+  const other = state.pendingRequests.filter((r) => r.threadId !== compositeId);
+  state.pendingRequests = [...other, ...(res.pendingRequests || [])];
+  state.pendingRequestsSynced = true;
+  syncThreadsPendingCounts();
+  syncThreadSummaryIntoList(res.thread);
+  if (res.thread?.cwd) {
+    setSidebarGroupManualPref(res.thread.cwd, "expand");
+  }
+
+  syncProfileSelectors();
+  syncModelAndEffortSelectors();
+  if (effectivePermissionModeForThread(compositeId, state.activeThread) === "turbo") {
+    void autoApproveTurboRequestsForThread(compositeId).then((count) => {
+      if (count > 0) {
+        setComposerStatus("success", "已按 Turbo 模式自动批准待确认操作", { autoClearMs: 3000 });
+      }
+    });
+  }
+  renderThreadList();
+  renderProjectBoard();
+  renderProjectTaskStrip();
+  renderTopbarAndControls();
+  renderAgentTelemetryBar();
+  renderActiveMessages();
+  renderPendingRequests();
+  renderQueuedTurns();
+  setSidebarOpen(false);
+}
+
+async function loadOlderMessages() {
+  if (!state.activeThreadId || !state.nextCursor) return;
+  const vp = $("messagesViewport");
+  const prevHeight = vp.scrollHeight;
+  const res = await fetchThreadRead(
+    `api/thread?id=${encodeURIComponent(state.activeThreadId)}&cursor=${encodeURIComponent(state.nextCursor)}&limit=25`,
+    state.activeThreadId,
+  );
+  const olderTurns = res.thread?.turns || [];
+  state.activeThread.turns = [...olderTurns, ...(state.activeThread.turns || [])];
+  state.nextCursor = res.nextCursor || null;
+  state.autoFollow = false;
+  renderActiveMessages();
+  vp.scrollTop = vp.scrollHeight - prevHeight;
+}
+
+async function handleSend() {
+  if (state.isSubmitting) return;
+  if (state.imageProcessingCount > 0) {
+    setComposerStatus("error", "图片正在压缩处理中，请稍候再发送", { autoClearMs: 2500 });
+    return;
+  }
+  const input = $("promptInput");
+  const rawText = input.value;
+  const { hasDirective, cleanedText } = extractGoalDirective(rawText);
+  const goalMode = Boolean(state.composerGoal || hasDirective);
+  const text = hasDirective && cleanedText ? rawText : rawText;
+
+  const running = isActiveThreadRunning();
+  const sub = resolveComposerSubmission({
+    hasActiveThread: Boolean(state.activeThreadId),
+    isRunning: running,
+    isSubmitting: false,
+    mode: $("runningSubmitMode").value,
+    text,
+    imageCount: state.images.length,
+  });
+  if (!sub.canSubmit) {
+    setComposerStatus("error", "请输入指令或添加图片后再发送", { autoClearMs: 2500 });
+    return;
+  }
+
+  const savedImages = [...state.images];
+  const cleanImages = savedImages.map((img, idx) => ({
+    name: img?.name || `image-${idx + 1}.jpg`,
+    dataUrl: img?.dataUrl || "",
+  })).filter((img) => Boolean(img.dataUrl));
+  const requestTimeoutMs = cleanImages.length ? 60_000 : 35_000;
+  const model = $("modelSelect").value || "";
+  const effort = $("effortSelect").hidden ? "" : ($("effortSelect").value || "");
+  const permissionMode = normalizeUiPermissionMode($("permissionSelect").value || state.defaultPermissionMode || "turbo", "turbo");
+  state.defaultPermissionMode = saveDefaultPermissionMode(permissionMode);
+  if (state.activeThreadId) {
+    saveLocalThreadPrefs(state.activeThreadId, { model, effort, permissionMode });
+  }
+
+  state.isSubmitting = true;
+  state.autoFollow = true;
+  setComposerConfigOpen(false);
+  setTopbarMenuOpen(false);
+  setComposerStatus("pending", sub.action === "new" ? "正在创建会话并发送指令…" : "正在发送指令…");
+  renderComposerControls();
+
+  try {
+    if (sub.action === "new") {
+      const provider = currentComposerProvider();
+      const profileId = currentComposerProfileId();
+      const created = await apiPost("api/thread/new", {
+        provider,
+        profileId,
+        text,
+        images: cleanImages,
+        model,
+        effort,
+        permissionMode,
+        goalMode,
+      }, { timeoutMs: requestTimeoutMs });
+      input.value = "";
+      state.images = [];
+      renderComposerImages();
+      await refreshThreads();
+      if (created?.thread?.id) {
+        saveLocalThreadPrefs(created.thread.id, { model, effort, permissionMode });
+        await selectThread(created.thread.id);
+      }
+      setComposerStatus("success", "会话已创建并发送指令", { autoClearMs: 3000 });
+      return;
+    }
+
+    if (sub.action === "queue") {
+      const qRes = await apiPost("api/thread/queue", {
+        threadId: state.activeThreadId,
+        text,
+        images: cleanImages,
+        model,
+        effort,
+        permissionMode,
+        goalMode,
+      }, { timeoutMs: requestTimeoutMs });
+      input.value = "";
+      state.images = [];
+      renderComposerImages();
+      applyActiveQueuedTurns(state.activeThreadId, qRes.items || state.queuedTurns);
+      renderQueuedTurns();
+      setComposerStatus("success", "已加入排队，等待当前轮次完成后发送", { autoClearMs: 3000 });
+      showToastBanner("已加入排队", { detail: text.slice(0, 60) });
+      return;
+    }
+
+    const turnRes = await apiPost("api/turn", {
+      threadId: state.activeThreadId,
+      text,
+      images: cleanImages,
+      model,
+      effort,
+      permissionMode,
+      steer: sub.action === "steer",
+      expectedTurnId: state.liveActivity?.turnId || "",
+      goalMode,
+    }, { timeoutMs: requestTimeoutMs });
+    input.value = "";
+    state.images = [];
+    renderComposerImages();
+    if (state.activeThread) {
+      const optimisticTurnId = turnRes?.turn?.id || turnRes?.turnId || `optimistic-turn-${Date.now()}`;
+      const userContent = [
+        ...cleanImages.map((img) => ({ type: "image", name: img.name || "", url: img.dataUrl })),
+        ...(String(text || "").trim() ? [{ type: "text", text }] : []),
+      ];
+      if (!Array.isArray(state.activeThread.turns)) state.activeThread.turns = [];
+      const tailTurn = state.activeThread.turns[state.activeThread.turns.length - 1];
+      if (sub.action === "steer" && tailTurn && (tailTurn.status === "inProgress" || tailTurn.status === "running")) {
+        tailTurn.items = [
+          ...(Array.isArray(tailTurn.items) ? tailTurn.items : []),
+          { type: "userMessage", id: `user-steer-${Date.now()}`, content: userContent },
+        ];
+      } else {
+        state.streamingText = "";
+        state.streamingThought = "";
+        state.streamingTurnId = optimisticTurnId;
+        if (tailTurn?.id !== optimisticTurnId) {
+          state.activeThread.turns.push({
+            id: optimisticTurnId,
+            status: "inProgress",
+            startedAt: Math.floor(Date.now() / 1000),
+            items: [{ type: "userMessage", id: `user-${optimisticTurnId}`, content: userContent }],
+          });
+        }
+      }
+      if (turnRes?.thread?.title) {
+        state.activeThread.title = turnRes.thread.title;
+        state.activeThread.name = turnRes.thread.name || turnRes.thread.title;
+      }
+      state.activeThread.live = true;
+      syncThreadSummaryIntoList({
+        id: state.activeThreadId,
+        live: true,
+        ...(turnRes?.thread?.title ? { title: turnRes.thread.title, name: turnRes.thread.name || turnRes.thread.title } : {}),
+      });
+      state.liveActivity = mergeLiveActivity(state.liveActivity, {
+        turnId: optimisticTurnId,
+        status: "running",
+        phase: `${providerDisplayName(state.activeThread.provider)} 执行中`,
+      });
+      renderThreadList();
+      renderTopbarAndControls();
+      renderActiveMessages();
+    }
+    scheduleActiveThreadReload(state.activeThreadId, 450);
+    setComposerStatus(
+      "success",
+      sub.action === "steer" ? "插话引导已发送" : "指令已发送，等待响应…",
+      { autoClearMs: 2800 },
+    );
+  } catch (error) {
+    input.value = rawText;
+    state.images = savedImages;
+    renderComposerImages();
+    const errMsg = formatActionError(error, "请求发送失败");
+    const errStatus = Number(error?.status || 0);
+    const errCode = String(error?.code || "");
+    const isBusyConflict = errStatus === 409
+      || errCode === "thread_busy"
+      || errCode === "writer_conflict"
+      || /正在运行|占用/.test(errMsg);
+    const failedProvider = state.activeThread?.provider || currentComposerProvider();
+    const failedProfileId = state.activeThread?.profileId || currentComposerProfileId();
+    const altProfile = !isBusyConflict ? findFailoverCandidateProfile(state.profiles, failedProvider, failedProfileId) : null;
+    const failoverContext = altProfile ? {
+      provider: failedProvider,
+      altProfile,
+      cwd: state.activeThread?.cwd || "",
+      text,
+      images: savedImages,
+      model,
+      effort,
+      permissionMode,
+      goalMode,
+    } : null;
+    setComposerStatus("error", `发送失败：${errMsg}`, { failoverContext });
+    showToastBanner("发送失败", { detail: errMsg, error: true });
+    void refreshProvidersAndModels().catch(() => {});
+  } finally {
+    state.isSubmitting = false;
+    renderComposerControls();
+  }
+}
+
+function buildFailoverContextForProvider(provider, failedProfileId, overrideText = "") {
+  const altProfile = findFailoverCandidateProfile(state.profiles, provider, failedProfileId);
+  if (!altProfile) return null;
+  return {
+    provider,
+    altProfile,
+    cwd: state.activeThread?.cwd || "",
+    text: overrideText || $("promptInput")?.value || "",
+    images: [...(state.images || [])],
+    model: $("modelSelect")?.value || "",
+    effort: $("effortSelect")?.hidden ? "" : ($("effortSelect")?.value || ""),
+    permissionMode: normalizeUiPermissionMode($("permissionSelect")?.value || state.defaultPermissionMode || "turbo", "turbo"),
+    goalMode: Boolean(state.composerGoal),
+  };
+}
+
+function applyProfileSnapshotPayload(payload = {}) {
+  if (Array.isArray(payload.providers)) state.providers = payload.providers;
+  if (Array.isArray(payload.profiles)) state.profiles = payload.profiles;
+  if (payload.defaultProvider) state.defaultProvider = payload.defaultProvider;
+  if (payload.defaultProfileId) state.defaultProfileId = payload.defaultProfileId;
+  syncProfileSelectors();
+  renderTopbarAndControls();
+  renderThreadList();
+}
+
+async function relayThreadWithProfile(altProfile, context = {}) {
+  if (!altProfile?.id || !altProfile?.provider) return;
+  const text = String(context.text ?? $("promptInput")?.value ?? "");
+  const savedImages = Array.isArray(context.images) ? context.images : [...state.images];
+  const cleanImages = savedImages.map((img, idx) => ({
+    name: img?.name || `image-${idx + 1}.jpg`,
+    dataUrl: img?.dataUrl || "",
+  })).filter((img) => Boolean(img.dataUrl));
+  const model = context.model ?? ($("modelSelect")?.value || "");
+  const effort = context.effort ?? ($("effortSelect")?.hidden ? "" : ($("effortSelect")?.value || ""));
+  const permissionMode = normalizeUiPermissionMode(
+    context.permissionMode || $("permissionSelect")?.value || state.defaultPermissionMode || "turbo",
+    "turbo",
+  );
+  const goalMode = Boolean(context.goalMode ?? state.composerGoal);
+  const cwd = context.cwd || state.activeThread?.cwd || "";
+
+  setComposerConfigOpen(false);
+  if (!text.trim() && !cleanImages.length) {
+    openNewThreadModal({
+      cwd,
+      provider: altProfile.provider,
+      model,
+    });
+    const newSelect = $("newProfileSelect");
+    if (newSelect && [...newSelect.options].some((o) => o.value === altProfile.id)) {
+      newSelect.value = altProfile.id;
+      syncNewProfileSelect();
+    }
+    setComposerStatus("success", `已切换到 ${altProfile.label || altProfile.id}，输入指令即可在同目录开始`, { autoClearMs: 3200 });
+    return;
+  }
+
+  state.isSubmitting = true;
+  setComposerStatus("pending", `正在切到 ${altProfile.label || altProfile.id} 继续执行…`);
+  renderComposerControls();
+  try {
+    const created = await apiPost("api/thread/new", {
+      provider: altProfile.provider,
+      profileId: altProfile.id,
+      cwd,
+      text,
+      images: cleanImages,
+      model,
+      effort,
+      permissionMode,
+      goalMode,
+    }, { timeoutMs: cleanImages.length ? 60_000 : 35_000 });
+    if ($("promptInput")) $("promptInput").value = "";
+    state.images = [];
+    renderComposerImages();
+    await refreshThreads();
+    if (created?.thread?.id) {
+      saveLocalThreadPrefs(created.thread.id, { model, effort, permissionMode });
+      await selectThread(created.thread.id);
+    }
+    setComposerStatus("success", `已切到 ${altProfile.label || altProfile.id} 继续执行`, { autoClearMs: 3200 });
+  } catch (error) {
+    const errMsg = formatActionError(error, "切换实例继续失败");
+    setComposerStatus("error", `切换失败：${errMsg}`);
+    showToastBanner("切换实例失败", { detail: errMsg, error: true });
+  } finally {
+    state.isSubmitting = false;
+    renderComposerControls();
+  }
+}
+
+async function triggerProfileProbe({ provider, profileId = "" } = {}) {
+  const cleanProvider = String(provider || "").trim();
+  if (!cleanProvider) return;
+  const targets = filterProfilesByProvider(state.profiles, cleanProvider)
+    .filter((p) => !profileId || p.id === profileId);
+  const addedKeys = targets.map((p) => p.key || `${cleanProvider}:${p.id}`);
+  if (!addedKeys.length && profileId) addedKeys.push(`${cleanProvider}:${profileId}`);
+  for (const key of addedKeys) state.probingProfileKeys.add(key);
+  syncComposerProfileSelect();
+  syncNewProfileSelect();
+
+  try {
+    const res = await apiPostWithHotFallback("api/profile/probe", {
+      provider: cleanProvider,
+      profileId,
+    });
+    applyProfileSnapshotPayload(res);
+    const results = Array.isArray(res.results) ? res.results : [];
+    const okCount = results.filter((r) => r.ok).length;
+    const summary = results.length === 1
+      ? (results[0].ok
+        ? `测通成功 (${results[0].latencyMs ? `${results[0].latencyMs}ms` : "可用"})`
+        : `测通失败：${results[0].error || "暂不可用"}`)
+      : `${providerDisplayName(cleanProvider)} 测通完成：${okCount}/${results.length} 个可用`;
+    setComposerStatus(okCount > 0 ? "success" : "error", summary, { autoClearMs: 3500 });
+  } catch (error) {
+    // 兼容尚未重启的旧版本地守护进程（/api/profile/probe 返回 404 时降级用 GET /api/models 探测）。
+    if (error?.status === 404) {
+      let okCount = 0;
+      const nowSec = Math.floor(Date.now() / 1000);
+      for (const target of targets) {
+        const started = Date.now();
+        try {
+          await apiGet(`api/models?provider=${encodeURIComponent(cleanProvider)}&profileId=${encodeURIComponent(target.id)}`);
+          okCount += 1;
+          target.health = {
+            ...(target.health || {}),
+            status: "healthy",
+            shortReason: "",
+            detail: "",
+            latencyMs: Math.max(1, Date.now() - started),
+            checkedAt: nowSec,
+          };
+        } catch (err) {
+          target.health = {
+            ...(target.health || {}),
+            status: "unavailable",
+            shortReason: /429|limit|quota/i.test(err?.message || "") ? "限额冷却" : "暂不可用",
+            detail: err?.message || "检测失败",
+            latencyMs: null,
+            checkedAt: nowSec,
+          };
+        }
+      }
+      syncProfileSelectors();
+      setComposerStatus(
+        okCount > 0 ? "success" : "error",
+        `已实时校验模型列表 (${okCount}/${targets.length} 可用)；重载 Mac 守护进程后可启用完整 Claude 测通与状态持久化`,
+        { autoClearMs: 4200 },
+      );
+      return;
+    }
+    const errMsg = formatActionError(error, "测通失败");
+    setComposerStatus("error", `测通失败：${errMsg}`);
+  } finally {
+    for (const key of addedKeys) state.probingProfileKeys.delete(key);
+    syncComposerProfileSelect();
+    syncNewProfileSelect();
+  }
+}
+
+async function toggleProfileDisabled({ provider, profileId, disabled } = {}) {
+  try {
+    const res = await apiPostWithHotFallback("api/profile/meta", {
+      provider,
+      profileId,
+      disabled: Boolean(disabled),
+    });
+    applyProfileSnapshotPayload(res);
+    setComposerStatus("success", disabled ? "已停用该实例" : "已重新启用该实例", { autoClearMs: 2200 });
+  } catch (error) {
+    setComposerStatus("error", `更新实例状态失败：${formatActionError(error)}`);
+  }
+}
+
+function removePendingRequestById(reqId) {
+  if (!reqId) return;
+  clearApprovalVoiceReminder(reqId);
+  state.pendingRequests = state.pendingRequests.filter((r) => r.id !== reqId);
+  state.pendingRequestsSynced = true;
+  syncThreadsPendingCounts();
+  renderPendingRequests();
+  renderThreadList();
+  renderProjectBoard();
+  renderProjectTaskStrip();
+  renderVoiceLiveProgressIfOpen();
+}
+
+async function autoApprovePendingRequest(req) {
+  if (!req?.id || req.kind === "userInput") return false;
+  try {
+    if (req.kind === "acpPermission") {
+      const opt = (req.options || []).find((o) => o.kind === "allow_always")
+        || (req.options || []).find((o) => o.kind === "allow_once")
+        || req.options?.[0];
+      await apiPost("api/server-request", {
+        requestId: req.id,
+        ...(opt?.optionId ? { optionId: opt.optionId } : { decision: "acceptForSession" }),
+      });
+    } else {
+      await apiPost("api/approval", { requestId: req.id, decision: "acceptForSession" });
+    }
+    removePendingRequestById(req.id);
+    return true;
+  } catch (err) {
+    if (Number(err?.status) === 404) {
+      removePendingRequestById(req.id);
+    }
+    return false;
+  }
+}
+
+async function autoApproveTurboRequestsForThread(threadId) {
+  if (!threadId) return 0;
+  const targets = state.pendingRequests.filter((r) => r.threadId === threadId && r.kind !== "userInput");
+  let count = 0;
+  for (const req of targets) {
+    const ok = await autoApprovePendingRequest(req);
+    if (ok) count += 1;
+  }
+  return count;
+}
+
+let sseReconnectTimer = null;
+let sseReconnectAttempt = 0;
+let sseNeedsResync = false;
+
+function clearSseReconnectTimer() {
+  if (sseReconnectTimer) {
+    clearTimeout(sseReconnectTimer);
+    sseReconnectTimer = null;
+  }
+}
+
+function scheduleSseReconnect() {
+  if (sseReconnectTimer) return;
+  const delayMs = Math.min(12_000, 1_200 * Math.pow(1.6, Math.min(sseReconnectAttempt, 5)));
+  sseReconnectAttempt += 1;
+  sseReconnectTimer = setTimeout(() => {
+    sseReconnectTimer = null;
+    if (document.visibilityState !== "hidden") {
+      connectEvents();
+    }
+  }, delayMs);
+}
+
+function resyncStateAfterSseReconnect() {
+  if (!sseNeedsResync) return;
+  sseNeedsResync = false;
+  void refreshThreads().catch(() => {});
+  if (state.activeThreadId && !isBoardViewActive() && !state.initialThreadLoading) {
+    scheduleActiveThreadReload(state.activeThreadId, 80);
+  }
+}
+
+function connectEvents() {
+  clearSseReconnectTimer();
+  if (state.eventSource) {
+    state.eventSource.close();
+    state.eventSource = null;
+  }
+  syncConnectionDots("connecting");
+  const es = new EventSource(apiUrl("api/events"));
+  state.eventSource = es;
+
+  es.addEventListener("open", () => {
+    state.sseConnected = true;
+    sseReconnectAttempt = 0;
+    clearSseReconnectTimer();
+    syncConnectionDots("connected");
+    if (state.toastActive && !state.toastTimer && $("liveBanner")?.classList.contains("is-error")) {
+      state.toastActive = false;
+      renderLiveBanner();
+    }
+    resyncStateAfterSseReconnect();
+  });
+
+  es.addEventListener("ready", (ev) => {
+    state.sseConnected = true;
+    sseReconnectAttempt = 0;
+    clearSseReconnectTimer();
+    syncConnectionDots("connected");
+    if (state.toastActive && !state.toastTimer && $("liveBanner")?.classList.contains("is-error")) {
+      state.toastActive = false;
+      renderLiveBanner();
+    }
+    resyncStateAfterSseReconnect();
+    const data = JSON.parse(ev.data || "{}");
+    if (Array.isArray(data.pendingRequests)) {
+      state.pendingRequests = data.pendingRequests;
+      state.pendingRequestsSynced = true;
+      syncThreadsPendingCounts();
+      renderPendingRequests();
+      renderThreadList();
+      renderProjectBoard();
+      renderProjectTaskStrip();
+      renderVoiceLiveProgressIfOpen();
+      const turboThreadIds = new Set(
+        data.pendingRequests
+          .filter((req) => req?.threadId && req.kind !== "userInput")
+          .map((req) => req.threadId),
+      );
+      for (const tid of turboThreadIds) {
+        const threadObj = state.threads.find((t) => t.id === tid)
+          || (state.activeThreadId === tid ? state.activeThread : null);
+        if (effectivePermissionModeForThread(tid, threadObj) === "turbo") {
+          void autoApproveTurboRequestsForThread(tid);
+        }
+      }
+    }
+    if (data.telemetry) applyTelemetrySnapshot(data.telemetry);
+    if (data.remote) state.remoteStatus = data.remote;
+    if (data.tunnel) state.tunnelStatus = data.tunnel;
+    syncRemoteButtonIndicator();
+  });
+
+  es.addEventListener("remote_status", (ev) => {
+    try {
+      const snap = JSON.parse(ev.data || "{}");
+      state.remoteStatus = snap;
+      syncRemoteButtonIndicator();
+      if ($("remoteModal")?.open) {
+        void openRemoteModal({ silentOpen: true });
+      }
+    } catch {}
+  });
+
+  es.addEventListener("tunnel_status", (ev) => {
+    try {
+      const snap = JSON.parse(ev.data || "{}");
+      state.tunnelStatus = snap;
+      syncRemoteButtonIndicator();
+      if ($("remoteModal")?.open) {
+        void openRemoteModal({ silentOpen: true });
+      }
+    } catch {}
+  });
+
+  es.addEventListener("host_offline", () => {
+    state.sseConnected = false;
+    syncConnectionDots("error");
+    showToastBanner("控制主机暂时离线", { detail: "正在等待重连…", sticky: true, error: true });
+    setComposerStatus("error", "控制主机暂时离线，请稍候重试");
+  });
+
+  const updateThreadLiveTracker = (threadId, patch) => {
+    if (!threadId) return;
+    const prev = state.liveActivityByThread.get(threadId) || {};
+    const merged = mergeLiveActivity(prev, patch);
+    merged.isStreamingText = Boolean(patch.isStreamingText ?? prev.isStreamingText);
+    state.liveActivityByThread.set(threadId, merged);
+    state.recentCompletedByThread.delete(threadId);
+  };
+
+  const markThreadLiveCompleted = (threadId, status, summary = "") => {
+    if (!threadId) return;
+    state.liveActivityByThread.delete(threadId);
+    state.recentCompletedByThread.set(threadId, {
+      status: status || "completed",
+      summary: stripMarkdownForSpeech(summary || "", 80),
+      at: Date.now(),
+    });
+  };
+
+  es.addEventListener("server_request", (ev) => {
+    const { request } = JSON.parse(ev.data || "{}");
+    if (!request?.id) return;
+    const threadObj = state.threads.find((t) => t.id === request.threadId)
+      || (state.activeThreadId === request.threadId ? state.activeThread : null);
+    if (request.threadId && request.kind !== "userInput" && effectivePermissionModeForThread(request.threadId, threadObj) === "turbo") {
+      void autoApprovePendingRequest(request);
+      return;
+    }
+    if (!state.pendingRequests.some((r) => r.id === request.id)) {
+      state.pendingRequests.push(request);
+    }
+    state.pendingRequestsSynced = true;
+    syncThreadsPendingCounts();
+    renderPendingRequests();
+    renderThreadList();
+    renderProjectBoard();
+    renderProjectTaskStrip();
+    renderVoiceLiveProgressIfOpen();
+    if (state.voice.callActive && state.voice.config.autoBroadcastEvents) {
+      const targetThread = state.threads.find((t) => t.id === request.threadId);
+      const projLabel = targetThread ? (state.projectsMeta[normalizeProjectCwd(targetThread.cwd)]?.alias || projectBaseName(targetThread.cwd)) : "有任务";
+      const detail = stripMarkdownForSpeech(request.title || request.command || "请确认", 80);
+      enqueueOrPlayVoiceBroadcast({
+        id: `req-${request.id}`,
+        text: `${projLabel} 请求授权：${detail}`,
+        priority: "critical",
+        source: "approval",
+        actionTag: "待审批",
+        dedupeKey: `req:${request.id}`,
+      });
+      scheduleApprovalVoiceReminder(request, projLabel);
+    }
+  });
+
+  es.addEventListener("thread_prefs_updated", (ev) => {
+    const { threadId, prefs } = JSON.parse(ev.data || "{}");
+    if (!threadId || !prefs) return;
+    const target = state.threads.find((t) => t.id === threadId);
+    if (target) {
+      if (prefs.model) target.model = prefs.model;
+      if (prefs.reasoningEffort) target.reasoningEffort = prefs.reasoningEffort;
+      if (prefs.permissionMode) target.permissionMode = prefs.permissionMode;
+    }
+    if (threadId === state.activeThreadId && state.activeThread) {
+      if (prefs.model) state.activeThread.model = prefs.model;
+      if (prefs.reasoningEffort) state.activeThread.reasoningEffort = prefs.reasoningEffort;
+      if (prefs.permissionMode) state.activeThread.permissionMode = prefs.permissionMode;
+      syncModelAndEffortSelectors();
+      syncPermissionSelectors();
+    }
+  });
+
+  es.addEventListener("server_request_resolved", (ev) => {
+    const { requestId } = JSON.parse(ev.data || "{}");
+    removePendingRequestById(requestId);
+  });
+
+  es.addEventListener("voice_dispatch", (ev) => {
+    const batch = JSON.parse(ev.data || "{}");
+    if (!state.voice.callActive || (batch?.callId && batch.callId !== state.voice.callId)) return;
+    if (batch?.batchId) {
+      handleVoiceDispatchBatchUpdate(batch);
+    }
+  });
+
+  es.addEventListener("voice_subagent_progress", (ev) => {
+    const prog = JSON.parse(ev.data || "{}");
+    if (!state.voice.callActive || (prog?.callId && prog.callId !== state.voice.callId)) return;
+    if (!prog?.batchId) return;
+    if (prog.utteranceId && prog.summaryTag) {
+      updateVoiceTranscriptEntry(prog.utteranceId, { actionTag: prog.summaryTag });
+    }
+    if (prog.shouldSpeak && prog.spokenFeedback && state.voice.callActive && state.voice.config.autoBroadcastEvents) {
+      enqueueOrPlayVoiceBroadcast({
+        text: prog.spokenFeedback,
+        priority: prog.priority || "normal",
+        source: "voice_subagent_progress",
+        actionTag: prog.summaryTag || "子代理进展",
+        dedupeKey: `subagent:${prog.batchId}:${prog.step || 0}`,
+      });
+    }
+    renderVoiceCallUi();
+  });
+
+  es.addEventListener("voice_external_milestone", (ev) => {
+    const milestone = JSON.parse(ev.data || "{}");
+    if (!state.voice.callActive || (milestone?.callId && milestone.callId !== state.voice.callId)) return;
+    if (milestone?.threadId) {
+      unwatchVoiceThread(milestone.threadId);
+    }
+    if (milestone?.shouldSpeak && milestone?.spokenFeedback && state.voice.callActive && state.voice.config.autoBroadcastEvents) {
+      enqueueOrPlayVoiceBroadcast({
+        text: milestone.spokenFeedback,
+        priority: milestone.priority || "normal",
+        source: "voice_external_milestone",
+        actionTag: milestone.summaryTag || "任务进展",
+        dedupeKey: milestone.dedupeKey || `milestone:${milestone.threadId || ""}:${milestone.turnId || ""}`,
+      });
+    }
+    renderVoiceCallUi();
+  });
+
+  es.addEventListener("project_meta_updated", (ev) => {
+    const data = JSON.parse(ev.data || "{}");
+    if (data.projectsMeta && typeof data.projectsMeta === "object") {
+      state.projectsMeta = data.projectsMeta;
+      renderThreadList();
+      renderTopbarAndControls();
+      renderProjectBoard();
+      renderProjectTaskStrip();
+      renderVoiceLiveProgressIfOpen();
+    }
+  });
+
+  es.addEventListener("goal_state", (ev) => {
+    const { threadId, goalState } = JSON.parse(ev.data || "{}");
+    if (threadId === state.activeThreadId && state.activeThread) {
+      state.activeThread.goalState = goalState;
+      renderTopbarAndControls();
+    }
+    const target = state.threads.find((t) => t.id === threadId);
+    if (target) {
+      target.goalState = goalState;
+      renderThreadList();
+    }
+    renderVoiceLiveProgressIfOpen();
+  });
+
+  es.addEventListener("queued_turn_event", (ev) => {
+    const data = JSON.parse(ev.data || "{}");
+    if (!data.threadId) return;
+    const nextItems = Array.isArray(data.queuedTurns) ? data.queuedTurns : [];
+    if (data.threadId === state.activeThreadId) {
+      applyActiveQueuedTurns(data.threadId, nextItems);
+      renderQueuedTurns();
+      if (data.eventType === "failed") {
+        const msg = data.error?.message || "排队消息执行失败";
+        setComposerStatus("error", `排队发送失败：${msg}`);
+        showToastBanner("排队发送失败", { detail: msg, error: true });
+        if (data.entry?.text && !$("promptInput").value.trim()) {
+          $("promptInput").value = data.entry.text;
+          renderComposerControls();
+        }
+      } else if (data.eventType === "started") {
+        state.streamingText = "";
+        state.streamingThought = "";
+        state.streamingTurnId = "";
+        void selectThread(state.activeThreadId, { focusScroll: state.autoFollow }).catch(() => {});
+      }
+    } else {
+      applyActiveQueuedTurns(data.threadId, nextItems);
+    }
+  });
+
+  es.addEventListener("thread_renamed", (ev) => {
+    const { threadId, name } = JSON.parse(ev.data || "{}");
+    const target = state.threads.find((t) => t.id === threadId);
+    if (target) {
+      target.name = name;
+      target.title = name;
+    }
+    if (state.activeThreadId === threadId && state.activeThread) {
+      state.activeThread.name = name;
+      state.activeThread.title = name;
+      renderTopbarAndControls();
+    }
+    renderThreadList();
+    renderProjectBoard();
+    renderProjectTaskStrip();
+    renderVoiceLiveProgressIfOpen();
+  });
+
+  es.addEventListener("thread_archived", () => {
+    void refreshThreads();
+  });
+
+  es.addEventListener("threads_archived", () => {
+    void refreshThreads();
+  });
+
+  es.addEventListener("agent_telemetry", (ev) => {
+    try {
+      const snap = JSON.parse(ev.data || "{}");
+      if (snap?.byProvider) applyTelemetrySnapshot(snap);
+    } catch {}
+  });
+
+  es.addEventListener("profiles_updated", (ev) => {
+    try {
+      const data = JSON.parse(ev.data || "{}");
+      applyProfileSnapshotPayload(data);
+    } catch {}
+  });
+
+  es.addEventListener("provider_event", (ev) => {
+    const evt = JSON.parse(ev.data || "{}");
+    if (!evt.threadId) return;
+
+    if (evt.type === "codex_notification") {
+      const { method, params } = evt;
+      if (method === "turn/started") {
+        updateThreadLiveTracker(evt.threadId, {
+          turnId: params?.turn?.id || "",
+          status: "running",
+          phase: "Codex 执行中",
+          isStreamingText: false,
+        });
+      } else if (method === "item/agentMessage/delta" || method === "codex/event/agent_message_content_delta") {
+        updateThreadLiveTracker(evt.threadId, { status: "running", isStreamingText: true });
+      } else if (method === "turn/completed") {
+        markThreadLiveCompleted(evt.threadId, params?.turn?.status || "completed", params?.turn?.lastAgentMessage || "");
+      }
+    } else if (evt.type === "turn_started") {
+      updateThreadLiveTracker(evt.threadId, {
+        turnId: evt.turn?.id || "",
+        status: "running",
+        phase: `${providerDisplayName(evt.provider)} 执行中`,
+        isStreamingText: false,
+      });
+    } else if (evt.type === "stream_delta") {
+      if (evt.kind === "text") {
+        updateThreadLiveTracker(evt.threadId, { status: "running", isStreamingText: true });
+      } else if (evt.kind === "toolInput") {
+        updateThreadLiveTracker(evt.threadId, { status: "running", phase: `准备工具 ${evt.toolName || ""}` });
+      }
+    } else if (evt.type === "acp_tool_update") {
+      const rawToolText = String(evt.update?.status || "");
+      const friendlyToolText = isRecoverableToolErrorText(rawToolText)
+        ? formatToolExecutionError(rawToolText, { filePath: evt.update?.title || "" })
+        : rawToolText;
+      const prevPhase = state.liveActivityByThread.get(evt.threadId)?.phase || "";
+      updateThreadLiveTracker(evt.threadId, {
+        status: "running",
+        phase: evt.update?.title || prevPhase || "正在执行工具…",
+        text: friendlyToolText,
+      });
+    } else if (evt.type === "turn_completed") {
+      const recoverableTurnErr = evt.status === "failed" && isRecoverableToolErrorText(evt.error);
+      markThreadLiveCompleted(
+        evt.threadId,
+        recoverableTurnErr ? "completed" : (evt.status || "completed"),
+        evt.lastAgentMessage || "",
+      );
+    }
+    renderVoiceLiveProgressIfOpen();
+
+    if (evt.threadId === state.activeThreadId) {
+      if (evt.type === "codex_notification") {
+        const { method, params } = evt;
+        if (method === "turn/started") {
+          state.streamingText = "";
+          state.streamingThought = "";
+          state.streamingTurnId = params?.turn?.id || "";
+          state.liveActivity = mergeLiveActivity(state.liveActivity, {
+            turnId: state.streamingTurnId,
+            status: "running",
+            phase: "Codex 执行中",
+          });
+          renderTopbarAndControls();
+          renderStreamingTurn();
+        } else if (method === "item/agentMessage/delta" || method === "codex/event/agent_message_content_delta") {
+          clearComposerStatus();
+          const deltaTurnId = String(params?.turnId || params?.msg?.turn_id || "").trim();
+          if (deltaTurnId && state.streamingTurnId && deltaTurnId !== state.streamingTurnId) {
+            state.streamingText = "";
+            state.streamingThought = "";
+          }
+          if (deltaTurnId) state.streamingTurnId = deltaTurnId;
+          const wasEmpty = !state.streamingText;
+          state.streamingText += String(params?.delta || params?.msg?.delta || "");
+          if (wasEmpty) {
+            renderLiveBanner();
+            renderActiveMessages();
+          } else renderStreamingTurn();
+        } else if (method === "item/reasoning/summaryTextDelta") {
+          clearComposerStatus();
+          state.streamingThought += String(params?.delta || "");
+          syncLiveTurnFrontier();
+        } else if (method === "turn/completed") {
+          unwatchVoiceThread(evt.threadId);
+          state.streamingText = "";
+          state.streamingThought = "";
+          if (state.activeThread) state.activeThread.live = false;
+          syncThreadSummaryIntoList({ id: evt.threadId, live: false });
+          const rawErrMsg = params?.turn?.error?.message || "";
+          const recoverableErr = isRecoverableToolErrorText(params?.turn?.error || rawErrMsg);
+          const turnStatus = recoverableErr && params?.turn?.status === "failed"
+            ? "completed"
+            : (params?.turn?.status || "completed");
+          state.liveActivity = { status: turnStatus };
+          if (turnStatus === "failed") {
+            const msg = rawErrMsg || "执行失败";
+            const failoverContext = buildFailoverContextForProvider(evt.provider, evt.profileId);
+            setComposerStatus("error", `执行失败：${msg}`, { failoverContext });
+            showToastBanner("执行失败", { detail: msg, error: true });
+          }
+          void reloadActiveThreadAfterTurnCompletion({
+            threadId: evt.threadId || state.activeThreadId,
+            turnId: params?.turn?.id || "",
+            turnStatus,
+            errorMessage: rawErrMsg || "执行失败",
+          });
+          void refreshThreads().catch(() => {});
+        }
+      } else {
+        if (evt.type === "turn_started") {
+          state.streamingText = "";
+          state.streamingThought = "";
+          state.streamingTurnId = evt.turn?.id || "";
+          state.liveActivity = mergeLiveActivity(state.liveActivity, {
+            turnId: state.streamingTurnId,
+            status: "running",
+            phase: `${providerDisplayName(evt.provider)} 执行中`,
+          });
+          renderTopbarAndControls();
+          renderStreamingTurn();
+          scheduleActiveThreadReload(state.activeThreadId, 450);
+          scheduleTelemetryRefresh(150);
+        } else if (evt.type === "stream_delta") {
+          clearComposerStatus();
+          if (evt.turnId && state.streamingTurnId && evt.turnId !== state.streamingTurnId) {
+            state.streamingText = "";
+            state.streamingThought = "";
+          }
+          if (evt.turnId) {
+            state.streamingTurnId = evt.turnId;
+          }
+          if (evt.provider && evt.delta) {
+            recordClientStreamDelta(evt.provider, evt.delta, evt.threadId || "");
+          }
+          if (evt.kind === "text") {
+            const wasEmpty = !state.streamingText;
+            state.streamingText += String(evt.delta || "");
+            if (wasEmpty) {
+              renderLiveBanner();
+              renderActiveMessages();
+            } else {
+              renderStreamingTurn();
+            }
+          } else if (evt.kind === "reasoning") {
+            state.streamingThought += String(evt.delta || "");
+            syncLiveTurnFrontier();
+          } else if (evt.kind === "toolInput") {
+            const hadStreamingText = Boolean(state.streamingText);
+            state.streamingText = "";
+            state.streamingThought = "";
+            state.liveActivity = mergeLiveActivity(state.liveActivity, {
+              status: "running",
+              phase: `准备工具 ${evt.toolName || ""}`,
+            });
+            renderLiveBanner();
+            if (hadStreamingText) renderActiveMessages();
+            else syncLiveTurnFrontier();
+            scheduleActiveThreadReload(state.activeThreadId, 500);
+          } else {
+            renderStreamingTurn();
+          }
+        } else if (evt.type === "acp_tool_update") {
+          const rawToolText = String(evt.update?.status || "");
+          const friendlyToolText = isRecoverableToolErrorText(rawToolText)
+            ? formatToolExecutionError(rawToolText, { filePath: evt.update?.title || "" })
+            : rawToolText;
+          const prevPhase = state.liveActivity?.phase || "";
+          const hadStreamingText = Boolean(state.streamingText);
+          state.streamingText = "";
+          state.streamingThought = "";
+          state.liveActivity = mergeLiveActivity(state.liveActivity, {
+            status: "running",
+            phase: evt.update?.title || prevPhase || "正在执行工具…",
+            text: friendlyToolText,
+          });
+          renderLiveBanner();
+          if (hadStreamingText) renderActiveMessages();
+          else syncLiveTurnFrontier();
+          scheduleActiveThreadReload(state.activeThreadId, 750);
+        } else if (evt.type === "turn_completed") {
+          unwatchVoiceThread(evt.threadId);
+          state.streamingText = "";
+          state.streamingThought = "";
+          if (state.activeThread) state.activeThread.live = false;
+          syncThreadSummaryIntoList({ id: evt.threadId, live: false });
+          const rawErrMsg = evt.error?.message || "";
+          const recoverableErr = isRecoverableToolErrorText(evt.error || rawErrMsg);
+          const turnStatus = recoverableErr && evt.status === "failed"
+            ? "completed"
+            : (evt.status || "completed");
+          state.liveActivity = { status: turnStatus };
+          if (turnStatus === "failed") {
+            const msg = rawErrMsg || "执行失败";
+            const failoverContext = buildFailoverContextForProvider(evt.provider, evt.profileId);
+            setComposerStatus("error", `执行失败：${msg}`, { failoverContext });
+            showToastBanner("执行失败", { detail: msg, error: true });
+          }
+          void reloadActiveThreadAfterTurnCompletion({
+            threadId: evt.threadId || state.activeThreadId,
+            turnId: evt.turnId || "",
+            turnStatus,
+            errorMessage: rawErrMsg || "执行失败",
+          });
+          void refreshThreads().catch(() => {});
+          scheduleTelemetryRefresh(200);
+        }
+      }
+    } else if (evt.type === "turn_started" || evt.type === "turn_completed" || evt.method === "turn/started" || evt.method === "turn/completed") {
+      if (evt.type === "turn_completed" || evt.method === "turn/completed") {
+        unwatchVoiceThread(evt.threadId);
+      }
+      void refreshThreads();
+      scheduleTelemetryRefresh(150);
+    }
+  });
+
+  es.addEventListener("error", () => {
+    if (state.eventSource !== es) return;
+    state.sseConnected = false;
+    sseNeedsResync = true;
+    syncConnectionDots("error");
+    if (es.readyState === EventSource.CLOSED) {
+      es.close();
+      state.eventSource = null;
+      scheduleSseReconnect();
+    }
+  });
+}
+
+function localAppLaunchUrl(app) {
+  const id = String(app?.id || "").trim();
+  if (!id) return "#";
+  return `./apps/${encodeURIComponent(id)}/`;
+}
+
+function renderLocalApps() {
+  const apps = Array.isArray(state.localApps) ? state.localApps : [];
+  const hasApps = apps.length > 0;
+
+  const strip = $("localAppsStrip");
+  if (strip) {
+    strip.hidden = !hasApps;
+    strip.innerHTML = hasApps
+      ? apps.map((app) => {
+        const href = escapeHtml(localAppLaunchUrl(app));
+        const name = escapeHtml(app.name || app.id);
+        const desc = escapeHtml(app.description || "");
+        return `<a class="local-app-chip" href="${href}" title="${desc}">`
+          + `<span class="btn-icon-glyph" data-icon="film" data-icon-size="13" aria-hidden="true"></span>`
+          + `<span class="local-app-chip-name">${name}</span>`
+          + `<span class="btn-icon-glyph local-app-chip-arrow" data-icon="external-link" data-icon-size="11" aria-hidden="true"></span>`
+          + `</a>`;
+      }).join("")
+      : "";
+    if (hasApps) hydrateDeclarativeIcons(strip);
+  }
+
+  const menuBox = $("topbarLocalAppsBox");
+  if (menuBox) {
+    menuBox.hidden = !hasApps;
+    menuBox.innerHTML = hasApps
+      ? apps.map((app) => {
+        const href = escapeHtml(localAppLaunchUrl(app));
+        const name = escapeHtml(app.name || app.id);
+        return `<a class="btn-secondary btn-sm topbar-local-app-link" href="${href}">`
+          + `<span class="btn-icon-glyph" data-icon="film" data-icon-size="13" aria-hidden="true"></span>`
+          + `<span>打开${name}</span>`
+          + `<span class="btn-icon-glyph local-app-chip-arrow" data-icon="external-link" data-icon-size="11" aria-hidden="true"></span>`
+          + `</a>`;
+      }).join("")
+      : "";
+    if (hasApps) hydrateDeclarativeIcons(menuBox);
+  }
+
+  const remoteSec = $("remoteLocalAppsSection");
+  const remoteList = $("remoteLocalAppsList");
+  if (remoteSec && remoteList) {
+    remoteSec.hidden = !hasApps;
+    remoteList.innerHTML = hasApps
+      ? apps.map((app) => {
+        const href = escapeHtml(localAppLaunchUrl(app));
+        const name = escapeHtml(app.name || app.id);
+        const desc = escapeHtml(app.description || "复用当前安全通道访问本机工作台");
+        return `<div class="remote-local-app-item">`
+          + `<div class="remote-local-app-meta">`
+          + `<strong>${name}</strong>`
+          + `<span>${desc}</span>`
+          + `</div>`
+          + `<a class="btn-primary btn-xs remote-local-app-open" href="${href}">`
+          + `<span class="btn-icon-glyph" data-icon="external-link" data-icon-size="12" aria-hidden="true"></span>`
+          + `<span>直接进入</span>`
+          + `</a>`
+          + `</div>`;
+      }).join("")
+      : "";
+    if (hasApps) hydrateDeclarativeIcons(remoteList);
+  }
+}
+
+async function refreshLocalApps() {
+  try {
+    const res = await apiGet("api/apps");
+    state.localApps = Array.isArray(res?.apps) ? res.apps : [];
+  } catch {
+    state.localApps = [];
+  }
+  renderLocalApps();
+  return state.localApps;
+}
+
+function syncRemoteButtonIndicator() {
+  const active = state.tunnelStatus?.state === "running" || Boolean(state.remoteStatus?.connected);
+  const dot = $("remoteActiveDot");
+  if (dot) dot.hidden = !active;
+  $("remoteModalBtn")?.classList.toggle("is-online", active);
+}
+
+async function openRemoteModal({ silentOpen = false } = {}) {
+  if (!silentOpen) {
+    setTopbarMenuOpen(false);
+    setComposerConfigOpen(false);
+  }
+  const modal = $("remoteModal");
+  const [status] = await Promise.all([
+    apiGet("api/remote").catch(() => null),
+    refreshLocalApps().catch(() => null),
+  ]);
+  if (status) {
+    renderRemoteStatus(status);
+  }
+  if (!silentOpen && !modal.open) {
+    modal.showModal();
+  }
+}
+
+function renderTunnelStatus(tunnel) {
+  if (!tunnel || typeof tunnel !== "object") return;
+  state.tunnelStatus = tunnel;
+  syncRemoteButtonIndicator();
+
+  const textMap = {
+    stopped: "未开启",
+    starting: "正在启动…",
+    running: "运行中（可扫码连接）",
+    missing_binary: "未安装 cloudflared",
+    error: "启动失败",
+    disabled: "已禁用",
+  };
+  const pill = $("tunnelStateText");
+  if (pill) {
+    pill.textContent = textMap[tunnel.state] || tunnel.state || "未开启";
+    pill.className = `tunnel-state-pill${
+      tunnel.state === "running" ? " is-running"
+        : tunnel.state === "starting" ? " is-starting"
+          : (tunnel.state === "error" || tunnel.state === "missing_binary") ? " is-error"
+            : ""
+    }`;
+  }
+
+  const canManage = tunnel.canManage !== false;
+  if ($("tunnelReadonlyNotice")) $("tunnelReadonlyNotice").hidden = canManage;
+  if ($("tunnelManageWrap")) $("tunnelManageWrap").hidden = !canManage;
+
+  const missingBox = $("tunnelMissingBox");
+  if (missingBox) {
+    missingBox.hidden = !(canManage && (tunnel.state === "missing_binary" || tunnel.installed === false));
+  }
+  const installCmdCode = $("tunnelInstallCmdCode");
+  if (installCmdCode && tunnel.installHint) {
+    installCmdCode.textContent = tunnel.installHint;
+  }
+
+  const errEl = $("tunnelErrorText");
+  if (errEl) {
+    const showErr = canManage && tunnel.state === "error" && Boolean(tunnel.lastError);
+    errEl.hidden = !showErr;
+    errEl.textContent = showErr ? tunnel.lastError : "";
+  }
+
+  const isRunning = tunnel.state === "running";
+  const isStarting = tunnel.state === "starting";
+  const startBtn = $("startTunnelBtn");
+  if (startBtn) {
+    startBtn.hidden = isRunning;
+    startBtn.disabled = state.tunnelBusy || isStarting || tunnel.state === "disabled";
+    startBtn.innerHTML = (state.tunnelBusy || isStarting)
+      ? `${iconSvg("clock", { size: 13 })}<span>正在分配公网加密地址…</span>`
+      : `${iconSvg("bolt", { size: 13 })}<span>一键开启并生成二维码</span>`;
+  }
+  if ($("rotateTunnelBtn")) {
+    $("rotateTunnelBtn").hidden = !isRunning;
+    $("rotateTunnelBtn").disabled = state.tunnelBusy;
+  }
+  if ($("stopTunnelBtn")) {
+    $("stopTunnelBtn").hidden = !(isRunning || isStarting);
+    $("stopTunnelBtn").disabled = state.tunnelBusy;
+  }
+
+  const qrWrap = $("tunnelQrWrap");
+  if (qrWrap) {
+    if (canManage && isRunning && tunnel.qrDataUrl && tunnel.pairUrl) {
+      qrWrap.hidden = false;
+      $("tunnelQrImg").src = tunnel.qrDataUrl;
+      $("tunnelPairUrlInput").value = tunnel.pairUrl;
+    } else {
+      qrWrap.hidden = true;
+    }
+  }
+}
+
+function renderRemoteStatus(status) {
+  if (!status || typeof status !== "object") return;
+  state.remoteStatus = status;
+  syncRemoteButtonIndicator();
+
+  const textMap = {
+    unpaired: "未配对",
+    connecting: "正在连接中继…",
+    connected: "已连接中继（手机可随时访问）",
+    disconnected: "连接断开，自动重连中…",
+    revoked: "凭证已被撤销，请重新配对",
+    disabled: "已禁用远程中继",
+  };
+  $("remoteStateText").textContent = textMap[status.state] || status.state || "未知";
+  if (status.relayUrl) $("relayUrlInput").value = status.relayUrl;
+  if (status.label) $("hostLabelInput").value = status.label;
+
+  const canManage = status.canManage !== false;
+  $("unpairBtn").hidden = !canManage || !status.paired;
+  if ($("remotePairSubmitBtn")) $("remotePairSubmitBtn").hidden = !canManage;
+  if ($("remoteReadonlyNotice")) $("remoteReadonlyNotice").hidden = canManage;
+  for (const el of $("remotePairForm")?.querySelectorAll("input") || []) {
+    el.disabled = !canManage;
+  }
+
+  const qrWrap = $("remoteQrWrap");
+  if (canManage && status.paired && status.qrDataUrl) {
+    qrWrap.hidden = false;
+    $("remoteQrImg").src = status.qrDataUrl;
+    $("remotePairUrlInput").value = status.pairUrl || "";
+  } else {
+    qrWrap.hidden = true;
+  }
+
+  if (status.paired && $("relayAdvancedSection")) {
+    $("relayAdvancedSection").open = true;
+  }
+  if (status.tunnel) {
+    renderTunnelStatus(status.tunnel);
+  }
+}
+
+async function toggleProjectPin(cwd) {
+  const key = normalizeProjectCwd(cwd);
+  if (!key) return;
+  const currentPinned = Boolean(state.projectsMeta[key]?.pinned);
+  try {
+    const res = await apiPost("api/project/meta", { cwd: key, pinned: !currentPinned });
+    state.projectsMeta = res.projectsMeta || state.projectsMeta;
+    renderThreadList();
+    renderTopbarAndControls();
+    renderProjectBoard();
+    renderProjectTaskStrip();
+    showToastBanner(!currentPinned ? "已关注置顶该项目" : "已取消关注", {
+      detail: state.projectsMeta[key]?.alias || projectBaseName(key),
+    });
+  } catch (error) {
+    showToastBanner("更新项目关注失败", { detail: formatActionError(error), error: true });
+  }
+}
+
+async function promptProjectAlias(cwd) {
+  const key = normalizeProjectCwd(cwd);
+  if (!key) return;
+  const currentAlias = state.projectsMeta[key]?.alias || "";
+  const next = prompt(`为「${projectBaseName(key)}」设置简称（方便搜索与语音匹配，留空清除）：`, currentAlias);
+  if (next === null) return;
+  try {
+    const res = await apiPost("api/project/meta", { cwd: key, alias: next.trim() });
+    state.projectsMeta = res.projectsMeta || state.projectsMeta;
+    renderThreadList();
+    renderTopbarAndControls();
+    renderProjectBoard();
+    renderProjectTaskStrip();
+  } catch (error) {
+    showToastBanner("保存项目简称失败", { detail: formatActionError(error), error: true });
+  }
+}
+
+function openNewThreadModal({ cwd = "", provider = "", model = "", promptText = "" } = {}) {
+  setTopbarMenuOpen(false);
+  setComposerConfigOpen(false);
+  $("newThreadError").hidden = true;
+  $("newThreadError").textContent = "";
+  const chosenProvider = provider || defaultProviderValue();
+  if ([...$("newProviderSelect").options].some((o) => o.value === chosenProvider)) {
+    $("newProviderSelect").value = chosenProvider;
+  }
+  syncNewProfileSelect();
+  if (model) syncNewModelSelect(model);
+  $("newPermissionSelect").value = normalizeUiPermissionMode(state.defaultPermissionMode || "turbo", "turbo");
+  if (cwd) $("newCwdInput").value = cwd;
+  if (promptText) $("newPromptInput").value = promptText;
+  $("newThreadModal").showModal();
+}
+
+function openProjectBoardView() {
+  setTopbarMenuOpen(false);
+  setComposerConfigOpen(false);
+  state.boardOpen = true;
+  renderTopbarAndControls();
+  renderActiveMessages();
+  setSidebarOpen(false);
+}
+
+// =========================================================================
+// AI 语音实时通话总控（Mac 多模态 Hydrogen + Edge TTS + 实时任务动态）
+// =========================================================================
+
+let cachedSilentWavDataUri = "";
+
+function getSilentWavDataUri() {
+  if (!cachedSilentWavDataUri) {
+    const wavBytes = encodePcm16SamplesToWav(new Int16Array(640), 16000);
+    cachedSilentWavDataUri = `data:audio/wav;base64,${uint8ArrayToBase64(wavBytes)}`;
+  }
+  return cachedSilentWavDataUri;
+}
+
+function ensureVoiceAudioUnlocked() {
+  try {
+    if (typeof navigator !== "undefined" && navigator.audioSession) {
+      navigator.audioSession.type = "play-and-record";
+    }
+  } catch {}
+  const AudioCtx = window.AudioContext || window.webkitAudioContext;
+  if (AudioCtx) {
+    if (!state.voice.audioCtx || state.voice.audioCtx.state === "closed") {
+      try {
+        state.voice.audioCtx = new AudioCtx();
+        state.voice.webAudioUnlocked = false;
+      } catch {}
+    }
+    if (state.voice.audioCtx?.state === "suspended") {
+      void state.voice.audioCtx.resume().catch(() => {});
+    }
+    if (state.voice.audioCtx && !state.voice.webAudioUnlocked) {
+      try {
+        const ctx = state.voice.audioCtx;
+        const buf = ctx.createBuffer(1, 1, 22050);
+        const src = ctx.createBufferSource();
+        src.buffer = buf;
+        src.connect(ctx.destination);
+        src.start(0);
+        state.voice.webAudioUnlocked = true;
+      } catch {}
+    }
+  }
+  if (!state.voice.audioEl) {
+    const audio = new Audio();
+    audio.playsInline = true;
+    audio.preload = "auto";
+    state.voice.audioEl = audio;
+  }
+  if (!state.voice.audioElUnlocked && !state.voice.isSpeaking && !state.voice.activePlaybackAbort) {
+    state.voice.audioElUnlocked = true;
+    try {
+      const audio = state.voice.audioEl;
+      audio.src = getSilentWavDataUri();
+      audio.play().catch(() => {
+        state.voice.audioElUnlocked = false;
+      });
+    } catch {
+      state.voice.audioElUnlocked = false;
+    }
+  }
+  try {
+    window.speechSynthesis?.getVoices?.();
+  } catch {}
+}
+
+function clearVoiceResumeTimer() {
+  if (state.voice.resumeListenTimer) {
+    clearTimeout(state.voice.resumeListenTimer);
+    state.voice.resumeListenTimer = null;
+  }
+}
+
+function resumeVoiceAudioContextIfNeeded() {
+  try {
+    const ctx = state.voice.audioCtx;
+    if (ctx && ctx.state === "suspended") {
+      void ctx.resume().catch(() => {});
+    }
+  } catch {}
+}
+
+function scheduleVoiceListenResume() {
+  clearVoiceResumeTimer();
+  resumeVoiceAudioContextIfNeeded();
+  state.voice.resumeListenTimer = setTimeout(() => {
+    state.voice.resumeListenTimer = null;
+    if (!state.voice.callActive) return;
+    resumeVoiceAudioContextIfNeeded();
+    state.voice.vadDetector?.reset?.();
+    renderVoiceCallUi();
+  }, 240);
+}
+
+function stopVoicePlayback({ scheduleResume = false, abortReason = "superseded" } = {}) {
+  clearVoiceResumeTimer();
+  const abort = state.voice.activePlaybackAbort;
+  state.voice.activePlaybackAbort = null;
+  if (typeof abort === "function") {
+    try { abort(abortReason); } catch {}
+  }
+  if (state.voice.activeBufferSource) {
+    try {
+      state.voice.activeBufferSource.onended = null;
+      state.voice.activeBufferSource.stop();
+      state.voice.activeBufferSource.disconnect();
+    } catch {}
+    state.voice.activeBufferSource = null;
+  }
+  state.voice.activeUtterance = null;
+  state.voice.isSpeaking = false;
+  if (state.voice.audioEl) {
+    try {
+      state.voice.audioEl.onplaying = null;
+      state.voice.audioEl.ontimeupdate = null;
+      state.voice.audioEl.onended = null;
+      state.voice.audioEl.onerror = null;
+      state.voice.audioEl.onstalled = null;
+      state.voice.audioEl.pause();
+      state.voice.audioEl.currentTime = 0;
+    } catch {}
+  }
+  if (state.voice.audioObjectUrl) {
+    try {
+      URL.revokeObjectURL(state.voice.audioObjectUrl);
+    } catch {}
+    state.voice.audioObjectUrl = "";
+  }
+  try {
+    window.speechSynthesis?.cancel?.();
+  } catch {}
+  if (scheduleResume) {
+    scheduleVoiceListenResume();
+  } else {
+    renderVoiceCallUi();
+  }
+}
+
+function nextVoiceUtteranceId(prefix = "utt") {
+  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+}
+
+function renderVoiceLiveProgress() {
+  const listEl = $("voiceLiveProgressList");
+  const badgeEl = $("voiceLiveSummaryBadge");
+  if (!listEl) return;
+  const groups = getProjectGroups({ ignoreFilters: true });
+  const items = buildVoiceLiveProgressItems({
+    groups,
+    threads: state.threads,
+    pendingRequests: state.pendingRequests,
+    liveActivityByThread: state.liveActivityByThread,
+    recentCompletedByThread: state.recentCompletedByThread,
+    activeThreadId: state.activeThreadId,
+  });
+  listEl.innerHTML = renderVoiceLiveProgressHtml(items);
+  if (badgeEl) {
+    const liveCount = state.threads.filter((t) => t.live || state.liveActivityByThread.get(t.id)?.status === "running").length;
+    const pendingCount = state.pendingRequests.length;
+    const parts = [];
+    if (pendingCount > 0) parts.push(`${pendingCount} 待审批`);
+    if (liveCount > 0) parts.push(`${liveCount} 运行中`);
+    badgeEl.textContent = parts.length ? parts.join(" · ") : "实时同步";
+  }
+}
+
+function renderVoiceLiveProgressIfOpen() {
+  if ($("voiceCopilotModal")?.open) {
+    renderVoiceLiveProgress();
+  }
+}
+
+function renderVoiceUnheardBanner() {
+  const banner = $("voiceUnheardBanner");
+  if (!banner) return;
+  const html = renderVoiceUnheardBannerHtml(state.voice.unheardQueue);
+  banner.innerHTML = html;
+  banner.hidden = !html;
+}
+
+function renderVoiceTranscript() {
+  const el = $("voiceCallTranscript");
+  if (!el) return;
+  el.innerHTML = renderVoiceCallTranscriptHtml(state.voice.transcript);
+  el.scrollTop = el.scrollHeight;
+}
+
+function appendVoiceTranscriptEntry(entry) {
+  if (!entry || (!entry.heardText && !entry.spokenReply)) return null;
+  const id = String(entry.id || nextVoiceUtteranceId()).trim();
+  const normalized = {
+    ...entry,
+    id,
+    deliveryStatus: entry.spokenReply ? (entry.deliveryStatus || "pending") : "",
+    heard: Boolean(entry.heard),
+    deliveryReason: String(entry.deliveryReason || ""),
+    priority: entry.priority === "critical" ? "critical" : "normal",
+    ttsCache: entry.ttsCache || null,
+  };
+  const existingIdx = state.voice.transcript.findIndex((item) => item.id === id);
+  if (existingIdx >= 0) {
+    state.voice.transcript[existingIdx] = { ...state.voice.transcript[existingIdx], ...normalized };
+  } else {
+    state.voice.transcript.push(normalized);
+  }
+  if (state.voice.transcript.length > 20) {
+    state.voice.transcript = state.voice.transcript.slice(-20);
+  }
+  renderVoiceTranscript();
+  return normalized;
+}
+
+function updateVoiceTranscriptEntry(utteranceId, patch = {}) {
+  if (!utteranceId) return;
+  const idx = state.voice.transcript.findIndex((item) => item.id === utteranceId);
+  if (idx < 0) return;
+  state.voice.transcript[idx] = { ...state.voice.transcript[idx], ...patch };
+  renderVoiceTranscript();
+}
+
+function renderVoiceCallUi() {
+  const orb = $("voiceOrbBtn");
+  const dot = $("voiceCallDot");
+  const stateEl = $("voiceStateText");
+  const hintEl = $("voiceSubHintText");
+  const modelBadge = $("voiceModelBadge");
+  const muteBtn = $("voiceMuteBtn");
+  const muteLabel = $("voiceMuteLabel");
+  const talkBtn = $("voiceTalkBtn");
+  const talkTitle = $("voiceTalkBtnTitle");
+  const readLabel = $("voiceReadLabel");
+  const announceBtn = $("voiceAutoAnnounceBtn");
+  const launchBtn = $("voiceModeBtn");
+  const attnDot = $("voiceAttentionDot");
+
+  const v = state.voice;
+  const unheardCount = v.unheardQueue.length;
+  let phaseClass = "";
+  let statusText = "免提聆听中…";
+  let hintText = "自然说话停顿约 1 秒自动发送，或轻点光球立即发送";
+
+  if (!v.callActive) {
+    statusText = "通话已结束";
+    hintText = "点击顶部语音按钮可随时重新拨通语音总控";
+  } else if (v.isProcessing) {
+    phaseClass = "is-busy";
+    statusText = v.processingPhaseText || "正在理解刚才的话…";
+    hintText = "快速语音识别后立即开口回复，后台并行执行任务";
+  } else if (v.isSpeaking) {
+    phaseClass = "is-speaking";
+    statusText = "正在语音回复";
+    hintText = "轻点光球或【打断】可立即开口说话";
+  } else if (v.isRecording) {
+    phaseClass = "is-recording";
+    statusText = "正在聆听你说话…";
+    hintText = "说完停顿自动发送 · 轻点光球立即发送";
+  } else if (v.isMuted) {
+    phaseClass = "is-muted";
+    statusText = "麦克风已静音";
+    hintText = "点下方【恢复麦】开启免提通话，或用键盘输入文字";
+  } else if (unheardCount > 0) {
+    hintText = `有 ${unheardCount} 条语音未播成功，点上方【立即补播】或说“再说一遍”`;
+  } else if (v.pendingBatches.size > 0) {
+    hintText = "后台正在分批派发执行，稍后会持续播报进度…";
+  }
+
+  if (orb) {
+    orb.classList.remove("is-recording", "is-busy", "is-speaking", "is-muted");
+    if (phaseClass) orb.classList.add(phaseClass);
+    const core = orb.querySelector(".voice-orb-core");
+    if (core) {
+      core.innerHTML = v.isProcessing
+        ? providerIconSvg("antigravity", { size: 28 })
+        : v.isSpeaking
+          ? iconSvg("speaker", { size: 28 })
+          : v.isMuted
+            ? iconSvg("speaker-off", { size: 28 })
+            : iconSvg("mic", { size: 28 });
+    }
+  }
+  if (dot) {
+    dot.classList.remove("is-connecting", "is-connected", "is-error");
+    dot.classList.add(v.backendMissing ? "is-error" : v.callActive ? "is-connected" : "is-connecting");
+  }
+  if (stateEl && !v.backendMissing) stateEl.textContent = statusText;
+  if (hintEl && !v.backendMissing) hintEl.textContent = hintText;
+  if (modelBadge) {
+    const shortModel = String(v.modelName || "Hydrogen").includes("hydrogen") ? "Hydrogen" : compactModelBadgeLabel(v.modelName);
+    const lockText = v.wakeLock ? " · 常亮" : "";
+    modelBadge.textContent = `${shortModel} · ${v.isMuted ? "已静音" : "免提"}${lockText}`;
+  }
+  if (muteBtn && muteLabel) {
+    muteBtn.classList.toggle("is-muted", v.isMuted);
+    muteLabel.textContent = v.isMuted ? "恢复麦" : "静音";
+  }
+  if (talkBtn && talkTitle) {
+    talkTitle.textContent = v.isSpeaking ? "打断说话" : v.isRecording ? "立即发送" : v.isProcessing ? "调度中…" : "播报/唤醒";
+    talkBtn.disabled = v.isProcessing;
+  }
+  if (readLabel) {
+    readLabel.textContent = v.isSpeaking ? "停止播报" : "播报进度";
+  }
+  if (announceBtn) {
+    announceBtn.classList.toggle("is-on", Boolean(v.config.autoBroadcastEvents));
+  }
+  if (launchBtn) {
+    launchBtn.classList.toggle("is-active-voice", Boolean(v.callActive || v.isRecording || v.isSpeaking));
+    launchBtn.classList.toggle("has-unheard", unheardCount > 0);
+    const lbl = launchBtn.querySelector(".btn-label-desktop");
+    if (lbl) {
+      lbl.textContent = v.callActive
+        ? (unheardCount > 0 && v.minimized ? `通话中 · ${unheardCount}未播` : "通话中")
+        : (unheardCount > 0 ? `${unheardCount}未播` : "通话");
+    }
+    launchBtn.title = unheardCount > 0
+      ? `有 ${unheardCount} 条语音回复未出声（点击展开并补播）`
+      : v.callActive
+        ? "语音通话正在进行（点击展开面板）"
+        : "AI 语音通话总控";
+  }
+  if (attnDot) {
+    attnDot.hidden = !(unheardCount > 0 || v.callActive);
+    attnDot.className = unheardCount > 0
+      ? "btn-attention-dot is-pending"
+      : v.callActive
+        ? "btn-attention-dot is-live"
+        : "btn-attention-dot";
+  }
+  renderVoiceUnheardBanner();
+}
+
+function updateVoiceCallTimerLabel() {
+  const timerEl = $("voiceCallTimer");
+  if (!timerEl || !state.voice.callActive) return;
+  const elapsed = Math.floor((Date.now() - state.voice.callStartedAt) / 1000);
+  timerEl.textContent = formatCallDuration(elapsed);
+}
+
+function stopVoiceLevelAnimation() {
+  if (state.voice.levelRafId) {
+    cancelAnimationFrame(state.voice.levelRafId);
+    state.voice.levelRafId = null;
+  }
+  $("voiceOrbBtn")?.style?.setProperty("--voice-level", "0");
+}
+
+function startVoiceLevelAnimation() {
+  stopVoiceLevelAnimation();
+  const tick = () => {
+    if (!state.voice.callActive) return;
+    const orb = $("voiceOrbBtn");
+    if (orb) {
+      let level = 0;
+      if (state.voice.isRecording) {
+        level = Math.min(1, state.voice.currentRms * 12);
+      } else if (state.voice.isSpeaking) {
+        level = 0.28 + Math.sin(Date.now() / 160) * 0.14;
+      } else if (state.voice.isProcessing) {
+        level = 0.22 + Math.sin(Date.now() / 220) * 0.12;
+      } else if (!state.voice.isMuted) {
+        level = Math.min(0.45, state.voice.currentRms * 7);
+      }
+      orb.style.setProperty("--voice-level", level.toFixed(3));
+    }
+    state.voice.levelRafId = requestAnimationFrame(tick);
+  };
+  state.voice.levelRafId = requestAnimationFrame(tick);
+}
+
+function stopVoiceCallMicPipeline() {
+  if (state.voice.processorNode) {
+    try {
+      state.voice.processorNode.onaudioprocess = null;
+      state.voice.processorNode.disconnect();
+    } catch {}
+    state.voice.processorNode = null;
+  }
+  if (state.voice.micSource) {
+    try {
+      state.voice.micSource.disconnect();
+    } catch {}
+    state.voice.micSource = null;
+  }
+  if (state.voice.micStream) {
+    for (const track of state.voice.micStream.getTracks()) {
+      try { track.stop(); } catch {}
+    }
+    state.voice.micStream = null;
+  }
+  state.voice.vadDetector = null;
+  state.voice.isRecording = false;
+  state.voice.currentRms = 0;
+}
+
+async function startVoiceCallMicPipeline() {
+  stopVoiceCallMicPipeline();
+  if (!navigator.mediaDevices?.getUserMedia || !state.voice.audioCtx) {
+    state.voice.isMuted = true;
+    renderVoiceCallUi();
+    $("voiceStateText").textContent = "浏览器不支持网页麦克风（可用文字输入控制）";
+    return;
+  }
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+        channelCount: 1,
+      },
+    });
+    if (!state.voice.callActive) {
+      for (const t of stream.getTracks()) t.stop();
+      return;
+    }
+
+    const ctx = state.voice.audioCtx;
+    if (ctx.state === "suspended") await ctx.resume().catch(() => {});
+    const source = ctx.createMediaStreamSource(stream);
+    const processor = ctx.createScriptProcessor(2048, 1, 1);
+    const silentGain = ctx.createGain();
+    silentGain.gain.value = 0;
+
+    const detector = createVadTurnDetector({
+      sampleRate: 16000,
+      preRollMs: 320,
+      silenceMs: 780,
+      minSpeechMs: 220,
+      maxSpeechMs: 22000,
+      rmsThreshold: 0.011,
+      adaptive: true,
+      requireSustainedOnset: false,
+      minPeakRms: 0.012,
+      minSnrRatio: 1.6,
+    });
+
+    processor.onaudioprocess = (ev) => {
+      if (!state.voice.callActive || state.voice.isMuted || state.voice.isSpeaking || state.voice.isProcessing) {
+        state.voice.currentRms = 0;
+        return;
+      }
+      const input = ev.inputBuffer?.getChannelData?.(0);
+      if (!input?.length) return;
+      const rms = computeRmsLevel(input);
+      state.voice.currentRms = rms;
+      const int16 = downsampleFloat32ToInt16(input, ctx.sampleRate || 48000, 16000);
+      const evt = detector.pushSamples(int16, rms);
+      if (evt.type === "speech_start") {
+        state.voice.isRecording = true;
+        renderVoiceCallUi();
+      } else if (evt.type === "utterance") {
+        state.voice.isRecording = false;
+        const wavBytes = encodePcm16SamplesToWav(evt.samples, 16000);
+        void sendVoiceTurnToMac({ wavUint8Array: wavBytes });
+      } else if (evt.type === "discarded_short" || evt.type === "discarded_noise") {
+        state.voice.isRecording = false;
+        renderVoiceCallUi();
+      }
+    };
+
+    source.connect(processor);
+    processor.connect(silentGain);
+    silentGain.connect(ctx.destination);
+
+    state.voice.micStream = stream;
+    state.voice.micSource = source;
+    state.voice.processorNode = processor;
+    state.voice.vadDetector = detector;
+    state.voice.isMuted = false;
+    renderVoiceCallUi();
+  } catch (error) {
+    state.voice.isMuted = true;
+    renderVoiceCallUi();
+    $("voiceStateText").textContent = `麦克风未授权（${error?.message || "请检查权限"}），可用文字打字控制`;
+  }
+}
+
+async function requestVoiceWakeLock() {
+  try {
+    if ("wakeLock" in navigator && !state.voice.wakeLock) {
+      state.voice.wakeLock = await navigator.wakeLock.request("screen");
+      state.voice.wakeLock.addEventListener?.("release", () => {
+        state.voice.wakeLock = null;
+        renderVoiceCallUi();
+      });
+    }
+  } catch {
+    state.voice.wakeLock = null;
+  }
+  renderVoiceCallUi();
+}
+
+async function releaseVoiceWakeLock() {
+  try {
+    await state.voice.wakeLock?.release?.();
+  } catch {}
+  state.voice.wakeLock = null;
+}
+
+async function reportVoicePlaybackAck({
+  callId = "",
+  utteranceId = "",
+  status = "",
+  heard = false,
+  playedMs = 0,
+  expectedMs = 0,
+  reason = "",
+  provider = "",
+  text = "",
+} = {}) {
+  const effectiveCallId = callId || state.voice.callId;
+  if (!effectiveCallId || !utteranceId || state.voice.backendMissing) return null;
+  try {
+    return await apiPostWithHotFallback("api/voice/call/ack", {
+      callId: effectiveCallId,
+      utteranceId,
+      status,
+      heard: Boolean(heard),
+      playedMs: Math.max(0, Math.round(Number(playedMs) || 0)),
+      expectedMs: Math.max(0, Math.round(Number(expectedMs) || 0)),
+      reason: String(reason || ""),
+      provider: String(provider || ""),
+      spokenText: String(text || ""),
+      text: String(text || ""),
+    });
+  } catch {
+    return null;
+  }
+}
+
+function playFallbackAlertChime() {
+  try {
+    const ctx = state.voice.audioCtx;
+    if (!ctx || ctx.state !== "running") return;
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(587.33, now);
+    osc.frequency.setValueAtTime(880, now + 0.08);
+    gain.gain.setValueAtTime(0.001, now);
+    gain.gain.linearRampToValueAtTime(0.04, now + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.2);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.21);
+  } catch {}
+}
+
+function markUtteranceUnheard({
+  id = "",
+  text = "",
+  actionTag = "",
+  reason = "playback_failed",
+  status = "unheard",
+  priority = "normal",
+  expectedMs = 0,
+  ttsCache = null,
+} = {}) {
+  const cleanText = stripMarkdownForSpeech(text, 360);
+  if (!id || !cleanText) return;
+  const effStatus = status === "interrupted" ? "interrupted" : "unheard";
+  updateVoiceTranscriptEntry(id, {
+    deliveryStatus: effStatus,
+    heard: false,
+    deliveryReason: reason,
+    ...(ttsCache ? { ttsCache } : {}),
+  });
+  if (reason === "hangup" || reason === "superseded") return;
+
+  const entry = {
+    id,
+    text: cleanText,
+    actionTag,
+    reason,
+    priority: priority === "critical" ? "critical" : "normal",
+    expectedMs: Number(expectedMs) || estimateVoiceDurationMs(cleanText),
+    ttsCache,
+    at: Date.now(),
+  };
+  const existingIdx = state.voice.unheardQueue.findIndex((item) => item.id === id);
+  if (existingIdx >= 0) {
+    state.voice.unheardQueue[existingIdx] = { ...state.voice.unheardQueue[existingIdx], ...entry };
+  } else {
+    state.voice.unheardQueue.push(entry);
+    if (state.voice.unheardQueue.length > 8) {
+      state.voice.unheardQueue = state.voice.unheardQueue.slice(-8);
+    }
+  }
+  renderVoiceCallUi();
+
+  if (reason !== "user_barge_in") {
+    try { navigator.vibrate?.([80, 45, 80]); } catch {}
+    playFallbackAlertChime();
+    if (state.voice.minimized || !$("voiceCopilotModal")?.open || reason === "autoplay_blocked") {
+      showToastBanner("语音未出声（点击顶部“通话”重播）", {
+        detail: `${humanizeVoiceDeliveryReason(reason)}：${stripMarkdownForSpeech(cleanText, 72)}`,
+        error: reason === "speech_unavailable",
+      });
+    }
+  }
+}
+
+function markUtteranceHeard(id, { status = "played" } = {}) {
+  if (!id) return;
+  state.voice.unheardQueue = state.voice.unheardQueue.filter((item) => item.id !== id);
+  updateVoiceTranscriptEntry(id, {
+    deliveryStatus: status === "interrupted" ? "interrupted" : "played",
+    heard: true,
+    deliveryReason: "",
+  });
+  renderVoiceCallUi();
+}
+
+function clearUnheardVoiceQueue() {
+  if (!state.voice.unheardQueue.length) return;
+  state.voice.unheardQueue = [];
+  renderVoiceCallUi();
+}
+
+async function fetchVoiceTtsAudio({ text = "", utteranceId = "", preferOffline = false, register = false } = {}) {
+  const clean = stripMarkdownForSpeech(text, 360);
+  if (!clean || state.voice.backendMissing) return null;
+  try {
+    const res = await apiPostWithHotFallback("api/voice/tts", {
+      text: clean,
+      callId: state.voice.callId,
+      utteranceId,
+      preferOffline: Boolean(preferOffline),
+      register: Boolean(register),
+    });
+    return normalizeVoiceTtsPayload({
+      ...res,
+      utteranceId: res?.utteranceId || utteranceId,
+      text: res?.text || clean,
+    });
+  } catch {
+    return null;
+  }
+}
+
+function speakWithBrowserFallback(text, { expectedMs = 0 } = {}) {
+  return new Promise((resolve) => {
+    const clean = stripMarkdownForSpeech(text, 360);
+    const effExpected = Math.max(Number(expectedMs) || 0, estimateVoiceDurationMs(clean));
+    if (!clean || typeof window.speechSynthesis === "undefined") {
+      state.voice.isSpeaking = false;
+      renderVoiceCallUi();
+      resolve({
+        engine: "browser",
+        outcome: "error",
+        reason: "speech_unavailable",
+        started: false,
+        playedMs: 0,
+        expectedMs: effExpected,
+        muted: false,
+        volume: 1,
+      });
+      return;
+    }
+
+    let settled = false;
+    let started = false;
+    let startAt = 0;
+    let startTimer = null;
+    let totalTimer = null;
+    let speakDelayTimer = null;
+    let abortHandler = null;
+
+    const finish = ({ outcome = "ended", reason = "" } = {}) => {
+      if (settled) return;
+      settled = true;
+      if (speakDelayTimer) clearTimeout(speakDelayTimer);
+      if (startTimer) clearTimeout(startTimer);
+      if (totalTimer) clearTimeout(totalTimer);
+      if (state.voice.activePlaybackAbort === abortHandler) {
+        state.voice.activePlaybackAbort = null;
+      }
+      state.voice.activeUtterance = null;
+      state.voice.isSpeaking = false;
+      const playedMs = started && startAt > 0 ? Math.max(0, Date.now() - startAt) : 0;
+      resolve({
+        engine: "browser",
+        outcome,
+        reason,
+        started,
+        playedMs,
+        expectedMs: effExpected,
+        muted: false,
+        volume: 1,
+      });
+    };
+
+    try {
+      const needsCancel = Boolean(window.speechSynthesis.speaking || window.speechSynthesis.pending);
+      if (needsCancel) {
+        window.speechSynthesis.cancel();
+      }
+      if (window.speechSynthesis.paused) {
+        window.speechSynthesis.resume?.();
+      }
+      const utter = new SpeechSynthesisUtterance(clean);
+      utter.lang = "zh-CN";
+      utter.rate = 1.06;
+      const preferred = pickPreferredChineseSpeechVoice(window.speechSynthesis.getVoices());
+      if (preferred) utter.voice = preferred;
+      state.voice.activeUtterance = utter;
+      state.voice.isSpeaking = true;
+      renderVoiceCallUi();
+
+      abortHandler = (abortReason = "superseded") => {
+        try { window.speechSynthesis.cancel(); } catch {}
+        finish({ outcome: "interrupted", reason: abortReason });
+      };
+      state.voice.activePlaybackAbort = abortHandler;
+
+      const markStarted = () => {
+        if (!started) {
+          started = true;
+          startAt = Date.now();
+        }
+        if (startTimer) {
+          clearTimeout(startTimer);
+          startTimer = null;
+        }
+      };
+
+      utter.onstart = markStarted;
+      utter.onboundary = markStarted;
+      utter.onend = () => finish({ outcome: "ended", reason: "" });
+      utter.onerror = (ev) => finish({ outcome: "error", reason: String(ev?.error || "playback_failed") });
+
+      startTimer = setTimeout(() => {
+        if (!started && !settled) {
+          try { window.speechSynthesis.cancel(); } catch {}
+          finish({ outcome: "error", reason: "stalled" });
+        }
+      }, 2200);
+      totalTimer = setTimeout(() => {
+        if (!settled) {
+          try { window.speechSynthesis.cancel(); } catch {}
+          finish({ outcome: "error", reason: "speech_timeout" });
+        }
+      }, Math.max(4500, effExpected + 4500));
+
+      if (needsCancel) {
+        speakDelayTimer = setTimeout(() => {
+          speakDelayTimer = null;
+          if (settled) return;
+          try {
+            window.speechSynthesis.speak(utter);
+          } catch {
+            finish({ outcome: "error", reason: "speech_unavailable" });
+          }
+        }, 40);
+      } else {
+        window.speechSynthesis.speak(utter);
+      }
+    } catch {
+      finish({ outcome: "error", reason: "speech_unavailable" });
+    }
+  });
+}
+
+async function playAudioBufferViaWebAudio(tts, text, expectedMs = 0) {
+  const effExpected = Math.max(Number(expectedMs) || 0, estimateVoiceDurationMs(text));
+  const ctx = state.voice.audioCtx;
+  if (!ctx || ctx.state === "closed" || typeof ctx.decodeAudioData !== "function") {
+    return null;
+  }
+
+  let audioBuffer = null;
+  try {
+    if (ctx.state === "suspended") {
+      await ctx.resume().catch(() => {});
+    }
+    if (ctx.state !== "running") {
+      return null;
+    }
+    const bytes = base64ToUint8Array(tts.audioBase64);
+    const rawCopy = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+    audioBuffer = await ctx.decodeAudioData(rawCopy);
+  } catch {
+    return null;
+  }
+
+  if (!audioBuffer || !(audioBuffer.duration > 0)) {
+    return null;
+  }
+  if (!state.voice.callActive || !state.voice.isSpeaking) {
+    return {
+      engine: tts.provider || "edge-tts",
+      outcome: "interrupted",
+      reason: state.voice.callActive ? "user_barge_in" : "hangup",
+      started: false,
+      playedMs: 0,
+      expectedMs: effExpected,
+      muted: false,
+      volume: 1,
+    };
+  }
+
+  return new Promise((resolve) => {
+    const source = ctx.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(ctx.destination);
+    state.voice.activeBufferSource = source;
+
+    let settled = false;
+    let started = false;
+    let startedAt = 0;
+    let endTimer = null;
+    let abortHandler = null;
+    const bufferDurationMs = Math.round(audioBuffer.duration * 1000);
+    const maxExpectedMs = Math.max(effExpected, bufferDurationMs);
+
+    const finish = ({ outcome = "ended", reason = "" } = {}) => {
+      if (settled) return;
+      settled = true;
+      if (endTimer) clearTimeout(endTimer);
+      source.onended = null;
+      if (state.voice.activeBufferSource === source) {
+        state.voice.activeBufferSource = null;
+      }
+      try { source.disconnect(); } catch {}
+      if (state.voice.activePlaybackAbort === abortHandler) {
+        state.voice.activePlaybackAbort = null;
+      }
+      state.voice.isSpeaking = false;
+      const wallPlayed = started && startedAt > 0 ? Math.max(0, Date.now() - startedAt) : 0;
+      const playedMs = outcome === "ended"
+        ? Math.max(bufferDurationMs, wallPlayed)
+        : wallPlayed;
+      resolve({
+        engine: tts.provider || "edge-tts",
+        outcome,
+        reason,
+        started,
+        playedMs,
+        expectedMs: maxExpectedMs,
+        muted: false,
+        volume: 1,
+      });
+    };
+
+    abortHandler = (abortReason = "superseded") => {
+      try { source.stop(); } catch {}
+      finish({ outcome: "interrupted", reason: abortReason });
+    };
+    state.voice.activePlaybackAbort = abortHandler;
+
+    source.onended = () => finish({ outcome: "ended", reason: "" });
+    endTimer = setTimeout(() => {
+      if (!settled) {
+        try { source.stop(); } catch {}
+        finish({ outcome: "error", reason: "speech_timeout" });
+      }
+    }, Math.max(8000, maxExpectedMs + 8000));
+
+    try {
+      started = true;
+      startedAt = Date.now();
+      source.start(0);
+    } catch {
+      started = false;
+      finish({ outcome: "error", reason: "playback_failed" });
+    }
+  });
+}
+
+function playAudioBufferViaElement(tts, text, expectedMs = 0) {
+  return new Promise((resolve) => {
+    const effExpected = Math.max(Number(expectedMs) || 0, estimateVoiceDurationMs(text));
+    let url = "";
+    try {
+      const bytes = base64ToUint8Array(tts.audioBase64);
+      const blob = new Blob([bytes], { type: tts.mimeType || "audio/mpeg" });
+      url = URL.createObjectURL(blob);
+    } catch {
+      resolve({
+        engine: tts.provider || "audio",
+        outcome: "error",
+        reason: "playback_failed",
+        started: false,
+        playedMs: 0,
+        expectedMs: effExpected,
+        muted: false,
+        volume: 1,
+      });
+      return;
+    }
+
+    state.voice.audioObjectUrl = url;
+    const audio = state.voice.audioEl || new Audio();
+    audio.playsInline = true;
+    state.voice.audioEl = audio;
+
+    let settled = false;
+    let started = false;
+    let startedAt = 0;
+    let maxCurrentTimeMs = 0;
+    let startTimer = null;
+    let endTimer = null;
+    let abortHandler = null;
+
+    const finish = ({ outcome = "ended", reason = "" } = {}) => {
+      if (settled) return;
+      settled = true;
+      if (startTimer) clearTimeout(startTimer);
+      if (endTimer) clearTimeout(endTimer);
+      audio.onplaying = null;
+      audio.ontimeupdate = null;
+      audio.onended = null;
+      audio.onerror = null;
+      audio.onstalled = null;
+      if (state.voice.activePlaybackAbort === abortHandler) {
+        state.voice.activePlaybackAbort = null;
+      }
+      if (state.voice.audioObjectUrl === url) {
+        try { URL.revokeObjectURL(url); } catch {}
+        state.voice.audioObjectUrl = "";
+      }
+      state.voice.isSpeaking = false;
+      const wallPlayed = started && startedAt > 0 ? Math.max(0, Date.now() - startedAt) : 0;
+      const playedMs = Math.max(maxCurrentTimeMs, wallPlayed);
+      resolve({
+        engine: tts.provider || "edge-tts",
+        outcome,
+        reason,
+        started,
+        playedMs,
+        expectedMs: effExpected,
+        muted: Boolean(audio.muted),
+        volume: Number.isFinite(audio.volume) ? audio.volume : 1,
+      });
+    };
+
+    const markPlaying = () => {
+      if (!started) {
+        started = true;
+        startedAt = Date.now();
+      }
+      if (startTimer) {
+        clearTimeout(startTimer);
+        startTimer = null;
+      }
+    };
+
+    abortHandler = (abortReason = "superseded") => {
+      try { audio.pause(); } catch {}
+      finish({ outcome: "interrupted", reason: abortReason });
+    };
+    state.voice.activePlaybackAbort = abortHandler;
+
+    audio.onplaying = markPlaying;
+    audio.ontimeupdate = () => {
+      const curMs = Math.round((Number(audio.currentTime) || 0) * 1000);
+      if (curMs > maxCurrentTimeMs) maxCurrentTimeMs = curMs;
+      if (curMs > 20) markPlaying();
+    };
+    audio.onended = () => {
+      const curMs = Math.round((Number(audio.currentTime) || 0) * 1000);
+      if (curMs > maxCurrentTimeMs) maxCurrentTimeMs = curMs;
+      finish({ outcome: "ended", reason: "" });
+    };
+    audio.onerror = () => finish({ outcome: "error", reason: "playback_failed" });
+
+    startTimer = setTimeout(() => {
+      if (!started && !settled) {
+        try { audio.pause(); } catch {}
+        finish({ outcome: "error", reason: "stalled" });
+      }
+    }, 3000);
+
+    endTimer = setTimeout(() => {
+      if (!settled) {
+        try { audio.pause(); } catch {}
+        finish({ outcome: "error", reason: "speech_timeout" });
+      }
+    }, Math.max(8000, effExpected + 8000));
+
+    audio.src = url;
+    audio.play().catch((err) => {
+      const msg = `${err?.name || ""} ${err?.message || ""}`;
+      const isAutoplay = /NotAllowedError|autoplay|gesture|interact/i.test(msg);
+      finish({ outcome: "error", reason: isAutoplay ? "autoplay_blocked" : "playback_failed" });
+    });
+  });
+}
+
+async function playVoiceTtsResult({
+  utteranceId = "",
+  spokenReply = "",
+  tts = null,
+  actionTag = "",
+  priority = "normal",
+  allowOfflineRetry = true,
+  allowBrowserFallback = true,
+  resumeAfter = true,
+} = {}) {
+  const clean = stripMarkdownForSpeech(spokenReply, 360);
+  if (!clean) {
+    if (resumeAfter && state.voice.callActive) scheduleVoiceListenResume();
+    return { status: "played", heard: true, reason: "", playedMs: 0, expectedMs: 0, skipped: true };
+  }
+
+  if (state.voice.activePlaybackAbort || state.voice.activeBufferSource || state.voice.activeUtterance) {
+    stopVoicePlayback({ scheduleResume: false, abortReason: "superseded" });
+  }
+  const norm = normalizeVoiceTtsPayload(tts ? { ...tts, utteranceId: utteranceId || tts.utteranceId, text: tts.text || clean } : { utteranceId, text: clean });
+  const effUtteranceId = utteranceId || norm.utteranceId || nextVoiceUtteranceId();
+
+  updateVoiceTranscriptEntry(effUtteranceId, { deliveryStatus: "playing", deliveryReason: "" });
+  state.voice.isSpeaking = true;
+  state.voice.vadDetector?.reset?.();
+  renderVoiceCallUi();
+
+  let primaryEval = null;
+  let lastProvider = norm.provider || "none";
+
+  if (norm.hasAudio) {
+    const rawAudio = (await playAudioBufferViaWebAudio(norm, clean, norm.expectedMs))
+      || (await playAudioBufferViaElement(norm, clean, norm.expectedMs));
+    primaryEval = evaluateVoicePlaybackOutcome({ ...rawAudio, text: clean, expectedMs: norm.expectedMs, priority });
+    lastProvider = norm.provider || "edge-tts";
+    if (primaryEval.heard) {
+      markUtteranceHeard(effUtteranceId, { status: primaryEval.status });
+      void reportVoicePlaybackAck({ utteranceId: effUtteranceId, ...primaryEval, provider: lastProvider, text: clean });
+      if (resumeAfter && state.voice.callActive) scheduleVoiceListenResume();
+      else renderVoiceCallUi();
+      return { ...primaryEval, utteranceId: effUtteranceId };
+    }
+    if (rawAudio.outcome === "interrupted") {
+      if (primaryEval.reason !== "hangup" && primaryEval.reason !== "superseded") {
+        markUtteranceUnheard({ id: effUtteranceId, text: clean, actionTag, reason: primaryEval.reason, status: "interrupted", priority, expectedMs: norm.expectedMs, ttsCache: norm });
+      }
+      void reportVoicePlaybackAck({ utteranceId: effUtteranceId, ...primaryEval, provider: lastProvider, text: clean });
+      if (resumeAfter && state.voice.callActive) scheduleVoiceListenResume();
+      else renderVoiceCallUi();
+      return { ...primaryEval, utteranceId: effUtteranceId };
+    }
+  }
+
+  const primaryReason = primaryEval?.reason || "";
+  if (
+    allowOfflineRetry
+    && !state.voice.backendMissing
+    && state.voice.callActive
+    && norm.provider !== "macos-say"
+    && primaryReason !== "autoplay_blocked"
+    && primaryReason !== "muted_output"
+  ) {
+    const offlineTts = await fetchVoiceTtsAudio({ text: clean, utteranceId: effUtteranceId, preferOffline: true, register: false });
+    if (offlineTts?.hasAudio) {
+      updateVoiceTranscriptEntry(effUtteranceId, { ttsCache: offlineTts });
+      lastProvider = offlineTts.provider || "macos-say";
+      const rawOffline = (await playAudioBufferViaWebAudio(offlineTts, clean, offlineTts.expectedMs || norm.expectedMs))
+        || (await playAudioBufferViaElement(offlineTts, clean, offlineTts.expectedMs || norm.expectedMs));
+      const offEval = evaluateVoicePlaybackOutcome({ ...rawOffline, text: clean, expectedMs: offlineTts.expectedMs || norm.expectedMs, priority });
+      if (offEval.heard) {
+        markUtteranceHeard(effUtteranceId, { status: offEval.status });
+        void reportVoicePlaybackAck({ utteranceId: effUtteranceId, ...offEval, provider: lastProvider, text: clean });
+        if (resumeAfter && state.voice.callActive) scheduleVoiceListenResume();
+        else renderVoiceCallUi();
+        return { ...offEval, utteranceId: effUtteranceId };
+      }
+      if (rawOffline.outcome === "interrupted") {
+        if (offEval.reason !== "hangup" && offEval.reason !== "superseded") {
+          markUtteranceUnheard({ id: effUtteranceId, text: clean, actionTag, reason: offEval.reason, status: "interrupted", priority, expectedMs: norm.expectedMs, ttsCache: offlineTts });
+        }
+        void reportVoicePlaybackAck({ utteranceId: effUtteranceId, ...offEval, provider: lastProvider, text: clean });
+        if (resumeAfter && state.voice.callActive) scheduleVoiceListenResume();
+        else renderVoiceCallUi();
+        return { ...offEval, utteranceId: effUtteranceId };
+      }
+    }
+  }
+
+  let browserEval = null;
+  if (allowBrowserFallback && state.voice.callActive && primaryReason !== "muted_output") {
+    const rawBrowser = await speakWithBrowserFallback(clean, { expectedMs: norm.expectedMs });
+    lastProvider = rawBrowser.outcome === "error" && norm.hasAudio ? lastProvider : "browser";
+    browserEval = evaluateVoicePlaybackOutcome({ ...rawBrowser, text: clean, expectedMs: norm.expectedMs, priority });
+    if (browserEval.heard) {
+      markUtteranceHeard(effUtteranceId, { status: browserEval.status });
+      void reportVoicePlaybackAck({ utteranceId: effUtteranceId, ...browserEval, provider: "browser", text: clean });
+      if (resumeAfter && state.voice.callActive) scheduleVoiceListenResume();
+      else renderVoiceCallUi();
+      return { ...browserEval, utteranceId: effUtteranceId };
+    }
+    if (rawBrowser.outcome === "interrupted") {
+      if (browserEval.reason !== "hangup" && browserEval.reason !== "superseded") {
+        markUtteranceUnheard({ id: effUtteranceId, text: clean, actionTag, reason: browserEval.reason, status: "interrupted", priority, expectedMs: norm.expectedMs, ttsCache: norm });
+      }
+      void reportVoicePlaybackAck({ utteranceId: effUtteranceId, ...browserEval, provider: "browser", text: clean });
+      if (resumeAfter && state.voice.callActive) scheduleVoiceListenResume();
+      else renderVoiceCallUi();
+      return { ...browserEval, utteranceId: effUtteranceId };
+    }
+  }
+
+  state.voice.isSpeaking = false;
+  const preservedReason = (primaryReason === "autoplay_blocked" || primaryReason === "muted_output" || primaryReason === "fake_short_end")
+    ? primaryReason
+    : (browserEval?.reason || primaryReason || "speech_unavailable");
+  const finalPlayedMs = Math.max(primaryEval?.playedMs || 0, browserEval?.playedMs || 0);
+  markUtteranceUnheard({
+    id: effUtteranceId,
+    text: clean,
+    actionTag,
+    reason: preservedReason,
+    status: "unheard",
+    priority,
+    expectedMs: norm.expectedMs,
+    ttsCache: norm.hasAudio ? norm : null,
+  });
+  void reportVoicePlaybackAck({
+    utteranceId: effUtteranceId,
+    status: "unheard",
+    heard: false,
+    playedMs: finalPlayedMs,
+    expectedMs: norm.expectedMs,
+    reason: preservedReason,
+    provider: lastProvider,
+    text: clean,
+  });
+  if (resumeAfter && state.voice.callActive) scheduleVoiceListenResume();
+  else renderVoiceCallUi();
+  return {
+    status: "unheard",
+    heard: false,
+    reason: preservedReason,
+    playedMs: finalPlayedMs,
+    expectedMs: norm.expectedMs,
+    utteranceId: effUtteranceId,
+  };
+}
+
+async function replayVoiceTranscriptEntryById(entryId, { resumeAfter = true } = {}) {
+  const transcriptItem = state.voice.transcript.find((item) => item.id === entryId);
+  const unheardItem = state.voice.unheardQueue.find((item) => item.id === entryId);
+  const text = stripMarkdownForSpeech(transcriptItem?.spokenReply || unheardItem?.text || "", 360);
+  if (!text) return { status: "unheard", heard: false, reason: "empty" };
+  let tts = transcriptItem?.ttsCache || unheardItem?.ttsCache || null;
+  if (!tts?.hasAudio && !state.voice.backendMissing) {
+    tts = await fetchVoiceTtsAudio({ text, utteranceId: entryId, register: false });
+    if (tts) updateVoiceTranscriptEntry(entryId, { ttsCache: tts });
+  }
+  return playVoiceTtsResult({
+    utteranceId: entryId,
+    spokenReply: text,
+    tts,
+    actionTag: transcriptItem?.actionTag || unheardItem?.actionTag || "",
+    priority: transcriptItem?.priority || unheardItem?.priority || "normal",
+    resumeAfter,
+  });
+}
+
+async function replayUnheardVoiceItems({ onlyBlocked = false } = {}) {
+  if (!state.voice.unheardQueue.length || !state.voice.callActive) return;
+  if (state.voice.isProcessing || state.voice.isRecording) return;
+  const candidates = state.voice.unheardQueue.filter((item) => !onlyBlocked || item.reason === "autoplay_blocked" || item.reason === "muted_output" || item.reason === "fake_short_end");
+  if (!candidates.length) return;
+  for (let i = 0; i < candidates.length; i += 1) {
+    if (!state.voice.callActive || state.voice.isProcessing || state.voice.isRecording) break;
+    const res = await replayVoiceTranscriptEntryById(candidates[i].id, { resumeAfter: i === candidates.length - 1 });
+    if (!res?.heard || res?.reason === "user_barge_in" || res?.reason === "hangup") {
+      break;
+    }
+  }
+}
+
+async function announceVoiceNoticeViaMac(text, meta = {}) {
+  const clean = stripMarkdownForSpeech(text, 240);
+  if (!clean || !state.voice.callActive) return null;
+  const utteranceId = String(meta?.id || "").trim() || nextVoiceUtteranceId("notice");
+  const actionTag = String(meta?.actionTag || "实时提醒").trim() || "实时提醒";
+  const priority = meta?.priority === "critical" ? "critical" : "normal";
+  appendVoiceTranscriptEntry({
+    id: utteranceId,
+    heardText: "",
+    spokenReply: clean,
+    actionTag,
+    priority,
+    deliveryStatus: "queued",
+  });
+  const tts = await fetchVoiceTtsAudio({ text: clean, utteranceId, register: meta?.register !== false });
+  if (tts) updateVoiceTranscriptEntry(utteranceId, { ttsCache: tts });
+  return playVoiceTtsResult({
+    utteranceId,
+    spokenReply: tts?.text || clean,
+    tts,
+    actionTag,
+    priority,
+    resumeAfter: meta?.resumeAfter !== false,
+  });
+}
+
+async function drainVoiceBroadcastQueue() {
+  if (state.voice.broadcastDraining) return;
+  state.voice.broadcastDraining = true;
+  try {
+    while (
+      state.voice.callActive
+      && state.voice.broadcastQueue.length > 0
+      && !state.voice.isProcessing
+      && !state.voice.isRecording
+      && !state.voice.isSpeaking
+    ) {
+      const nextItem = state.voice.broadcastQueue.shift();
+      if (!nextItem) continue;
+      const playRes = await announceVoiceNoticeViaMac(nextItem.text, {
+        ...nextItem,
+        register: true,
+        resumeAfter: state.voice.broadcastQueue.length === 0,
+      });
+      if (playRes?.reason === "user_barge_in" || playRes?.reason === "hangup" || !state.voice.callActive) {
+        break;
+      }
+    }
+  } finally {
+    state.voice.broadcastDraining = false;
+  }
+}
+
+function enqueueOrPlayVoiceBroadcast(item = {}) {
+  if (!state.voice.callActive || !state.voice.config.autoBroadcastEvents) return;
+  state.voice.broadcastQueue = enqueueVoiceBroadcastItem(state.voice.broadcastQueue, item, 8);
+  if (!state.voice.isProcessing && !state.voice.isRecording && !state.voice.isSpeaking && !state.voice.broadcastDraining) {
+    void drainVoiceBroadcastQueue();
+  }
+}
+
+function clearApprovalVoiceReminder(reqId = "") {
+  if (reqId) {
+    const timer = state.voice.approvalReminderTimers.get(reqId);
+    if (timer) {
+      clearTimeout(timer);
+      state.voice.approvalReminderTimers.delete(reqId);
+    }
+    state.voice.remindedRequestIds.delete(reqId);
+    return;
+  }
+  for (const timer of state.voice.approvalReminderTimers.values()) {
+    clearTimeout(timer);
+  }
+  state.voice.approvalReminderTimers.clear();
+}
+
+function scheduleApprovalVoiceReminder(request, projLabel = "有任务") {
+  const reqId = String(request?.id || "").trim();
+  if (!reqId || state.voice.remindedRequestIds.has(reqId)) return;
+  const prevTimer = state.voice.approvalReminderTimers.get(reqId);
+  if (prevTimer) clearTimeout(prevTimer);
+  const timer = setTimeout(() => {
+    state.voice.approvalReminderTimers.delete(reqId);
+    if (!state.voice.callActive || !state.voice.config.autoBroadcastEvents) return;
+    if (state.voice.remindedRequestIds.has(reqId)) return;
+    if (!state.pendingRequests.some((r) => r.id === reqId)) return;
+    if (Date.now() - state.voice.lastUserActivityAt < 18_000) return;
+    state.voice.remindedRequestIds.add(reqId);
+    const detail = stripMarkdownForSpeech(request.title || request.command || "请确认", 60);
+    enqueueOrPlayVoiceBroadcast({
+      text: `${projLabel} 仍在等待你的确认：${detail}。你可以直接说批准或拒绝。`,
+      priority: "critical",
+      source: "approval_reminder",
+      actionTag: "审批提醒",
+      dedupeKey: `req-remind:${reqId}`,
+    });
+  }, 22_000);
+  state.voice.approvalReminderTimers.set(reqId, timer);
+}
+
+function clearVoiceProcessingStageTimer() {
+  if (state.voice.processingStageTimer) {
+    clearTimeout(state.voice.processingStageTimer);
+    state.voice.processingStageTimer = null;
+  }
+  state.voice.processingPhaseText = "";
+}
+
+function clearVoiceBatchAndHeartbeatTimers() {
+  clearVoiceProcessingStageTimer();
+  for (const item of state.voice.pendingBatches.values()) {
+    for (const timer of item?.timers || []) clearTimeout(timer);
+  }
+  state.voice.pendingBatches.clear();
+  state.voice.watchedThreads.clear();
+  state.voice.settledBatchIds?.clear?.();
+  if (state.voice.progressHeartbeatTimer) {
+    clearInterval(state.voice.progressHeartbeatTimer);
+    state.voice.progressHeartbeatTimer = null;
+  }
+}
+
+function unwatchVoiceThread(threadId) {
+  if (!threadId) return;
+  state.voice.watchedThreads.delete(threadId);
+  if (state.voice.watchedThreads.size === 0 && state.voice.progressHeartbeatTimer) {
+    clearInterval(state.voice.progressHeartbeatTimer);
+    state.voice.progressHeartbeatTimer = null;
+  }
+}
+
+function watchVoiceDispatchedThread(threadId, projectName = "") {
+  if (!threadId || !state.voice.callActive) return;
+  if (state.voice.progressHeartbeatTimer) {
+    clearInterval(state.voice.progressHeartbeatTimer);
+    state.voice.progressHeartbeatTimer = null;
+  }
+}
+
+function handleVoiceDispatchBatchUpdate(batch) {
+  if (!batch?.batchId || batch.status === "dispatching") return;
+  const settled = (state.voice.settledBatchIds ||= new Set());
+  if (settled.has(batch.batchId)) return;
+  settled.add(batch.batchId);
+  if (settled.size > 60) {
+    const oldest = settled.values().next().value;
+    if (oldest) settled.delete(oldest);
+  }
+  const pending = state.voice.pendingBatches.get(batch.batchId);
+  if (pending) {
+    for (const timer of pending.timers || []) clearTimeout(timer);
+    state.voice.pendingBatches.delete(batch.batchId);
+  }
+  if (batch.utteranceId && batch.summaryTag) {
+    updateVoiceTranscriptEntry(batch.utteranceId, { actionTag: batch.summaryTag });
+  }
+  if (batch.model) {
+    state.voice.modelName = batch.model;
+  }
+  if (batch.focusThreadId && batch.status !== "failed" && batch.executionTier !== "subagent_hydrogen") {
+    void applyVoiceExecutionEffect({
+      ok: true,
+      action: batch.action,
+      focusThreadId: batch.focusThreadId,
+      focusProjectCwd: batch.focusProjectCwd,
+      summaryTag: batch.summaryTag,
+    });
+  }
+  if (batch.shouldSpeak && batch.spokenFeedback && state.voice.callActive && state.voice.config.autoBroadcastEvents) {
+    enqueueOrPlayVoiceBroadcast({
+      text: batch.spokenFeedback,
+      priority: batch.priority || (batch.status === "failed" ? "critical" : "normal"),
+      source: "voice_dispatch",
+      actionTag: batch.summaryTag || "派发结果",
+      dedupeKey: `dispatch:${batch.batchId}`,
+    });
+  }
+  renderVoiceCallUi();
+}
+
+function trackVoicePendingDispatchBatch({
+  batchId = "",
+  utteranceId = "",
+  action = "",
+  focusThreadId = "",
+  projectCwd = "",
+} = {}) {
+  if (!batchId || !state.voice.callActive) return;
+  if (state.voice.settledBatchIds?.has(batchId)) return;
+  const entry = {
+    batchId,
+    utteranceId,
+    action,
+    focusThreadId,
+    projectCwd,
+    timers: [],
+  };
+  state.voice.pendingBatches.set(batchId, entry);
+  for (const delayMs of [900, 2600]) {
+    const timer = setTimeout(() => {
+      if (!state.voice.callActive || !state.voice.pendingBatches.has(batchId)) return;
+      const qs = state.voice.callId ? `?callId=${encodeURIComponent(state.voice.callId)}` : "";
+      void apiGetWithHotFallback(`api/voice/call/status${qs}`)
+        .then((status) => {
+          const list = Array.isArray(status?.dispatchBatches) ? status.dispatchBatches : [];
+          const matched = list.find((item) => item?.batchId === batchId && item.status !== "dispatching");
+          if (matched) handleVoiceDispatchBatchUpdate(matched);
+        })
+        .catch(() => {});
+    }, delayMs);
+    entry.timers.push(timer);
+  }
+}
+
+async function applyVoiceExecutionEffect(executed = {}) {
+  if (!executed || !executed.ok) return;
+  if (!executed.pending && executed.action === "open_project" && executed.focusProjectCwd && !executed.focusThreadId) {
+    state.searchText = projectBaseName(executed.focusProjectCwd);
+    openProjectBoardView();
+    minimizeVoiceModal();
+    renderVoiceLiveProgressIfOpen();
+    return;
+  }
+  await refreshThreads().catch(() => null);
+  if (executed.focusThreadId && executed.focusThreadId !== state.activeThreadId) {
+    await selectThread(executed.focusThreadId, { focusScroll: true }).catch(() => null);
+  } else if (executed.focusThreadId && executed.focusThreadId === state.activeThreadId) {
+    await selectThread(executed.focusThreadId, { focusScroll: false }).catch(() => null);
+  }
+  if (!executed.pending && (executed.action === "open_thread" || executed.action === "open_project") && executed.focusThreadId) {
+    minimizeVoiceModal();
+  }
+  renderVoiceLiveProgressIfOpen();
+}
+
+async function sendVoiceTurnToMac({ wavUint8Array = null, transcriptText = "", mode = "turn" } = {}) {
+  if (!state.voice.callActive) return;
+  if (mode === "briefing" || String(transcriptText || "").trim()) {
+    state.voice.lastUserActivityAt = Date.now();
+    clearApprovalVoiceReminder();
+  }
+  if (state.voice.backendMissing) {
+    const fallbackText = buildLocalProgressBriefing({
+      groups: getProjectGroups({ ignoreFilters: true }),
+      activeThread: state.activeThread,
+      pendingRequests: state.pendingRequests,
+    });
+    const fallbackId = nextVoiceUtteranceId("local");
+    appendVoiceTranscriptEntry({
+      id: fallbackId,
+      heardText: transcriptText || "播报进度",
+      spokenReply: fallbackText,
+      actionTag: "需检查本机热扩展",
+      deliveryStatus: "queued",
+    });
+    await playVoiceTtsResult({ utteranceId: fallbackId, spokenReply: fallbackText, actionTag: "需检查本机热扩展" });
+    return;
+  }
+
+  state.voice.isProcessing = true;
+  state.voice.isRecording = false;
+  clearVoiceProcessingStageTimer();
+  state.voice.processingStageTimer = setTimeout(() => {
+    state.voice.processingStageTimer = null;
+    if (state.voice.callActive && state.voice.isProcessing) {
+      state.voice.processingPhaseText = "正在加快识别与准备语音回复…";
+      renderVoiceCallUi();
+    }
+  }, 1500);
+  state.voice.vadDetector?.reset?.();
+  renderVoiceCallUi();
+
+  try {
+    const audioBase64 = wavUint8Array?.length ? uint8ArrayToBase64(wavUint8Array) : "";
+    const res = await apiPostWithHotFallback("api/voice/call", {
+      callId: state.voice.callId,
+      audioBase64,
+      audioMimeType: audioBase64 ? "audio/wav" : "",
+      transcriptText: String(transcriptText || "").trim(),
+      activeThreadId: state.activeThreadId || "",
+      mode,
+      autoExecute: true,
+      asyncDispatch: true,
+      tts: true,
+    });
+    clearVoiceProcessingStageTimer();
+    if (res?.executed?.model || res?.dispatchModel || res?.model) {
+      state.voice.modelName = res?.executed?.model || res?.dispatchModel || res.model;
+    }
+    if (res?.noSpeech) {
+      state.voice.isProcessing = false;
+      renderVoiceCallUi();
+      scheduleVoiceListenResume();
+      return;
+    }
+    state.voice.lastUserActivityAt = Date.now();
+    clearApprovalVoiceReminder();
+    const spokenReply = String(res?.spokenReply || "").trim();
+    const utteranceId = String(res?.utteranceId || "").trim() || nextVoiceUtteranceId("turn");
+    const actionTag = res?.executed?.summaryTag || "";
+    const normTurnTts = normalizeVoiceTtsPayload(res);
+
+    if (spokenReply && state.voice.callActive) {
+      state.voice.isSpeaking = true;
+    }
+    state.voice.isProcessing = false;
+
+    if (Array.isArray(res?.replayedUnheardIds) && res.replayedUnheardIds.length) {
+      for (const oldId of res.replayedUnheardIds) {
+        state.voice.unheardQueue = state.voice.unheardQueue.filter((item) => item.id !== oldId);
+      }
+    }
+
+    appendVoiceTranscriptEntry({
+      id: utteranceId,
+      heardText: res?.heardText || transcriptText || "",
+      spokenReply,
+      actionTag,
+      deliveryStatus: spokenReply ? (state.voice.callActive ? "queued" : "unheard") : "",
+      ttsCache: normTurnTts.hasAudio ? normTurnTts : null,
+    });
+    if (res?.dispatchPending && res?.batchId) {
+      trackVoicePendingDispatchBatch({
+        batchId: res.batchId,
+        utteranceId,
+        action: res?.executed?.action || res?.plan?.action || "",
+        focusThreadId: res?.executed?.focusThreadId || "",
+        projectCwd: res?.executed?.focusProjectCwd || "",
+      });
+    }
+    if (res?.executed) {
+      void applyVoiceExecutionEffect(res.executed);
+    }
+    renderVoiceCallUi();
+
+    if (spokenReply && state.voice.callActive) {
+      let ttsPayload = normTurnTts.hasAudio ? normTurnTts : null;
+      if (!ttsPayload) {
+        ttsPayload = await fetchVoiceTtsAudio({ text: spokenReply, utteranceId, register: false });
+        if (ttsPayload) updateVoiceTranscriptEntry(utteranceId, { ttsCache: ttsPayload });
+      }
+      if (state.voice.callActive && state.voice.isSpeaking) {
+        await playVoiceTtsResult({
+          utteranceId,
+          spokenReply,
+          tts: ttsPayload,
+          actionTag,
+          priority: res?.executed?.action === "request_pending" ? "critical" : "normal",
+        });
+        if (state.voice.callActive && !state.voice.isRecording && !state.voice.isProcessing && state.voice.broadcastQueue.length > 0) {
+          void drainVoiceBroadcastQueue();
+        }
+      } else if (state.voice.callActive) {
+        state.voice.isSpeaking = false;
+        markUtteranceUnheard({
+          id: utteranceId,
+          text: spokenReply,
+          actionTag,
+          reason: "user_barge_in",
+          status: "interrupted",
+          expectedMs: res?.expectedMs || estimateVoiceDurationMs(spokenReply),
+          ttsCache: ttsPayload,
+        });
+        void reportVoicePlaybackAck({
+          utteranceId,
+          status: "interrupted",
+          heard: false,
+          playedMs: 0,
+          expectedMs: res?.expectedMs || estimateVoiceDurationMs(spokenReply),
+          reason: "user_barge_in",
+          provider: ttsPayload?.provider || "none",
+          text: spokenReply,
+        });
+        scheduleVoiceListenResume();
+      }
+    } else {
+      state.voice.isSpeaking = false;
+      scheduleVoiceListenResume();
+    }
+  } catch (error) {
+    clearVoiceProcessingStageTimer();
+    state.voice.isProcessing = false;
+    const is404 = Number(error?.status) === 404;
+    if (is404) {
+      state.voice.backendMissing = true;
+      $("voiceStateText").textContent = "本机守护进程尚未加载新通话接口，请重启服务后重试";
+      $("voiceSubHintText").textContent = "更新后端服务后即可用多模态 Hydrogen 直接听音协调";
+    } else {
+      const msg = formatActionError(error, "语音协调失败");
+      appendVoiceTranscriptEntry({ id: nextVoiceUtteranceId("err"), heardText: transcriptText || "", spokenReply: msg, actionTag: "出错", deliveryStatus: "unheard", deliveryReason: "playback_failed" });
+      $("voiceStateText").textContent = `连接异常：${msg}`;
+    }
+    renderVoiceCallUi();
+    scheduleVoiceListenResume();
+  }
+}
+
+function triggerVoiceOrbAction() {
+  ensureVoiceAudioUnlocked();
+  if (!state.voice.callActive || state.voice.isProcessing) return;
+  state.voice.lastUserActivityAt = Date.now();
+  clearApprovalVoiceReminder();
+  if (state.voice.isSpeaking) {
+    stopVoicePlayback({ scheduleResume: false, abortReason: "user_barge_in" });
+    state.voice.vadDetector?.reset?.();
+    renderVoiceCallUi();
+    return;
+  }
+  if (state.voice.isMuted) {
+    state.voice.isMuted = false;
+    if (!state.voice.micStream) {
+      void startVoiceCallMicPipeline();
+    } else {
+      state.voice.vadDetector?.reset?.();
+      renderVoiceCallUi();
+    }
+    return;
+  }
+  const flushed = state.voice.vadDetector?.flush?.();
+  state.voice.isRecording = false;
+  if (flushed?.type === "utterance" && flushed.samples?.length) {
+    const wavBytes = encodePcm16SamplesToWav(flushed.samples, 16000);
+    void sendVoiceTurnToMac({ wavUint8Array: wavBytes });
+  } else {
+    void sendVoiceTurnToMac({ mode: "briefing", transcriptText: "播报最新任务进度" });
+  }
+}
+
+function minimizeVoiceModal() {
+  const modal = $("voiceCopilotModal");
+  if (!state.voice.callActive) {
+    if (modal?.open) modal.close();
+    return;
+  }
+  state.voice.minimized = true;
+  if (modal?.open) modal.close();
+  renderVoiceCallUi();
+  showToastBanner("语音通话在后台继续", { detail: "点击顶部语音按钮可随时回到通话界面" });
+}
+
+function renderComposerDictationUi() {
+  const btn = $("composerVoiceBtn");
+  const iconEl = $("composerVoiceIcon");
+  const labelEl = $("composerVoiceLabel");
+  if (!btn) return;
+  const { active, transcribing } = state.dictation;
+  btn.classList.toggle("is-recording", active);
+  btn.classList.toggle("is-transcribing", transcribing);
+  btn.setAttribute("aria-pressed", active ? "true" : "false");
+  btn.disabled = transcribing;
+  if (iconEl) {
+    iconEl.innerHTML = active
+      ? iconSvg("stop", { size: 13 })
+      : transcribing
+        ? iconSvg("clock", { size: 13 })
+        : iconSvg("mic", { size: 14 });
+  }
+  if (labelEl) {
+    labelEl.textContent = active ? "停止" : transcribing ? "识别中" : "语音";
+  }
+}
+
+function teardownComposerDictationAudio() {
+  if (state.dictation.maxTimer) {
+    clearTimeout(state.dictation.maxTimer);
+    state.dictation.maxTimer = null;
+  }
+  try { state.dictation.processor?.disconnect?.(); } catch {}
+  try { state.dictation.source?.disconnect?.(); } catch {}
+  if (state.dictation.micStream) {
+    for (const track of state.dictation.micStream.getTracks()) {
+      try { track.stop(); } catch {}
+    }
+  }
+  if (state.dictation.audioCtx) {
+    try { void state.dictation.audioCtx.close?.(); } catch {}
+  }
+  state.dictation.processor = null;
+  state.dictation.source = null;
+  state.dictation.micStream = null;
+  state.dictation.audioCtx = null;
+}
+
+async function stopComposerDictation({ submit = true } = {}) {
+  if (!state.dictation.active) return;
+  state.dictation.active = false;
+  const chunks = state.dictation.chunks;
+  state.dictation.chunks = [];
+  teardownComposerDictationAudio();
+
+  const totalLen = chunks.reduce((sum, c) => sum + c.length, 0);
+  if (!submit || totalLen < 1600) {
+    renderComposerDictationUi();
+    if (submit && totalLen > 0) {
+      setComposerStatus("error", "录音时间太短，请再说一次", { autoClearMs: 2200 });
+    }
+    return;
+  }
+
+  const merged = new Int16Array(totalLen);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.length;
+  }
+
+  state.dictation.transcribing = true;
+  renderComposerDictationUi();
+  setComposerStatus("pending", "正在本地语音识别…");
+
+  try {
+    const wavBytes = encodePcm16SamplesToWav(merged, 16000);
+    const res = await apiPostWithHotFallback("api/voice/transcribe", {
+      audioBase64: uint8ArrayToBase64(wavBytes),
+      audioMimeType: "audio/wav",
+    });
+    const text = String(res?.text || "").trim();
+    if (text) {
+      const input = $("promptInput");
+      if (input) {
+        const cur = input.value;
+        input.value = cur && !/\s$/.test(cur) ? `${cur} ${text}` : `${cur}${text}`;
+        autoResizePromptInput();
+        renderComposerControls();
+        input.focus();
+      }
+      clearComposerStatus();
+    } else {
+      setComposerStatus("error", "未识别到清晰语音，请重试", { autoClearMs: 2400 });
+    }
+  } catch (error) {
+    setComposerStatus("error", `语音转文字失败：${formatActionError(error)}`, { autoClearMs: 3600 });
+  } finally {
+    state.dictation.transcribing = false;
+    renderComposerDictationUi();
+  }
+}
+
+async function toggleComposerDictation() {
+  if (state.dictation.transcribing) return;
+  if (state.dictation.active) {
+    await stopComposerDictation({ submit: true });
+    return;
+  }
+  if (!navigator.mediaDevices?.getUserMedia) {
+    setComposerStatus("error", "当前浏览器不支持网页麦克风录音", { autoClearMs: 3000 });
+    return;
+  }
+  try {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) throw new Error("不支持 AudioContext");
+    const ctx = new AudioCtx();
+    if (ctx.state === "suspended") await ctx.resume().catch(() => {});
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+        channelCount: 1,
+      },
+    });
+    const source = ctx.createMediaStreamSource(stream);
+    const processor = ctx.createScriptProcessor(2048, 1, 1);
+    const silentGain = ctx.createGain();
+    silentGain.gain.value = 0;
+
+    state.dictation.chunks = [];
+    processor.onaudioprocess = (ev) => {
+      if (!state.dictation.active) return;
+      const input = ev.inputBuffer?.getChannelData?.(0);
+      if (!input?.length) return;
+      state.dictation.chunks.push(downsampleFloat32ToInt16(input, ctx.sampleRate || 48000, 16000));
+    };
+
+    source.connect(processor);
+    processor.connect(silentGain);
+    silentGain.connect(ctx.destination);
+
+    state.dictation.audioCtx = ctx;
+    state.dictation.micStream = stream;
+    state.dictation.source = source;
+    state.dictation.processor = processor;
+    state.dictation.active = true;
+    state.dictation.maxTimer = setTimeout(() => {
+      void stopComposerDictation({ submit: true });
+    }, 30000);
+    renderComposerDictationUi();
+    setComposerStatus("pending", "正在录音… 再次点击麦克风结束并识别");
+  } catch (error) {
+    teardownComposerDictationAudio();
+    state.dictation.active = false;
+    renderComposerDictationUi();
+    setComposerStatus("error", `麦克风启动失败：${error?.message || "请检查权限"}`, { autoClearMs: 3200 });
+  }
+}
+
+async function openVoiceModal() {
+  setTopbarMenuOpen(false);
+  setComposerConfigOpen(false);
+  ensureVoiceAudioUnlocked();
+
+  if (state.voice.callActive) {
+    state.voice.minimized = false;
+    renderVoiceTranscript();
+    renderVoiceLiveProgress();
+    renderVoiceCallUi();
+    const modal = $("voiceCopilotModal");
+    if (modal && !modal.open) modal.showModal();
+    if (state.voice.unheardQueue.some((u) => u.reason === "autoplay_blocked" || u.reason === "muted_output" || u.reason === "fake_short_end")) {
+      void replayUnheardVoiceItems({ onlyBlocked: true });
+    }
+    return;
+  }
+
+  state.voice.callId = `call-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+  state.voice.callActive = true;
+  state.voice.minimized = false;
+  state.voice.callStartedAt = Date.now();
+  state.voice.lastUserActivityAt = Date.now();
+  state.voice.backendMissing = false;
+  state.voice.isProcessing = false;
+  state.voice.isSpeaking = false;
+  state.voice.isRecording = false;
+  state.voice.broadcastQueue = [];
+  state.voice.unheardQueue = [];
+  state.voice.remindedRequestIds.clear();
+  clearApprovalVoiceReminder();
+
+  if (state.voice.callTimerId) clearInterval(state.voice.callTimerId);
+  state.voice.callTimerId = setInterval(updateVoiceCallTimerLabel, 1000);
+  updateVoiceCallTimerLabel();
+
+  renderVoiceTranscript();
+  renderVoiceLiveProgress();
+  renderVoiceCallUi();
+
+  const modal = $("voiceCopilotModal");
+  if (modal && !modal.open) modal.showModal();
+
+  void requestVoiceWakeLock();
+  startVoiceLevelAnimation();
+
+  const warmPromise = apiPostWithHotFallback("api/voice/call/start", { callId: state.voice.callId })
+    .then((res) => {
+      if (res?.dispatchModel || res?.model) {
+        state.voice.modelName = res?.dispatchModel || res.model;
+      }
+      state.voice.backendMissing = false;
+      renderVoiceCallUi();
+    })
+    .catch((err) => {
+      if (Number(err?.status) === 404 || Number(err?.status) === 502) {
+        state.voice.backendMissing = true;
+        $("voiceStateText").textContent = "本机语音热扩展尚未连上（/api/voice/call）";
+        $("voiceSubHintText").textContent = "下方仍可实时查看任务动态，启动热扩展或重载守护进程后即可对话 Hydrogen";
+        renderVoiceCallUi();
+      }
+    });
+
+  await Promise.allSettled([warmPromise, startVoiceCallMicPipeline()]);
+}
+
+function hangupVoiceCall({ closeModal = true } = {}) {
+  const oldCallId = state.voice.callId;
+  state.voice.callActive = false;
+  state.voice.minimized = false;
+  state.voice.callId = "";
+  state.voice.broadcastQueue = [];
+  state.voice.unheardQueue = [];
+  state.voice.remindedRequestIds.clear();
+  clearApprovalVoiceReminder();
+  clearVoiceBatchAndHeartbeatTimers();
+  if (state.voice.callTimerId) {
+    clearInterval(state.voice.callTimerId);
+    state.voice.callTimerId = null;
+  }
+  stopVoiceLevelAnimation();
+  stopVoiceCallMicPipeline();
+  stopVoicePlayback({ scheduleResume: false, abortReason: "hangup" });
+  void releaseVoiceWakeLock();
+  if (oldCallId && !state.voice.backendMissing) {
+    void apiPostWithHotFallback("api/voice/call/end", { callId: oldCallId }).catch(() => {});
+  }
+  renderVoiceCallUi();
+  if (closeModal && $("voiceCopilotModal")?.open) {
+    $("voiceCopilotModal").close();
+  }
+}
+
+function bindEvents() {
+  $("menuBtn").addEventListener("click", () => setSidebarOpen(true));
+  $("sidebarBackdrop").addEventListener("click", () => setSidebarOpen(false));
+
+  $("providerTabs").addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-provider]");
+    if (!btn) return;
+    state.providerFilter = btn.dataset.provider;
+    for (const tab of $("providerTabs").querySelectorAll(".provider-tab")) {
+      tab.classList.toggle("is-active", tab === btn);
+    }
+    syncProfileSelectors();
+    renderThreadList();
+  });
+
+  $("agentQuotaStrip")?.addEventListener("click", (e) => {
+    if (e.target.closest("[data-quota-refresh]")) {
+      e.stopPropagation();
+      void refreshQuotasManual();
+      return;
+    }
+    if (e.target.closest("[data-quota-toggle]") || e.target.closest("[data-quota-filter-provider]")) {
+      state.quotaExpanded = !state.quotaExpanded;
+      renderQuotaStrip();
+    }
+  });
+
+  $("telemetryTopbarBtn")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const nextOpen = !(state.telemetryExpanded || state.mobileTelemetryOpen);
+    state.mobileTelemetryOpen = nextOpen;
+    state.telemetryExpanded = nextOpen;
+    if (!nextOpen) {
+      state.telemetryPickerOpen = false;
+    }
+    renderAgentTelemetryBar();
+  });
+
+  const handleTelemetryBarClick = (e) => {
+    if (e.target.closest("[data-telemetry-mobile-close]")) {
+      e.stopPropagation();
+      state.mobileTelemetryOpen = false;
+      state.telemetryExpanded = false;
+      state.telemetryPickerOpen = false;
+      renderAgentTelemetryBar();
+      return;
+    }
+    if (e.target.closest("[data-telemetry-picker-toggle]")) {
+      e.stopPropagation();
+      state.telemetryPickerOpen = !state.telemetryPickerOpen;
+      renderAgentTelemetryBar();
+      return;
+    }
+    const pickKeyBtn = e.target.closest("[data-telemetry-pick-key]");
+    if (pickKeyBtn) {
+      e.stopPropagation();
+      const targetKey = String(pickKeyBtn.dataset.telemetryPickKey || "").trim();
+      if (targetKey) {
+        const items = buildSelectableTelemetryItems(state.profiles);
+        const currentSet = new Set(resolveVisibleTelemetryKeys(items, state.telemetryVisiblePrefs));
+        if (currentSet.has(targetKey)) currentSet.delete(targetKey);
+        else currentSet.add(targetKey);
+        const prefs = {
+          selectedKeys: items.filter((item) => currentSet.has(item.key)).map((item) => item.key),
+          knownKeys: items.map((item) => item.key),
+        };
+        state.telemetryVisiblePrefs = prefs;
+        saveTelemetryVisiblePrefs(prefs);
+        renderAgentTelemetryBar();
+      }
+      return;
+    }
+    const pickActionBtn = e.target.closest("[data-telemetry-pick-action]");
+    if (pickActionBtn) {
+      e.stopPropagation();
+      const action = String(pickActionBtn.dataset.telemetryPickAction || "").trim();
+      const items = buildSelectableTelemetryItems(state.profiles);
+      if (action === "all") {
+        const prefs = {
+          selectedKeys: items.map((item) => item.key),
+          knownKeys: items.map((item) => item.key),
+        };
+        state.telemetryVisiblePrefs = prefs;
+        saveTelemetryVisiblePrefs(prefs);
+      } else if (action === "default") {
+        state.telemetryVisiblePrefs = null;
+        saveTelemetryVisiblePrefs(null);
+      }
+      renderAgentTelemetryBar();
+      return;
+    }
+    if (e.target.closest("[data-telemetry-refresh]")) {
+      e.stopPropagation();
+      void Promise.allSettled([refreshTelemetry(), refreshQuotasManual()]);
+      return;
+    }
+    const jumpBtn = e.target.closest("[data-telemetry-jump-thread]");
+    if (jumpBtn) {
+      e.stopPropagation();
+      const tid = jumpBtn.dataset.telemetryJumpThread;
+      if (tid) {
+        state.telemetryExpanded = false;
+        state.telemetryPickerOpen = false;
+        state.mobileTelemetryOpen = false;
+        renderAgentTelemetryBar();
+        void selectThread(tid).catch((error) => {
+          showToastBanner("切换会话失败", { detail: formatActionError(error), error: true });
+        });
+      }
+      return;
+    }
+    const filterBtn = e.target.closest("[data-telemetry-filter-provider]");
+    if (filterBtn) {
+      e.stopPropagation();
+      const nextProv = filterBtn.dataset.telemetryFilterProvider || "all";
+      state.providerFilter = state.providerFilter === nextProv ? "all" : nextProv;
+      for (const tab of $("providerTabs")?.querySelectorAll(".provider-tab") || []) {
+        tab.classList.toggle("is-active", tab.dataset.provider === state.providerFilter);
+      }
+      syncProfileSelectors();
+      renderThreadList();
+      return;
+    }
+    if (e.target.closest("[data-telemetry-toggle]")) {
+      e.stopPropagation();
+      state.telemetryExpanded = !state.telemetryExpanded;
+      if (!state.telemetryExpanded) {
+        state.telemetryPickerOpen = false;
+        state.mobileTelemetryOpen = false;
+      } else if (typeof window !== "undefined" && window.innerWidth <= 960) {
+        state.mobileTelemetryOpen = true;
+      }
+      renderAgentTelemetryBar();
+    }
+  };
+  $("topbarTelemetrySlot")?.addEventListener("click", handleTelemetryBarClick);
+  $("agentTelemetryBar")?.addEventListener("click", handleTelemetryBarClick);
+
+  $("sidebarBatchSelectBtn")?.addEventListener("click", () => {
+    if (state.batchSelect.active) exitBatchSelectMode();
+    else enterBatchSelectMode();
+  });
+
+  const handleBatchBarClick = (e) => {
+    const btn = e.target.closest("[data-batch-action]");
+    if (btn) handleBatchActionClick(btn.dataset.batchAction);
+  };
+  $("sidebarBatchBar")?.addEventListener("click", handleBatchBarClick);
+  $("boardBatchBar")?.addEventListener("click", handleBatchBarClick);
+
+  $("boardToggleBtn").addEventListener("click", () => {
+    if (state.boardOpen && state.activeThread) {
+      state.boardOpen = false;
+      renderTopbarAndControls();
+      renderActiveMessages();
+      renderPendingRequests();
+      renderQueuedTurns();
+    } else {
+      openProjectBoardView();
+    }
+  });
+
+  $("voiceModeBtn").addEventListener("click", () => void openVoiceModal());
+
+  $("activeProfileBadge")?.addEventListener("click", () => {
+    const provider = state.activeThread?.provider || defaultProviderValue();
+    openNewThreadModal({
+      cwd: state.activeThread?.cwd || "",
+      provider,
+    });
+  });
+
+  $("activeProjectCrumb")?.addEventListener("click", () => openProjectBoardView());
+  $("activeGoalBadge")?.addEventListener("click", () => $("goalToggleBtn")?.click());
+
+  $("topbarMoreBtn")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    setTopbarMenuOpen(!state.topbarMenuOpen);
+  });
+
+  $("topbarMoreMenu")?.addEventListener("click", (e) => {
+    const hit = e.target.closest("button, a");
+    if (hit && !hit.disabled) {
+      setTopbarMenuOpen(false);
+    }
+  });
+
+  $("topbarPinProjectBtn")?.addEventListener("click", () => {
+    if (state.activeThread?.cwd) {
+      void toggleProjectPin(state.activeThread.cwd);
+    }
+  });
+
+  $("topbarNewInProjectBtn")?.addEventListener("click", () => {
+    openNewThreadModal({
+      cwd: state.activeThread?.cwd || "",
+      provider: defaultProviderValue(),
+    });
+  });
+
+  $("composerConfigBtn")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    setComposerConfigOpen(!state.composerConfigOpen);
+  });
+
+  $("composerConfigCloseBtn")?.addEventListener("click", () => setComposerConfigOpen(false));
+
+  document.addEventListener("click", (e) => {
+    if (state.topbarMenuOpen && !e.target.closest(".topbar-more-wrap")) {
+      setTopbarMenuOpen(false);
+    }
+    if (state.composerConfigOpen && !e.target.closest("#composerConfigPopover") && !e.target.closest("#composerConfigBtn")) {
+      setComposerConfigOpen(false);
+    }
+    if (
+      state.mobileTelemetryOpen
+      && !e.target.closest("#agentTelemetryBar")
+      && !e.target.closest("#topbarTelemetrySlot")
+      && !e.target.closest("#telemetryTopbarBtn")
+    ) {
+      state.mobileTelemetryOpen = false;
+      state.telemetryExpanded = false;
+      state.telemetryPickerOpen = false;
+      renderAgentTelemetryBar();
+    } else if (state.telemetryPickerOpen && !e.target.closest(".telemetry-picker-panel") && !e.target.closest("[data-telemetry-picker-toggle]")) {
+      state.telemetryPickerOpen = false;
+      renderAgentTelemetryBar();
+    }
+  });
+
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      if (state.batchSelect.active) exitBatchSelectMode();
+      if (state.topbarMenuOpen) setTopbarMenuOpen(false);
+      if (state.composerConfigOpen) setComposerConfigOpen(false);
+      if (state.telemetryPickerOpen || state.mobileTelemetryOpen || state.telemetryExpanded) {
+        state.telemetryPickerOpen = false;
+        state.mobileTelemetryOpen = false;
+        state.telemetryExpanded = false;
+        renderAgentTelemetryBar();
+      }
+    }
+  });
+
+  $("projectTaskStrip").addEventListener("click", (e) => {
+    if (e.target.closest("[data-strip-board]")) {
+      openProjectBoardView();
+      return;
+    }
+    const pinBtn = e.target.closest("[data-toggle-pin-cwd]");
+    if (pinBtn) {
+      void toggleProjectPin(pinBtn.dataset.togglePinCwd);
+      return;
+    }
+    const newBtn = e.target.closest("[data-new-in-cwd]");
+    if (newBtn) {
+      openNewThreadModal({ cwd: newBtn.dataset.newInCwd, provider: defaultProviderValue() });
+      return;
+    }
+    const pill = e.target.closest("[data-strip-thread-id]");
+    if (pill) {
+      void selectThread(pill.dataset.stripThreadId).catch((error) => {
+        showToastBanner("切换任务失败", { detail: formatActionError(error), error: true });
+      });
+    }
+  });
+
+  $("projectBoard").addEventListener("input", (e) => {
+    if (e.target.id === "boardSearchInput") {
+      state.searchText = e.target.value;
+      renderProjectBoard();
+    }
+  });
+
+  $("projectBoard").addEventListener("click", (e) => {
+    const actionBtn = e.target.closest("[data-board-action]");
+    if (actionBtn) {
+      const act = actionBtn.dataset.boardAction;
+      if (act === "toggle-batch-select") {
+        if (state.batchSelect.active) exitBatchSelectMode();
+        else enterBatchSelectMode();
+      } else if (act === "voice") void openVoiceModal();
+      else if (act === "new") openNewThreadModal({ provider: defaultProviderValue() });
+      else if (act === "resume" && state.activeThread) {
+        state.boardOpen = false;
+        renderTopbarAndControls();
+        renderActiveMessages();
+        renderPendingRequests();
+        renderQueuedTurns();
+      } else if (act === "clear-search") {
+        state.searchText = "";
+        renderProjectBoard();
+      } else if (act === "toggle-all-projects") {
+        state.showAllProjects = !state.showAllProjects;
+        renderProjectBoard();
+      }
+      return;
+    }
+
+    const expandBtn = e.target.closest("[data-expand-project-cwd]");
+    if (expandBtn) {
+      state.expandedProjects.add(expandBtn.dataset.expandProjectCwd);
+      renderProjectBoard();
+      return;
+    }
+
+    const collapseBtn = e.target.closest("[data-collapse-project-cwd]");
+    if (collapseBtn) {
+      state.expandedProjects.delete(collapseBtn.dataset.collapseProjectCwd);
+      renderProjectBoard();
+      return;
+    }
+
+    if (state.batchSelect.active) {
+      const batchProjHead = e.target.closest("[data-batch-project-cwd]");
+      if (batchProjHead && batchProjHead.dataset.batchProjectCwd) {
+        toggleBatchProjectSelection(batchProjHead.dataset.batchProjectCwd);
+        return;
+      }
+      const openBtn = e.target.closest("[data-board-open-thread]");
+      if (openBtn && openBtn.dataset.boardOpenThread) {
+        toggleBatchThreadSelection(openBtn.dataset.boardOpenThread, { shiftKey: e.shiftKey });
+        return;
+      }
+    }
+
+    const pinBtn = e.target.closest("[data-toggle-pin-cwd]");
+    if (pinBtn) {
+      void toggleProjectPin(pinBtn.dataset.togglePinCwd);
+      return;
+    }
+
+    const aliasBtn = e.target.closest("[data-alias-cwd]");
+    if (aliasBtn) {
+      void promptProjectAlias(aliasBtn.dataset.aliasCwd);
+      return;
+    }
+
+    const newBtn = e.target.closest("[data-new-in-cwd]");
+    if (newBtn) {
+      openNewThreadModal({ cwd: newBtn.dataset.newInCwd, provider: defaultProviderValue() });
+      return;
+    }
+
+    const openBtn = e.target.closest("[data-board-open-thread]");
+    if (openBtn && openBtn.dataset.boardOpenThread) {
+      void selectThread(openBtn.dataset.boardOpenThread).catch((error) => {
+        showToastBanner("打开会话失败", { detail: formatActionError(error), error: true });
+      });
+    }
+  });
+
+  $("threadList").addEventListener("click", (e) => {
+    const foldBtn = e.target.closest("[data-batch-fold-cwd]");
+    if (foldBtn) {
+      e.stopPropagation();
+      toggleSidebarGroupCollapse(foldBtn.dataset.batchFoldCwd);
+      return;
+    }
+    const newBtn = e.target.closest("[data-new-in-cwd]");
+    if (newBtn) {
+      e.stopPropagation();
+      openNewThreadModal({ cwd: newBtn.dataset.newInCwd, provider: defaultProviderValue() });
+      return;
+    }
+    const staleBtn = e.target.closest("[data-sidebar-stale-projects]");
+    if (staleBtn) {
+      e.stopPropagation();
+      const mode = staleBtn.dataset.sidebarStaleProjects;
+      if (mode === "expand") {
+        state.showStaleProjects = true;
+        state.staleProjectsOpenedAt = Date.now();
+      } else {
+        state.showStaleProjects = false;
+        state.staleProjectsOpenedAt = 0;
+      }
+      saveSidebarFoldState();
+      renderThreadList();
+      return;
+    }
+    const expandBtn = e.target.closest("[data-sidebar-expand-cwd]");
+    if (expandBtn) {
+      e.stopPropagation();
+      const cwd = normalizeProjectCwd(expandBtn.dataset.sidebarExpandCwd) || "默认工作区";
+      state.expandedSidebarGroups.add(cwd);
+      state.expandedThreadsAt[cwd] = Date.now();
+      setSidebarGroupManualPref(cwd, "expand");
+      renderThreadList();
+      return;
+    }
+    const collapseBtn = e.target.closest("[data-sidebar-collapse-cwd]");
+    if (collapseBtn) {
+      e.stopPropagation();
+      const cwd = normalizeProjectCwd(collapseBtn.dataset.sidebarCollapseCwd) || "默认工作区";
+      state.expandedSidebarGroups.delete(cwd);
+      delete state.expandedThreadsAt[cwd];
+      setSidebarGroupManualPref(cwd, "expand");
+      renderThreadList();
+      return;
+    }
+    const toggle = e.target.closest("[data-toggle-cwd]");
+    if (toggle) {
+      const cwd = toggle.dataset.toggleCwd;
+      if (state.batchSelect.active) {
+        toggleBatchProjectSelection(cwd);
+      } else {
+        toggleSidebarGroupCollapse(cwd);
+      }
+      return;
+    }
+    const item = e.target.closest("[data-thread-id]");
+    if (item) {
+      if (state.batchSelect.active) {
+        toggleBatchThreadSelection(item.dataset.threadId, { shiftKey: e.shiftKey });
+        return;
+      }
+      void selectThread(item.dataset.threadId).catch((error) => {
+        const errMsg = formatActionError(error, "加载会话失败");
+        setComposerStatus("error", `加载会话失败：${errMsg}`);
+        showToastBanner("加载会话失败", { detail: errMsg, error: true });
+      });
+    }
+  });
+
+  bindLongPressMultiSelect($("threadList"), (el) => {
+    const item = el.closest("[data-thread-id]");
+    if (item?.dataset?.threadId) return { threadId: item.dataset.threadId };
+    const head = el.closest("[data-toggle-cwd]");
+    if (head?.dataset?.toggleCwd) return { projectCwd: head.dataset.toggleCwd };
+    return null;
+  });
+
+  bindLongPressMultiSelect($("projectBoard"), (el) => {
+    const task = el.closest("[data-board-open-thread]");
+    if (task?.dataset?.boardOpenThread) return { threadId: task.dataset.boardOpenThread };
+    const head = el.closest(".board-card-head");
+    const card = head?.closest("[data-project-cwd]");
+    if (card?.dataset?.projectCwd) return { projectCwd: card.dataset.projectCwd };
+    return null;
+  });
+
+  $("composerProviderSelect").addEventListener("change", () => {
+    state.userPickedDraftModel = false;
+    syncComposerProfileSelect();
+    syncModelAndEffortSelectors();
+    renderAgentTelemetryBar();
+  });
+
+  $("composerProfileSelect").addEventListener("change", () => {
+    state.userPickedDraftModel = false;
+    syncComposerProfileSelect();
+    renderComposerConfigChip();
+    renderAgentTelemetryBar();
+    void refreshModelsForProfile(currentComposerProvider(), currentComposerProfileId());
+  });
+
+  $("composerProbeProfilesBtn")?.addEventListener("click", () => {
+    void triggerProfileProbe({ provider: currentComposerProvider() });
+  });
+
+  $("newModalProbeProfilesBtn")?.addEventListener("click", () => {
+    void triggerProfileProbe({ provider: $("newProviderSelect").value || defaultProviderValue() });
+  });
+
+  const handleProfilePillClick = (e, { isNewModal = false } = {}) => {
+    const probeBtn = e.target.closest("[data-probe-profile]");
+    if (probeBtn) {
+      e.stopPropagation();
+      void triggerProfileProbe({
+        provider: probeBtn.dataset.probeProvider,
+        profileId: probeBtn.dataset.probeProfile,
+      });
+      return;
+    }
+    const disableBtn = e.target.closest("[data-toggle-disable-profile]");
+    if (disableBtn) {
+      e.stopPropagation();
+      void toggleProfileDisabled({
+        provider: disableBtn.dataset.profileProvider,
+        profileId: disableBtn.dataset.toggleDisableProfile,
+        disabled: disableBtn.dataset.nextDisabled === "1",
+      });
+      return;
+    }
+    const relayBtn = e.target.closest("[data-relay-profile]");
+    if (!isNewModal && relayBtn && state.activeThread) {
+      const targetProfile = state.profiles.find(
+        (p) => p.provider === relayBtn.dataset.profileProvider && p.id === relayBtn.dataset.relayProfile,
+      );
+      if (targetProfile) {
+        void relayThreadWithProfile(targetProfile, {
+          cwd: state.activeThread.cwd || "",
+          text: $("promptInput")?.value || "",
+          images: [...state.images],
+        });
+      }
+      return;
+    }
+    const selectBtn = e.target.closest("[data-select-profile]");
+    if (selectBtn) {
+      const nextId = selectBtn.dataset.selectProfile;
+      const targetSelect = isNewModal ? $("newProfileSelect") : $("composerProfileSelect");
+      if (targetSelect && !targetSelect.disabled) {
+        targetSelect.value = nextId;
+        if (isNewModal) {
+          syncNewProfileSelect();
+          void refreshModelsForProfile($("newProviderSelect").value || defaultProviderValue(), nextId);
+        } else {
+          syncComposerProfileSelect();
+          void refreshModelsForProfile(currentComposerProvider(), nextId);
+        }
+      }
+    }
+  };
+
+  $("composerProfilePills")?.addEventListener("click", (e) => handleProfilePillClick(e, { isNewModal: false }));
+  $("newProfilePills")?.addEventListener("click", (e) => handleProfilePillClick(e, { isNewModal: true }));
+  $("newProfileSelect")?.addEventListener("change", () => {
+    syncNewProfileSelect();
+    void refreshModelsForProfile($("newProviderSelect").value || defaultProviderValue(), $("newProfileSelect").value);
+  });
+
+  $("modelSelect").addEventListener("change", () => {
+    const provider = currentComposerProvider();
+    const nextModel = $("modelSelect").value;
+    const models = ensurePreferredModelInList(
+      resolveModelsForProvider(state.modelsByProvider, state.allModels, provider),
+      provider,
+      nextModel,
+    );
+    const selected = models.find((m) => (m.id || m.model) === nextModel) || null;
+    syncEffortSelectForModel(selected);
+    const nextEffort = $("effortSelect").hidden ? "" : ($("effortSelect").value || "");
+    if (state.activeThreadId) {
+      saveLocalThreadPrefs(state.activeThreadId, { model: nextModel, modelExplicit: true, effort: nextEffort });
+      if (state.activeThread) {
+        state.activeThread.model = nextModel;
+        if (nextEffort) state.activeThread.reasoningEffort = nextEffort;
+      }
+      void apiPost("api/thread/prefs", {
+        threadId: state.activeThreadId,
+        model: nextModel,
+        effort: nextEffort,
+      }).catch(() => null);
+    } else {
+      state.userPickedDraftModel = true;
+    }
+    const label = selected?.displayName || nextModel || "默认模型";
+    setComposerStatus("success", `已选择模型：${label}`, { autoClearMs: 2200 });
+  });
+
+  $("effortSelect").addEventListener("change", () => {
+    const nextEffort = $("effortSelect").hidden ? "" : ($("effortSelect").value || "");
+    if (state.activeThreadId) {
+      saveLocalThreadPrefs(state.activeThreadId, { effort: nextEffort });
+      if (state.activeThread) state.activeThread.reasoningEffort = nextEffort;
+      void apiPost("api/thread/prefs", {
+        threadId: state.activeThreadId,
+        effort: nextEffort,
+      }).catch(() => null);
+    }
+    renderComposerConfigChip();
+  });
+
+  $("permissionSelect").addEventListener("change", async () => {
+    const nextPerm = normalizeUiPermissionMode($("permissionSelect").value, "turbo");
+    state.defaultPermissionMode = saveDefaultPermissionMode(nextPerm);
+    $("permissionSelect").classList.toggle("is-turbo", nextPerm === "turbo");
+    renderComposerConfigChip();
+    let approvedCount = 0;
+    if (state.activeThreadId) {
+      saveLocalThreadPrefs(state.activeThreadId, { permissionMode: nextPerm });
+      if (state.activeThread) state.activeThread.permissionMode = nextPerm;
+      const res = await apiPost("api/thread/prefs", {
+        threadId: state.activeThreadId,
+        permissionMode: nextPerm,
+      }).catch(() => null);
+      approvedCount = Number(res?.autoApprovedCount || 0);
+      if (nextPerm === "turbo" && !approvedCount) {
+        approvedCount = await autoApproveTurboRequestsForThread(state.activeThreadId);
+      }
+    }
+    const label = permissionModeDisplayLabel(nextPerm);
+    setComposerStatus(
+      "success",
+      approvedCount > 0 ? `已切换为 ${label}，并自动批准 ${approvedCount} 项待确认请求` : `已切换权限：${label}`,
+      { autoClearMs: 2500 },
+    );
+  });
+
+  $("newProviderSelect").addEventListener("change", () => syncNewProfileSelect());
+
+  $("promptInput").addEventListener("input", () => renderComposerControls());
+  $("promptInput").addEventListener("change", () => renderComposerControls());
+  $("promptInput").addEventListener("compositionend", () => renderComposerControls());
+  $("runningSubmitMode").addEventListener("change", () => renderComposerControls());
+
+  $("promptInput").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
+      e.preventDefault();
+      void handleSend();
+    }
+  });
+
+  $("promptInput").addEventListener("paste", (e) => {
+    const items = [...(e.clipboardData?.items || [])];
+    for (const item of items) {
+      if (item.type.startsWith("image/")) {
+        const file = item.getAsFile();
+        if (file) void addComposerImageFile(file);
+      }
+    }
+  });
+
+  $("imageUploadBtn").addEventListener("click", () => $("imageFileInput").click());
+  $("composerVoiceBtn")?.addEventListener("click", () => void toggleComposerDictation());
+  $("imageFileInput").addEventListener("change", (e) => {
+    const files = [...(e.target.files || [])];
+    e.target.value = "";
+    for (const file of files) void addComposerImageFile(file);
+  });
+
+  $("composerImages").addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-remove-img]");
+    if (!btn) return;
+    state.images.splice(Number(btn.dataset.removeImg), 1);
+    renderComposerImages();
+    renderComposerControls();
+  });
+
+  const composerArea = $("composerArea");
+  const composerBox = composerArea?.querySelector(".composer-box");
+  if (composerArea && composerBox) {
+    let dragDepth = 0;
+    const isFileDrag = (e) => Boolean(e.dataTransfer?.types && [...e.dataTransfer.types].includes("Files"));
+    composerArea.addEventListener("dragenter", (e) => {
+      if (!isFileDrag(e)) return;
+      e.preventDefault();
+      dragDepth += 1;
+      composerBox.classList.add("is-dragover");
+    });
+    composerArea.addEventListener("dragover", (e) => {
+      if (!isFileDrag(e)) return;
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+      composerBox.classList.add("is-dragover");
+    });
+    composerArea.addEventListener("dragleave", (e) => {
+      if (!isFileDrag(e) && dragDepth === 0) return;
+      dragDepth = Math.max(0, dragDepth - 1);
+      if (dragDepth === 0) composerBox.classList.remove("is-dragover");
+    });
+    composerArea.addEventListener("drop", (e) => {
+      dragDepth = 0;
+      composerBox.classList.remove("is-dragover");
+      const files = [...(e.dataTransfer?.files || [])].filter(
+        (file) => String(file?.type || "").startsWith("image/") || /\.(?:png|jpe?g|webp|gif|bmp)$/i.test(String(file?.name || "")),
+      );
+      if (!files.length) return;
+      e.preventDefault();
+      for (const file of files) void addComposerImageFile(file);
+    });
+  }
+
+  $("messagesViewport")?.addEventListener("error", (e) => {
+    const img = e.target;
+    if (!(img instanceof HTMLImageElement) || !img.classList.contains("msg-image")) return;
+    const card = img.closest(".msg-image-card");
+    if (!card) return;
+    card.classList.add("is-broken");
+    const fallback = card.querySelector(".msg-file-chip.is-fallback");
+    if (fallback) fallback.hidden = false;
+  }, true);
+
+  document.addEventListener("click", (e) => {
+    const fileTrigger = e.target.closest("[data-local-file-path]");
+    if (fileTrigger) {
+      const targetThreadId = state.activeThread?.id || state.activeThreadId || "";
+      const filePath = fileTrigger.dataset.localFilePath || "";
+      const lineAnchor = Number(fileTrigger.dataset.localFileLine) || null;
+      if (targetThreadId && filePath) {
+        e.preventDefault();
+        void openFilePreviewModal(targetThreadId, filePath, lineAnchor);
+        return;
+      }
+    }
+    const previewTrigger = e.target.closest("[data-preview-src]");
+    if (previewTrigger && !e.target.closest("[data-remove-img]")) {
+      const src = previewTrigger.dataset.previewSrc || "";
+      const rawSrc = previewTrigger.dataset.previewRaw || "";
+      const caption = previewTrigger.dataset.previewCaption || "";
+      if (src) {
+        openImagePreviewModal(src, caption, rawSrc);
+        return;
+      }
+    }
+    const inlineImg = e.target.closest(".md-inline-img");
+    if (inlineImg) {
+      const src = inlineImg.dataset.previewSrc || inlineImg.getAttribute("src") || "";
+      const rawSrc = inlineImg.dataset.previewRaw || "";
+      const caption = inlineImg.dataset.previewCaption || inlineImg.getAttribute("alt") || "图片预览";
+      if (src) openImagePreviewModal(src, caption, rawSrc);
+    }
+  });
+
+  $("imagePreviewLoadRawBtn")?.addEventListener("click", () => {
+    const info = state.imagePreview;
+    const img = $("imagePreviewImg");
+    const metaEl = $("imagePreviewMeta");
+    const btn = $("imagePreviewLoadRawBtn");
+    if (!info?.rawSrc || !img || !btn) return;
+    btn.disabled = true;
+    btn.textContent = "加载中…";
+    img.onload = () => {
+      if (state.imagePreview) state.imagePreview.showingRaw = true;
+      btn.hidden = true;
+      btn.disabled = false;
+      if (metaEl) metaEl.textContent = "原图";
+    };
+    img.onerror = () => {
+      btn.disabled = false;
+      btn.textContent = "重试原图";
+    };
+    img.src = info.rawSrc;
+  });
+
+  const imgModal = $("imagePreviewModal");
+  if (imgModal) {
+    imgModal.addEventListener("click", (e) => {
+      if (e.target === imgModal) imgModal.close();
+    });
+    imgModal.addEventListener("close", () => {
+      const imgEl = $("imagePreviewImg");
+      if (imgEl) {
+        imgEl.onload = null;
+        imgEl.onerror = null;
+        imgEl.removeAttribute("src");
+      }
+    });
+  }
+
+  $("filePreviewToggleRawBtn")?.addEventListener("click", () => {
+    const fp = state.filePreview;
+    if (!fp?.meta) return;
+    fp.rawMode = !fp.rawMode;
+    const btn = $("filePreviewToggleRawBtn");
+    if (btn) btn.textContent = fp.rawMode ? "渲染" : "源码";
+    renderFilePreviewBody(fp.meta, { threadId: fp.threadId, rawMode: fp.rawMode });
+  });
+
+  $("filePreviewCopyBtn")?.addEventListener("click", async () => {
+    const text = state.filePreview?.meta?.content || "";
+    const btn = $("filePreviewCopyBtn");
+    if (!text || !btn) return;
+    try {
+      await navigator.clipboard?.writeText(text);
+      btn.textContent = "已复制";
+      setTimeout(() => { btn.textContent = "复制"; }, 1400);
+    } catch {}
+  });
+
+  const fileModal = $("filePreviewModal");
+  if (fileModal) {
+    fileModal.addEventListener("click", (e) => {
+      if (e.target === fileModal) fileModal.close();
+    });
+    fileModal.addEventListener("close", () => {
+      const bodyEl = $("filePreviewBody");
+      if (bodyEl) bodyEl.innerHTML = "";
+    });
+  }
+
+  $("composerGoalBtn").addEventListener("click", () => {
+    state.composerGoal = !state.composerGoal;
+    renderComposerControls();
+  });
+
+  $("composerStatus").addEventListener("click", (e) => {
+    if (e.target.closest("[data-failover-trigger]") && state.lastFailoverContext?.altProfile) {
+      const ctx = state.lastFailoverContext;
+      clearComposerStatus();
+      void relayThreadWithProfile(ctx.altProfile, ctx);
+      return;
+    }
+    if (e.target.closest("[data-dismiss-composer-status]")) clearComposerStatus();
+  });
+
+  $("sendBtn").addEventListener("click", () => void handleSend());
+  $("messagesViewport")?.addEventListener("click", async (e) => {
+    const copyBtn = e.target.closest("[data-copy-code]");
+    if (!copyBtn) return;
+    const block = copyBtn.closest(".md-code-block");
+    const codeText = block?.querySelector("pre > code")?.textContent ?? "";
+    if (!codeText) return;
+    let copied = false;
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(codeText);
+        copied = true;
+      }
+    } catch {}
+    if (!copied) {
+      try {
+        const ta = document.createElement("textarea");
+        ta.value = codeText;
+        ta.setAttribute("readonly", "");
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        copied = document.execCommand("copy");
+        document.body.removeChild(ta);
+      } catch {}
+    }
+    if (copied) {
+      copyBtn.textContent = "已复制";
+      copyBtn.classList.add("is-copied");
+      clearTimeout(copyBtn._copyTimer);
+      copyBtn._copyTimer = setTimeout(() => {
+        copyBtn.textContent = "复制";
+        copyBtn.classList.remove("is-copied");
+      }, 1500);
+    }
+  });
+  $("loadOlderBtn").addEventListener("click", async () => {
+    try {
+      await loadOlderMessages();
+    } catch (error) {
+      setComposerStatus("error", `加载更早对话失败：${formatActionError(error)}`);
+    }
+  });
+  $("refreshThreadBtn").addEventListener("click", async () => {
+    try {
+      await refreshThreads();
+      if (state.activeThreadId) await selectThread(state.activeThreadId, { focusScroll: false });
+    } catch (error) {
+      const errMsg = formatActionError(error, "刷新失败");
+      setComposerStatus("error", `刷新失败：${errMsg}`);
+      showToastBanner("刷新失败", { detail: errMsg, error: true });
+    }
+  });
+
+  const interruptBtn = $("interruptBtn");
+  interruptBtn.addEventListener("click", async () => {
+    if (!state.activeThreadId || interruptBtn.disabled) return;
+    interruptBtn.disabled = true;
+    setComposerStatus("info", "正在中断当前执行…");
+    try {
+      await apiPost("api/interrupt", { threadId: state.activeThreadId });
+      await selectThread(state.activeThreadId, { focusScroll: false });
+      setComposerStatus("success", "已中断当前执行", { autoClearMs: 2200 });
+    } catch (error) {
+      const errMsg = formatActionError(error, "中断失败");
+      setComposerStatus("error", `中断失败：${errMsg}`);
+      showToastBanner("中断失败", { detail: errMsg, error: true });
+    } finally {
+      interruptBtn.disabled = false;
+    }
+  });
+
+  $("goalToggleBtn").addEventListener("click", async () => {
+    if (!state.activeThreadId || !state.activeThread) return;
+    try {
+      const enabled = !state.activeThread.goalState?.active;
+      const res = await apiPost("api/thread/goal", {
+        threadId: state.activeThreadId,
+        enabled,
+        model: $("modelSelect").value || "",
+        effort: $("effortSelect").hidden ? "" : ($("effortSelect").value || ""),
+        permissionMode: normalizeUiPermissionMode($("permissionSelect").value || state.defaultPermissionMode || "turbo", "turbo"),
+      });
+      state.activeThread.goalState = res.goalState;
+      renderTopbarAndControls();
+      renderThreadList();
+    } catch (error) {
+      const errMsg = formatActionError(error, "切换 Goal 模式失败");
+      setComposerStatus("error", `切换 Goal 失败：${errMsg}`);
+      showToastBanner("切换 Goal 失败", { detail: errMsg, error: true });
+    }
+  });
+
+  $("renameThreadBtn").addEventListener("click", async () => {
+    if (!state.activeThreadId) return;
+    const next = prompt("输入新的会话标题：", state.activeThread?.title || "");
+    if (!next || !next.trim()) return;
+    try {
+      await apiPost("api/thread/name", { threadId: state.activeThreadId, name: next.trim() });
+      await selectThread(state.activeThreadId, { focusScroll: false });
+      await refreshThreads();
+    } catch (error) {
+      const errMsg = formatActionError(error, "重命名失败");
+      setComposerStatus("error", `重命名失败：${errMsg}`);
+      showToastBanner("重命名失败", { detail: errMsg, error: true });
+    }
+  });
+
+  $("archiveThreadBtn").addEventListener("click", async () => {
+    if (!state.activeThreadId || !state.activeThread) return;
+    try {
+      const nextArchived = !state.activeThread.archived;
+      await apiPost("api/thread/archive", { threadId: state.activeThreadId, archived: nextArchived });
+      if (nextArchived && !state.showArchived) {
+        await selectThread("");
+      } else {
+        await selectThread(state.activeThreadId, { focusScroll: false });
+      }
+      await refreshThreads();
+    } catch (error) {
+      const errMsg = formatActionError(error, "归档操作失败");
+      setComposerStatus("error", `归档失败：${errMsg}`);
+      showToastBanner("归档失败", { detail: errMsg, error: true });
+    }
+  });
+
+  $("queuedTurnsBar").addEventListener("click", async (e) => {
+    const toggleBtn = e.target.closest("[data-queue-toggle]");
+    if (toggleBtn) {
+      state.queuedPanelCollapsed = !state.queuedPanelCollapsed;
+      renderQueuedTurns();
+      return;
+    }
+
+    const editBtn = e.target.closest("[data-queue-edit]");
+    if (editBtn && state.activeThreadId) {
+      const editId = editBtn.dataset.queueEdit;
+      const entry = (state.queuedTurns || []).find((item) => item.id === editId);
+      try {
+        const res = await apiPost("api/thread/queue/cancel", {
+          threadId: state.activeThreadId,
+          id: editId,
+        });
+        applyActiveQueuedTurns(state.activeThreadId, res.items || []);
+        const input = $("promptInput");
+        const entryText = String(entry?.text || "");
+        if (input && entryText) {
+          input.value = input.value.trim() ? `${entryText}\n${input.value}` : entryText;
+        }
+        if (entry?.goalMode && !state.composerGoal) {
+          state.composerGoal = true;
+        }
+        renderComposerControls();
+        input?.focus();
+        if ((entry?.imageCount || 0) > 0) {
+          setComposerStatus("info", "文本已撤回到输入框（原排队图片未回填，请按需重新添加）", { autoClearMs: 4500 });
+        }
+      } catch (error) {
+        setComposerStatus("error", `撤回排队失败：${formatActionError(error)}`);
+      }
+      return;
+    }
+
+    const cancelBtn = e.target.closest("[data-queue-cancel], [data-cancel-queue]");
+    if (!cancelBtn || !state.activeThreadId) return;
+    const cancelId = cancelBtn.dataset.queueCancel || cancelBtn.dataset.cancelQueue;
+    try {
+      const res = await apiPost("api/thread/queue/cancel", {
+        threadId: state.activeThreadId,
+        id: cancelId,
+      });
+      applyActiveQueuedTurns(state.activeThreadId, res.items || []);
+    } catch (error) {
+      setComposerStatus("error", `取消排队失败：${formatActionError(error)}`);
+    }
+  });
+
+  $("pendingRequestsDock").addEventListener("click", async (e) => {
+    let targetRequestId = "";
+    try {
+      const declineBtn = e.target.closest("[data-decline-id]");
+      if (declineBtn) {
+        targetRequestId = declineBtn.dataset.declineId || "";
+        await apiPost("api/server-request", {
+          requestId: targetRequestId,
+          decision: "decline",
+        });
+        removePendingRequestById(targetRequestId);
+        return;
+      }
+      const optBtn = e.target.closest("[data-option-id]");
+      if (optBtn) {
+        targetRequestId = optBtn.dataset.requestId || "";
+        await apiPost("api/server-request", {
+          requestId: targetRequestId,
+          optionId: optBtn.dataset.optionId,
+        });
+        removePendingRequestById(targetRequestId);
+        return;
+      }
+      const decBtn = e.target.closest("[data-decision]");
+      if (decBtn) {
+        targetRequestId = decBtn.dataset.requestId || "";
+        await apiPost("api/approval", {
+          requestId: targetRequestId,
+          decision: decBtn.dataset.decision,
+        });
+        removePendingRequestById(targetRequestId);
+      }
+    } catch (error) {
+      if (targetRequestId && Number(error?.status) === 404) {
+        removePendingRequestById(targetRequestId);
+        setComposerStatus("info", "该确认项已自动处理或过期", { autoClearMs: 2500 });
+        return;
+      }
+      const errMsg = formatActionError(error, "响应审批请求失败");
+      setComposerStatus("error", errMsg);
+      showToastBanner("审批请求失败", { detail: errMsg, error: true });
+    }
+  });
+
+  $("pendingRequestsDock").addEventListener("submit", async (e) => {
+    const form = e.target.closest("form[data-kind='userInput']");
+    if (!form) return;
+    e.preventDefault();
+    const requestId = form.dataset.requestId || "";
+    try {
+      const req = state.pendingRequests.find((r) => r.id === requestId);
+      const answers = collectUserInputAnswers(req, form);
+      await apiPost("api/server-request", { requestId, decision: "accept", answers });
+      removePendingRequestById(requestId);
+    } catch (error) {
+      if (requestId && Number(error?.status) === 404) {
+        removePendingRequestById(requestId);
+        setComposerStatus("info", "该确认项已自动处理或过期", { autoClearMs: 2500 });
+        return;
+      }
+      const errMsg = formatActionError(error, "提交回答失败");
+      setComposerStatus("error", errMsg);
+      showToastBanner("提交回答失败", { detail: errMsg, error: true });
+    }
+  });
+
+  $("newThreadBtn").addEventListener("click", () => {
+    openNewThreadModal({
+      cwd: state.activeThread?.cwd || "",
+      provider: defaultProviderValue(),
+    });
+  });
+
+  $("newThreadForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const submitBtn = $("createThreadSubmitBtn");
+    const errEl = $("newThreadError");
+    errEl.hidden = true;
+    errEl.textContent = "";
+    if (submitBtn) {
+      submitBtn.disabled = true;
+      submitBtn.textContent = "创建中…";
+    }
+    const provider = $("newProviderSelect").value;
+    const profileId = $("newProfileSelect").value || defaultProfileForProvider(provider);
+    const model = $("newModelSelect")?.value || "";
+    const cwd = $("newCwdInput").value.trim();
+    const permissionMode = normalizeUiPermissionMode($("newPermissionSelect").value || "turbo", "turbo");
+    state.defaultPermissionMode = saveDefaultPermissionMode(permissionMode);
+    const goalMode = $("newGoalCheckbox").checked;
+    const text = $("newPromptInput").value;
+    try {
+      const created = await apiPost("api/thread/new", {
+        provider,
+        profileId,
+        model,
+        cwd,
+        text,
+        permissionMode,
+        goalMode,
+      });
+      $("newPromptInput").value = "";
+      $("newThreadModal").close();
+      await refreshThreads();
+      if (created?.thread?.id) {
+        saveLocalThreadPrefs(created.thread.id, { model, permissionMode });
+        await selectThread(created.thread.id);
+      }
+    } catch (error) {
+      const errMsg = formatActionError(error, "创建会话失败");
+      errEl.textContent = `创建失败：${errMsg}`;
+      errEl.hidden = false;
+    } finally {
+      if (submitBtn) {
+        submitBtn.disabled = false;
+        submitBtn.textContent = "创建会话";
+      }
+    }
+  });
+
+  $("voiceAutoAnnounceBtn")?.addEventListener("click", () => {
+    const next = !state.voice.config.autoBroadcastEvents;
+    state.voice.config = saveVoiceConfig({ autoBroadcastEvents: next });
+    renderVoiceCallUi();
+  });
+
+  $("voiceKeyboardToggleBtn")?.addEventListener("click", () => {
+    const form = $("voiceTextForm");
+    if (!form) return;
+    form.hidden = !form.hidden;
+    if (!form.hidden) $("voiceTextInput")?.focus();
+  });
+
+  $("voiceOrbBtn")?.addEventListener("click", () => triggerVoiceOrbAction());
+  $("voiceTalkBtn")?.addEventListener("click", () => triggerVoiceOrbAction());
+
+  $("voiceMuteBtn")?.addEventListener("click", () => {
+    ensureVoiceAudioUnlocked();
+    if (!state.voice.callActive) return;
+    state.voice.isMuted = !state.voice.isMuted;
+    state.voice.isRecording = false;
+    state.voice.vadDetector?.reset?.();
+    if (!state.voice.isMuted && !state.voice.micStream) {
+      void startVoiceCallMicPipeline();
+    } else {
+      renderVoiceCallUi();
+    }
+  });
+
+  $("voiceReadProgressBtn")?.addEventListener("click", () => {
+    ensureVoiceAudioUnlocked();
+    if (state.voice.isSpeaking) {
+      stopVoicePlayback({ scheduleResume: true, abortReason: "user_barge_in" });
+      return;
+    }
+    void sendVoiceTurnToMac({ mode: "briefing", transcriptText: "播报当前任务进度" });
+  });
+
+  $("voiceUnheardBanner")?.addEventListener("click", (e) => {
+    const replayAllBtn = e.target.closest("[data-voice-replay-all]");
+    if (replayAllBtn) {
+      ensureVoiceAudioUnlocked();
+      void replayUnheardVoiceItems();
+      return;
+    }
+    const dismissBtn = e.target.closest("[data-voice-dismiss-unheard]");
+    if (dismissBtn) {
+      clearUnheardVoiceQueue();
+    }
+  });
+
+  $("voiceCallTranscript")?.addEventListener("click", (e) => {
+    const replayBtn = e.target.closest("[data-voice-replay]");
+    if (!replayBtn) return;
+    const entryId = replayBtn.dataset.voiceReplay;
+    if (!entryId) return;
+    ensureVoiceAudioUnlocked();
+    void replayVoiceTranscriptEntryById(entryId);
+  });
+
+  document.addEventListener("click", (e) => {
+    if (!state.voice.callActive || state.voice.isSpeaking || state.voice.isProcessing || state.voice.isRecording) return;
+    if (!state.voice.unheardQueue.some((u) => u.reason === "autoplay_blocked")) return;
+    if (e.target.closest("#voiceModeBtn, #voiceUnheardBanner, #voiceCallTranscript, #voiceOrbBtn, #voiceTalkBtn, #voiceHangupBtn, #voiceMinimizeBtn")) return;
+    ensureVoiceAudioUnlocked();
+    void replayUnheardVoiceItems({ onlyBlocked: true });
+  });
+
+  $("voiceHangupBtn")?.addEventListener("click", () => hangupVoiceCall({ closeModal: true }));
+  $("voiceMinimizeBtn")?.addEventListener("click", () => minimizeVoiceModal());
+  $("voiceCloseHangupBtn")?.addEventListener("click", () => {
+    state.voice.minimized = false;
+  });
+
+  $("voiceTextForm")?.addEventListener("submit", (e) => {
+    e.preventDefault();
+    ensureVoiceAudioUnlocked();
+    const text = $("voiceTextInput").value.trim();
+    if (!text) return;
+    $("voiceTextInput").value = "";
+    void sendVoiceTurnToMac({ transcriptText: text });
+  });
+
+  $("voiceLiveProgressList")?.addEventListener("click", async (e) => {
+    const approveBtn = e.target.closest("[data-voice-approve]");
+    if (approveBtn) {
+      e.stopPropagation();
+      const requestId = approveBtn.dataset.voiceApprove;
+      const decision = approveBtn.dataset.voiceDecision === "decline" ? "decline" : "accept";
+      const req = state.pendingRequests.find((r) => r.id === requestId);
+      try {
+        if (req?.kind === "acpPermission") {
+          const opt = decision === "decline"
+            ? (req.options || []).find((o) => /reject|deny/i.test(o.kind || "")) || req.options?.[req.options.length - 1]
+            : (req.options || []).find((o) => /allow_once|allow_always/i.test(o.kind || "")) || req.options?.[0];
+          await apiPost("api/server-request", {
+            requestId,
+            ...(opt?.optionId ? { optionId: opt.optionId } : { decision }),
+          });
+        } else {
+          await apiPost("api/approval", { requestId, decision });
+        }
+        removePendingRequestById(requestId);
+      } catch (error) {
+        if (Number(error?.status) === 404) {
+          removePendingRequestById(requestId);
+          return;
+        }
+        showToastBanner("审批请求失败", { detail: formatActionError(error), error: true });
+      }
+      return;
+    }
+
+    const card = e.target.closest("[data-voice-progress-thread]");
+    if (card) {
+      const targetId = card.dataset.voiceProgressThread;
+      if (targetId) {
+        await selectThread(targetId, { focusScroll: true });
+        minimizeVoiceModal();
+      }
+    }
+  });
+
+  $("voiceCopilotModal").addEventListener("close", () => {
+    if (state.voice.minimized && state.voice.callActive) {
+      renderVoiceCallUi();
+      return;
+    }
+    hangupVoiceCall({ closeModal: false });
+  });
+
+  $("remoteModalBtn").addEventListener("click", () => void openRemoteModal());
+
+  $("startTunnelBtn")?.addEventListener("click", async () => {
+    if (state.tunnelBusy) return;
+    state.tunnelBusy = true;
+    renderTunnelStatus({ ...(state.tunnelStatus || {}), state: "starting", lastError: "" });
+    try {
+      const status = await apiPost("api/tunnel/start", {});
+      state.tunnelBusy = false;
+      renderTunnelStatus(status);
+      showToastBanner("免费加密隧道已就绪", { detail: "手机扫码即可连接控制台" });
+    } catch (error) {
+      state.tunnelBusy = false;
+      const latest = await apiGet("api/remote").catch(() => null);
+      if (latest) {
+        renderRemoteStatus(latest);
+      } else {
+        renderTunnelStatus({
+          ...(state.tunnelStatus || {}),
+          state: error?.code === "cloudflared_missing" ? "missing_binary" : "error",
+          installed: error?.code !== "cloudflared_missing",
+          lastError: formatActionError(error, "开启临时隧道失败"),
+        });
+      }
+      const errEl = $("tunnelErrorText");
+      if (errEl && error?.code !== "cloudflared_missing") {
+        errEl.hidden = false;
+        errEl.textContent = formatActionError(error, "开启临时隧道失败");
+      }
+    }
+  });
+
+  $("stopTunnelBtn")?.addEventListener("click", async () => {
+    if (state.tunnelBusy) return;
+    state.tunnelBusy = true;
+    renderTunnelStatus(state.tunnelStatus);
+    try {
+      const status = await apiPost("api/tunnel/stop", {});
+      state.tunnelBusy = false;
+      renderTunnelStatus(status);
+      showToastBanner("已关闭临时隧道并废止远程会话");
+    } catch (error) {
+      state.tunnelBusy = false;
+      renderTunnelStatus(state.tunnelStatus);
+      showToastBanner("关闭隧道失败", { detail: formatActionError(error), error: true });
+    }
+  });
+
+  $("rotateTunnelBtn")?.addEventListener("click", async () => {
+    if (state.tunnelBusy) return;
+    state.tunnelBusy = true;
+    renderTunnelStatus(state.tunnelStatus);
+    try {
+      const status = await apiPost("api/tunnel/rotate", {});
+      state.tunnelBusy = false;
+      renderTunnelStatus(status);
+      showToastBanner("已重置配对二维码", { detail: "旧手机会话已立即失效" });
+    } catch (error) {
+      state.tunnelBusy = false;
+      renderTunnelStatus(state.tunnelStatus);
+      showToastBanner("重置二维码失败", { detail: formatActionError(error), error: true });
+    }
+  });
+
+  $("copyTunnelUrlBtn")?.addEventListener("click", async () => {
+    const val = $("tunnelPairUrlInput")?.value;
+    if (!val) return;
+    await navigator.clipboard?.writeText(val).catch(() => {});
+    $("copyTunnelUrlBtn").textContent = "已复制";
+    setTimeout(() => { if ($("copyTunnelUrlBtn")) $("copyTunnelUrlBtn").textContent = "复制"; }, 1500);
+  });
+
+  $("copyBrewCmdBtn")?.addEventListener("click", async () => {
+    const cmd = state.tunnelStatus?.installHint || $("tunnelInstallCmdCode")?.textContent || "brew install cloudflared";
+    await navigator.clipboard?.writeText(cmd).catch(() => {});
+    $("copyBrewCmdBtn").textContent = "已复制";
+    setTimeout(() => { if ($("copyBrewCmdBtn")) $("copyBrewCmdBtn").textContent = "复制命令"; }, 1500);
+  });
+
+  $("remotePairForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    try {
+      const status = await apiPost("api/remote/pair", {
+        relayUrl: $("relayUrlInput").value.trim(),
+        inviteCode: $("inviteCodeInput").value.trim(),
+        label: $("hostLabelInput").value.trim(),
+      });
+      renderRemoteStatus(status);
+    } catch (error) {
+      showToastBanner("配对失败", { detail: formatActionError(error), error: true });
+    }
+  });
+
+  $("unpairBtn").addEventListener("click", async () => {
+    try {
+      const status = await apiPost("api/remote/unpair", {});
+      renderRemoteStatus(status);
+    } catch (error) {
+      showToastBanner("撤销失败", { detail: formatActionError(error), error: true });
+    }
+  });
+
+  $("copyPairUrlBtn").addEventListener("click", async () => {
+    const val = $("remotePairUrlInput").value;
+    if (!val) return;
+    await navigator.clipboard?.writeText(val).catch(() => {});
+    $("copyPairUrlBtn").textContent = "已复制";
+    setTimeout(() => { $("copyPairUrlBtn").textContent = "复制"; }, 1500);
+  });
+
+  for (const btn of document.querySelectorAll("[data-close-modal]")) {
+    btn.addEventListener("click", () => $(btn.dataset.closeModal)?.close());
+  }
+
+  const vp = $("messagesViewport");
+  bindFollowIntent(vp, {
+    pause: () => { state.autoFollow = false; },
+    settle: () => {
+      const distance = vp.scrollHeight - vp.scrollTop - vp.clientHeight;
+      if (distance < 48) state.autoFollow = true;
+    },
+  });
+}
+
+let imageQueueChain = Promise.resolve();
+
+function addComposerImageFile(file) {
+  if (!file) return Promise.resolve();
+  state.imageProcessingCount += 1;
+  setComposerStatus("pending", "正在压缩优化图片…");
+  renderComposerControls();
+
+  const task = imageQueueChain.then(async () => {
+    const compressedItem = await compressImageFileForUpload(file);
+    const budget = validateImageBatchBudget(state.images, compressedItem.byteLength);
+    if (!budget.ok) {
+      throw new Error(budget.message || "图片数量或总大小超出限制");
+    }
+    state.images.push(compressedItem);
+    renderComposerImages();
+    renderComposerControls();
+    const origBytes = Number(file.size) || 0;
+    if (compressedItem.compressed && origBytes > compressedItem.byteLength * 1.3) {
+      setComposerStatus(
+        "success",
+        `已添加图片（已优化至 ${formatByteSize(compressedItem.byteLength)}）`,
+        { autoClearMs: 2200 },
+      );
+    } else if ($("composerStatus")?.classList.contains("is-pending")) {
+      clearComposerStatus();
+    }
+  }).catch((error) => {
+    const msg = error?.message || "读取或压缩图片失败";
+    setComposerStatus("error", msg, { autoClearMs: 4200 });
+    showToastBanner("添加图片失败", { detail: msg, error: true });
+  }).finally(() => {
+    state.imageProcessingCount = Math.max(0, state.imageProcessingCount - 1);
+    renderComposerControls();
+  });
+
+  imageQueueChain = task.catch(() => {});
+  return task;
+}
+
+function bindVisualViewport() {
+  const vv = window.visualViewport;
+  if (!vv) return;
+  const syncViewport = () => {
+    if (vv.scale > 1.05) return;
+    document.documentElement.style.setProperty("--app-height", `${Math.round(vv.height)}px`);
+    document.documentElement.style.setProperty("--app-offset-top", `${Math.max(0, Math.round(vv.offsetTop))}px`);
+    if (document.activeElement === $("promptInput")) {
+      scrollViewportIfFollowing();
+    }
+  };
+  syncViewport();
+  vv.addEventListener("resize", syncViewport);
+  vv.addEventListener("scroll", syncViewport);
+}
+
+let uiVersionCheckInFlight = false;
+let lastUiHtmlEtag = "";
+let activityPollTimer = null;
+let activityPollInFlight = false;
+let activityPollTick = 0;
+
+function startLiveActivityPolling() {
+  if (activityPollTimer) return;
+  activityPollTimer = setInterval(async () => {
+    if (document.visibilityState === "hidden" || activityPollInFlight) return;
+    activityPollInFlight = true;
+    activityPollTick += 1;
+    try {
+      const targetId = state.activeThreadId;
+      if (!isBoardViewActive() && targetId && !state.initialThreadLoading) {
+        const wasRunning = isActiveThreadRunning();
+        if (wasRunning || (state.queuedTurns || []).length > 0 || activityPollTick % 4 === 0) {
+          const cursorQs = state.activityCursor ? `&cursor=${encodeURIComponent(state.activityCursor)}` : "";
+          const act = await apiGetWithHotFallback(`api/thread/activity?id=${encodeURIComponent(targetId)}${cursorQs}`).catch(() => null);
+          if (state.activeThreadId === targetId && act) {
+            const prevLive = Boolean(state.activeThread?.live);
+            if (act.cursor) state.activityCursor = act.cursor;
+            if (Array.isArray(act.queuedTurns)) {
+              applyActiveQueuedTurns(targetId, act.queuedTurns);
+            }
+            const streamingTurnChanged = Boolean(
+              act.streaming?.turnId
+              && state.streamingTurnId
+              && act.streaming.turnId !== state.streamingTurnId,
+            );
+            const serverClearedStreamText = Boolean(
+              act.live
+              && act.streaming
+              && !act.streaming.text
+              && state.streamingText,
+            );
+            const duplicatePersistedStream = Boolean(
+              act.live
+              && state.streamingText
+              && isStreamingTextAlreadyPersisted(state.activeThread?.turns, state.streamingText),
+            );
+            let clearedStaleStream = false;
+            if (!act.live && (prevLive || wasRunning)) {
+              if (state.activeThread) state.activeThread.live = false;
+              syncThreadSummaryIntoList({ id: targetId, live: false });
+              state.liveActivity = { status: "completed" };
+              state.streamingText = "";
+              state.streamingThought = "";
+              state.streamingTurnId = "";
+            } else if (act.live && (streamingTurnChanged || serverClearedStreamText || duplicatePersistedStream)) {
+              state.streamingText = "";
+              if (!act.streaming?.thought) state.streamingThought = "";
+              if (act.streaming?.turnId) state.streamingTurnId = act.streaming.turnId;
+              clearedStaleStream = true;
+            }
+            const isImmediateTransition = clearedStaleStream || Boolean(act.live) !== prevLive || (!act.live && wasRunning);
+            if (act.changed || isImmediateTransition) {
+              const sinceLastReload = Date.now() - lastActiveThreadReloadDoneAt;
+              if (!isImmediateTransition && act.live && lastActiveThreadReloadDoneAt > 0 && sinceLastReload < 4000) {
+                if (act.activity) {
+                  state.liveActivity = mergeLiveActivity(state.liveActivity, {
+                    status: "running",
+                    phase: act.activity.phase || "",
+                    text: act.activity.text ?? act.activity.detail ?? "",
+                  });
+                  renderTopbarAndControls();
+                }
+                if (!activeThreadReloadInFlight) {
+                  scheduleActiveThreadReload(targetId, Math.max(250, 4000 - sinceLastReload));
+                }
+              } else {
+                await reloadActiveThreadProgress(targetId);
+              }
+            } else if (act.live && act.activity) {
+              state.liveActivity = mergeLiveActivity(state.liveActivity, {
+                status: "running",
+                phase: act.activity.phase || "",
+                text: act.activity.text ?? act.activity.detail ?? "",
+              });
+              renderTopbarAndControls();
+            }
+          }
+        }
+      }
+      const sidebarVisible = Boolean($("sidebar")?.classList.contains("is-open")) || window.innerWidth > 900;
+      const listPollTicks = (isBoardViewActive() || sidebarVisible) ? 6 : 12;
+      if (activityPollTick % listPollTicks === 0 && !state.isSubmitting && (isBoardViewActive() || state.threads.some((t) => t.live || (t.queuedCount || 0) > 0))) {
+        await refreshThreads().catch(() => {});
+      }
+    } finally {
+      activityPollInFlight = false;
+    }
+  }, 2500);
+}
+
+async function checkUiVersionAndReloadIfStale() {
+  if (uiVersionCheckInFlight || state.isSubmitting || state.voice?.isRecording || state.voice?.callActive) return;
+  const currentMeta = document.querySelector('meta[name="ac-ui-version"]')?.getAttribute("content") || "";
+  if (!currentMeta) return;
+  const draft = $("promptInput")?.value || "";
+  if (draft.trim()) return;
+
+  uiVersionCheckInFlight = true;
+  try {
+    const headers = {};
+    if (lastUiHtmlEtag) headers["If-None-Match"] = lastUiHtmlEtag;
+    const res = await fetch("./", { cache: "no-store", credentials: "same-origin", headers });
+    const etag = String(res.headers?.get("etag") || "").trim();
+    if (etag) lastUiHtmlEtag = etag;
+    if (res.status === 304) return;
+    if (!res.ok) return;
+    const html = await res.text();
+    const matched = html.match(/<meta\s+name="ac-ui-version"\s+content="([^"]+)"/i);
+    if (matched?.[1] && matched[1] !== currentMeta) {
+      location.reload();
+    }
+  } catch {
+    // Ignore transient network errors when returning from background.
+  } finally {
+    uiVersionCheckInFlight = false;
+  }
+}
+
+async function init() {
+  window.addEventListener("online", () => {
+    if (!state.sseConnected || !state.eventSource || state.eventSource.readyState === EventSource.CLOSED) {
+      connectEvents();
+    }
+    if (state.activeThreadId && !isBoardViewActive() && !state.initialThreadLoading) {
+      void reloadActiveThreadProgress(state.activeThreadId);
+    }
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") {
+      void checkUiVersionAndReloadIfStale();
+      if (!state.sseConnected || !state.eventSource || state.eventSource.readyState === EventSource.CLOSED) {
+        connectEvents();
+      }
+      if (state.activeThreadId && !isBoardViewActive() && !state.initialThreadLoading) {
+        void reloadActiveThreadProgress(state.activeThreadId);
+      }
+      if (state.voice.callActive) {
+        resumeVoiceAudioContextIfNeeded();
+        renderVoiceUnheardBanner();
+        renderVoiceCallUi();
+      }
+    }
+  });
+  hydrateDeclarativeIcons(document);
+  bindVisualViewport();
+  syncProfileSelectors();
+  syncModelAndEffortSelectors();
+  syncPermissionSelectors();
+  bindEvents();
+  connectEvents();
+  startLiveActivityPolling();
+
+  const initialThread = new URL(location.href).searchParams.get("thread") || "";
+  const cachedThreadsPayload = loadCachedThreads();
+  if (cachedThreadsPayload?.threads?.length) {
+    state.threads = cachedThreadsPayload.threads.filter((t) => !isInternalVoiceThreadClient(t));
+    state.projectsMeta = cachedThreadsPayload.projectsMeta || {};
+    renderThreadList();
+  }
+
+  const modelsPromise = refreshModels().catch(() => {});
+  const telemetryPromise = refreshTelemetry().catch(() => {});
+  void refreshLocalApps().catch(() => {});
+
+  try {
+    if (initialThread) {
+      state.activeThreadId = initialThread;
+      state.boardOpen = false;
+      state.initialThreadLoading = true;
+      syncWorkspaceVisibility();
+      const turnListEl = $("turnList");
+      if (turnListEl) {
+        turnListEl.hidden = false;
+        turnListEl.innerHTML = `<div class="empty-state" style="text-align:center;color:var(--text-muted);">正在加载会话…</div>`;
+      }
+
+      const provPromise = refreshProviders().then(() => {
+        if (state.activeThread) {
+          renderTopbarAndControls();
+          syncProfileSelectors();
+          syncModelAndEffortSelectors();
+        }
+      });
+      const threadsPromise = refreshThreads();
+      const threadPromise = selectThread(initialThread).then(() => true).catch((err) => {
+        if (Number(err?.status) === 404) return false;
+        throw err;
+      });
+
+      const threadLoaded = await threadPromise;
+      state.initialThreadLoading = false;
+      if (!threadLoaded) {
+        await selectThread("");
+      }
+      const settled = await Promise.allSettled([provPromise, threadsPromise, modelsPromise, telemetryPromise]);
+      const fatalErr = settled.find((r) => r.status === "rejected")?.reason;
+      if (fatalErr) throw fatalErr;
+      if (threadLoaded && state.activeThread) {
+        renderTopbarAndControls();
+        renderProjectTaskStrip();
+        const hasTurns = Array.isArray(state.activeThread.turns) && state.activeThread.turns.length > 0;
+        if (!hasTurns && state.threads.length && !state.threads.some((t) => t.id === initialThread)) {
+          await selectThread("");
+        }
+      }
+    } else {
+      await Promise.all([
+        refreshProviders(),
+        refreshThreads(),
+      ]);
+      void modelsPromise;
+      void telemetryPromise;
+      renderTopbarAndControls();
+      renderActiveMessages();
+    }
+  } catch (error) {
+    state.initialThreadLoading = false;
+    const errMsg = formatActionError(error, "初始化控制台失败");
+    setComposerStatus("error", errMsg);
+    showToastBanner("初始化失败", { detail: errMsg, sticky: true, error: true });
+  }
+  renderComposerControls();
+  setInterval(() => {
+    if (pruneExpiredSidebarPrefs(Date.now())) {
+      renderThreadList();
+    }
+  }, 60_000);
+}
+
+void init();

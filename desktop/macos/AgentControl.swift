@@ -1,0 +1,584 @@
+import AppKit
+import Foundation
+import WebKit
+
+private let defaultPort = "43310"
+private let launchAgentLabel = "com.guuguo.agent-control"
+private let windowBgColor = NSColor(srgbRed: 8 / 255.0, green: 11 / 255.0, blue: 16 / 255.0, alpha: 1.0)
+
+final class AgentControlAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate {
+  private var window: NSWindow!
+  private var webView: WKWebView!
+  private var statusOverlay: NSView!
+  private var statusLabel: NSTextField!
+  private var retryButton: NSButton!
+
+  private var targetURL: URL!
+  private var healthURL: URL!
+  private var repoRoot: String = ""
+  private var hasLoadedApp = false
+  private var isBootstrapping = false
+  private var downloadDestinations = [ObjectIdentifier: URL]()
+
+  func applicationDidFinishLaunching(_ notification: Notification) {
+    NSApp.appearance = NSAppearance(named: .darkAqua)
+    configureTargets()
+    buildMenuBar()
+    buildWindow()
+    window.makeKeyAndOrderFront(nil)
+    NSApp.activate(ignoringOtherApps: true)
+    ensureServerAndLoad()
+  }
+
+  func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+    if !flag {
+      window.makeKeyAndOrderFront(nil)
+    }
+    NSApp.activate(ignoringOtherApps: true)
+    return true
+  }
+
+  func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+    return false
+  }
+
+  func windowShouldClose(_ sender: NSWindow) -> Bool {
+    sender.orderOut(nil)
+    return false
+  }
+
+  // MARK: - Configuration
+
+  private func configureTargets() {
+    let info = Bundle.main.infoDictionary ?? [:]
+    let env = ProcessInfo.processInfo.environment
+    let port = (env["PORT"]?.isEmpty == false ? env["PORT"] : nil)
+      ?? (info["AgentControlPort"] as? String)
+      ?? defaultPort
+    if let rawRepo = info["AgentControlRepoRoot"] as? String, !rawRepo.hasPrefix("__") {
+      repoRoot = rawRepo
+    }
+
+    if let rawUrl = env["AGENT_CONTROL_URL"], let parsed = URL(string: rawUrl) {
+      targetURL = parsed
+    } else {
+      targetURL = URL(string: "http://127.0.0.1:\(port)/")!
+    }
+    var comps = URLComponents(url: targetURL, resolvingAgainstBaseURL: false) ?? URLComponents()
+    comps.path = "/health"
+    comps.query = nil
+    healthURL = comps.url ?? URL(string: "http://127.0.0.1:\(port)/health")!
+  }
+
+  // MARK: - UI Construction
+
+  private func buildWindow() {
+    let initialRect = NSRect(x: 0, y: 0, width: 1280, height: 840)
+    window = NSWindow(
+      contentRect: initialRect,
+      styleMask: [.titled, .closable, .miniaturizable, .resizable],
+      backing: .buffered,
+      defer: false
+    )
+    window.title = "Agent Control"
+    window.minSize = NSSize(width: 760, height: 520)
+    window.backgroundColor = windowBgColor
+    window.titlebarAppearsTransparent = true
+    window.isReleasedWhenClosed = false
+    window.delegate = self
+    window.center()
+    window.setFrameAutosaveName("AgentControlMainWindow")
+
+    let contentView = NSView(frame: initialRect)
+    contentView.wantsLayer = true
+    contentView.layer?.backgroundColor = windowBgColor.cgColor
+    window.contentView = contentView
+
+    let config = WKWebViewConfiguration()
+    config.websiteDataStore = .default()
+    config.preferences.isElementFullscreenEnabled = true
+    config.preferences.javaScriptCanOpenWindowsAutomatically = true
+
+    webView = WKWebView(frame: contentView.bounds, configuration: config)
+    webView.autoresizingMask = [.width, .height]
+    webView.navigationDelegate = self
+    webView.uiDelegate = self
+    webView.allowsBackForwardNavigationGestures = false
+    webView.setValue(false, forKey: "drawsBackground")
+    if #available(macOS 13.3, *) {
+      webView.isInspectable = true
+    }
+    contentView.addSubview(webView)
+
+    buildStatusOverlay(inside: contentView)
+  }
+
+  private func buildStatusOverlay(inside container: NSView) {
+    statusOverlay = NSView(frame: container.bounds)
+    statusOverlay.autoresizingMask = [.width, .height]
+    statusOverlay.wantsLayer = true
+    statusOverlay.layer?.backgroundColor = windowBgColor.cgColor
+
+    let stack = NSStackView()
+    stack.orientation = .vertical
+    stack.alignment = .centerX
+    stack.spacing = 12
+    stack.translatesAutoresizingMaskIntoConstraints = false
+
+    let titleLabel = NSTextField(labelWithString: "Agent Control")
+    titleLabel.font = NSFont.systemFont(ofSize: 20, weight: .semibold)
+    titleLabel.textColor = NSColor(srgbRed: 232 / 255.0, green: 238 / 255.0, blue: 247 / 255.0, alpha: 1.0)
+
+    statusLabel = NSTextField(labelWithString: "正在连接本机服务…")
+    statusLabel.font = NSFont.systemFont(ofSize: 13, weight: .regular)
+    statusLabel.textColor = NSColor(srgbRed: 147 / 255.0, green: 161 / 255.0, blue: 181 / 255.0, alpha: 1.0)
+    statusLabel.alignment = .center
+
+    retryButton = NSButton(title: "重试启动并连接", target: self, action: #selector(retryConnection(_:)))
+    retryButton.bezelStyle = .rounded
+    retryButton.isHidden = true
+
+    stack.addArrangedSubview(titleLabel)
+    stack.addArrangedSubview(statusLabel)
+    stack.addArrangedSubview(retryButton)
+    statusOverlay.addSubview(stack)
+
+    NSLayoutConstraint.activate([
+      stack.centerXAnchor.constraint(equalTo: statusOverlay.centerXAnchor),
+      stack.centerYAnchor.constraint(equalTo: statusOverlay.centerYAnchor),
+      stack.widthAnchor.constraint(lessThanOrEqualToConstant: 460),
+    ])
+
+    container.addSubview(statusOverlay)
+  }
+
+  private func buildMenuBar() {
+    let mainMenu = NSMenu()
+    NSApp.mainMenu = mainMenu
+
+    // App menu
+    let appMenuItem = NSMenuItem()
+    mainMenu.addItem(appMenuItem)
+    let appMenu = NSMenu()
+    appMenuItem.submenu = appMenu
+    appMenu.addItem(withTitle: "关于 Agent Control", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+    appMenu.addItem(.separator())
+    appMenu.addItem(withTitle: "隐藏 Agent Control", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+    let hideOthers = appMenu.addItem(withTitle: "隐藏其他", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
+    hideOthers.keyEquivalentModifierMask = [.command, .option]
+    appMenu.addItem(withTitle: "显示全部", action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: "")
+    appMenu.addItem(.separator())
+    appMenu.addItem(withTitle: "退出 Agent Control", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+
+    // Edit menu (required for Cmd+C / Cmd+V / Cmd+X / Cmd+A / Cmd+Z in WKWebView)
+    let editMenuItem = NSMenuItem()
+    mainMenu.addItem(editMenuItem)
+    let editMenu = NSMenu(title: "编辑")
+    editMenuItem.submenu = editMenu
+    editMenu.addItem(withTitle: "撤销", action: Selector(("undo:")), keyEquivalent: "z")
+    let redoItem = editMenu.addItem(withTitle: "重做", action: Selector(("redo:")), keyEquivalent: "z")
+    redoItem.keyEquivalentModifierMask = [.command, .shift]
+    editMenu.addItem(.separator())
+    editMenu.addItem(withTitle: "剪切", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+    editMenu.addItem(withTitle: "拷贝", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+    editMenu.addItem(withTitle: "粘贴", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+    editMenu.addItem(withTitle: "全选", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+
+    // View / Control menu
+    let viewMenuItem = NSMenuItem()
+    mainMenu.addItem(viewMenuItem)
+    let viewMenu = NSMenu(title: "视图")
+    viewMenuItem.submenu = viewMenu
+    viewMenu.addItem(withTitle: "刷新界面", action: #selector(reloadWebView(_:)), keyEquivalent: "r")
+    let hardReload = viewMenu.addItem(withTitle: "强制重新加载", action: #selector(hardReloadWebView(_:)), keyEquivalent: "r")
+    hardReload.keyEquivalentModifierMask = [.command, .shift]
+    viewMenu.addItem(.separator())
+    viewMenu.addItem(withTitle: "放大", action: #selector(zoomIn(_:)), keyEquivalent: "=")
+    viewMenu.addItem(withTitle: "缩小", action: #selector(zoomOut(_:)), keyEquivalent: "-")
+    viewMenu.addItem(withTitle: "实际大小", action: #selector(zoomReset(_:)), keyEquivalent: "0")
+    viewMenu.addItem(.separator())
+    viewMenu.addItem(withTitle: "在默认浏览器中打开", action: #selector(openInBrowser(_:)), keyEquivalent: "o")
+    viewMenu.addItem(withTitle: "重启后台本地服务", action: #selector(restartLocalService(_:)), keyEquivalent: "")
+
+    // Window menu
+    let windowMenuItem = NSMenuItem()
+    mainMenu.addItem(windowMenuItem)
+    let windowMenu = NSMenu(title: "窗口")
+    windowMenuItem.submenu = windowMenu
+    windowMenu.addItem(withTitle: "关闭窗口", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+    windowMenu.addItem(withTitle: "最小化", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+    windowMenu.addItem(withTitle: "缩放", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
+    NSApp.windowsMenu = windowMenu
+  }
+
+  // MARK: - Server Bootstrapping
+
+  private func ensureServerAndLoad() {
+    if isBootstrapping { return }
+    isBootstrapping = true
+    retryButton.isHidden = true
+    statusOverlay.isHidden = false
+    statusLabel.stringValue = "正在检查 Agent Control 服务 (\(targetURL.absoluteString))…"
+
+    probeHealth { [weak self] healthy in
+      guard let self else { return }
+      if healthy {
+        self.isBootstrapping = false
+        self.loadTargetURL()
+        return
+      }
+      self.statusLabel.stringValue = "正在自动拉起本地 Agent Control 服务…"
+      self.startLocalServiceIfNeeded()
+      self.pollUntilHealthy(attemptsRemaining: 30)
+    }
+  }
+
+  private func pollUntilHealthy(attemptsRemaining: Int) {
+    probeHealth { [weak self] healthy in
+      guard let self else { return }
+      if healthy {
+        self.isBootstrapping = false
+        self.loadTargetURL()
+        return
+      }
+      if attemptsRemaining <= 0 {
+        self.isBootstrapping = false
+        self.statusOverlay.isHidden = false
+        self.statusLabel.stringValue = "未能连接到 \(self.targetURL.absoluteString)，请检查本地服务是否已启动。"
+        self.retryButton.isHidden = false
+        return
+      }
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+        self.pollUntilHealthy(attemptsRemaining: attemptsRemaining - 1)
+      }
+    }
+  }
+
+  private func probeHealth(completion: @escaping (Bool) -> Void) {
+    var request = URLRequest(url: healthURL)
+    request.timeoutInterval = 0.9
+    request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+    URLSession.shared.dataTask(with: request) { _, response, error in
+      let ok = error == nil && (response as? HTTPURLResponse)?.statusCode == 200
+      DispatchQueue.main.async {
+        completion(ok)
+      }
+    }.resume()
+  }
+
+  private func startLocalServiceIfNeeded() {
+    DispatchQueue.global(qos: .userInitiated).async { [repoRoot] in
+      let uid = String(getuid())
+      let plistPath = (NSHomeDirectory() as NSString).appendingPathComponent("Library/LaunchAgents/\(launchAgentLabel).plist")
+      if FileManager.default.fileExists(atPath: plistPath) {
+        let kicked = self.runCommand("/bin/launchctl", ["kickstart", "-k", "gui/\(uid)/\(launchAgentLabel)"])
+        if kicked != 0 {
+          _ = self.runCommand("/bin/launchctl", ["load", plistPath])
+        }
+        return
+      }
+      let localScript = (repoRoot as NSString).appendingPathComponent("scripts/local-control.sh")
+      if !repoRoot.isEmpty, FileManager.default.isExecutableFile(atPath: localScript) {
+        _ = self.runCommand("/bin/bash", [localScript, "install"])
+      }
+    }
+  }
+
+  @discardableResult
+  private func runCommand(_ executable: String, _ args: [String]) -> Int32 {
+    let proc = Process()
+    proc.executableURL = URL(fileURLWithPath: executable)
+    proc.arguments = args
+    proc.standardOutput = FileHandle.nullDevice
+    proc.standardError = FileHandle.nullDevice
+    do {
+      try proc.run()
+      proc.waitUntilExit()
+      return proc.terminationStatus
+    } catch {
+      return -1
+    }
+  }
+
+  private func loadTargetURL() {
+    hasLoadedApp = true
+    var req = URLRequest(url: targetURL)
+    req.cachePolicy = .reloadIgnoringLocalCacheData
+    webView.load(req)
+  }
+
+  // MARK: - Menu Actions
+
+  @objc private func retryConnection(_ sender: Any?) {
+    ensureServerAndLoad()
+  }
+
+  @objc private func reloadWebView(_ sender: Any?) {
+    if !hasLoadedApp {
+      ensureServerAndLoad()
+      return
+    }
+    webView.reload()
+  }
+
+  @objc private func hardReloadWebView(_ sender: Any?) {
+    if !hasLoadedApp {
+      ensureServerAndLoad()
+      return
+    }
+    webView.reloadFromOrigin()
+  }
+
+  @objc private func zoomIn(_ sender: Any?) {
+    webView.pageZoom = min(2.0, webView.pageZoom + 0.1)
+  }
+
+  @objc private func zoomOut(_ sender: Any?) {
+    webView.pageZoom = max(0.7, webView.pageZoom - 0.1)
+  }
+
+  @objc private func zoomReset(_ sender: Any?) {
+    webView.pageZoom = 1.0
+  }
+
+  @objc private func openInBrowser(_ sender: Any?) {
+    NSWorkspace.shared.open(webView.url ?? targetURL)
+  }
+
+  @objc private func restartLocalService(_ sender: Any?) {
+    hasLoadedApp = false
+    statusOverlay.isHidden = false
+    retryButton.isHidden = true
+    statusLabel.stringValue = "正在重启本地 Agent Control 服务…"
+    DispatchQueue.global(qos: .userInitiated).async { [weak self, repoRoot] in
+      guard let self else { return }
+      let localScript = (repoRoot as NSString).appendingPathComponent("scripts/local-control.sh")
+      if !repoRoot.isEmpty, FileManager.default.isExecutableFile(atPath: localScript) {
+        _ = self.runCommand("/bin/bash", [localScript, "restart"])
+      } else {
+        let uid = String(getuid())
+        _ = self.runCommand("/bin/launchctl", ["kickstart", "-k", "gui/\(uid)/\(launchAgentLabel)"])
+      }
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+        self.pollUntilHealthy(attemptsRemaining: 25)
+      }
+    }
+  }
+
+  // MARK: - WKNavigationDelegate
+
+  private func isLocalAppURL(_ url: URL) -> Bool {
+    guard let host = url.host?.lowercased() else { return false }
+    let targetHost = targetURL.host?.lowercased() ?? "127.0.0.1"
+    let localHosts = Set([targetHost, "127.0.0.1", "localhost", "::1"])
+    guard localHosts.contains(host) else { return false }
+    let expectedPort = targetURL.port ?? 80
+    let actualPort = url.port ?? (url.scheme == "https" ? 443 : 80)
+    return actualPort == expectedPort
+  }
+
+  func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+    statusOverlay.isHidden = true
+    retryButton.isHidden = true
+  }
+
+  func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+    handleLoadError(error)
+  }
+
+  func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+    handleLoadError(error)
+  }
+
+  private func handleLoadError(_ error: Error) {
+    let nsErr = error as NSError
+    if nsErr.domain == NSURLErrorDomain && nsErr.code == NSURLErrorCancelled { return }
+    hasLoadedApp = false
+    statusOverlay.isHidden = false
+    statusLabel.stringValue = "连接中断：\(error.localizedDescription)"
+    retryButton.isHidden = false
+  }
+
+  func webView(
+    _ webView: WKWebView,
+    decidePolicyFor navigationAction: WKNavigationAction,
+    decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+  ) {
+    guard let url = navigationAction.request.url else {
+      decisionHandler(.allow)
+      return
+    }
+    let scheme = url.scheme?.lowercased() ?? ""
+    if scheme == "http" || scheme == "https" {
+      if isLocalAppURL(url) {
+        decisionHandler(.allow)
+      } else {
+        NSWorkspace.shared.open(url)
+        decisionHandler(.cancel)
+      }
+      return
+    }
+    if scheme == "about" || scheme == "blob" || scheme == "data" {
+      decisionHandler(.allow)
+      return
+    }
+    NSWorkspace.shared.open(url)
+    decisionHandler(.cancel)
+  }
+
+  func webView(
+    _ webView: WKWebView,
+    decidePolicyFor navigationResponse: WKNavigationResponse,
+    decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void
+  ) {
+    if !navigationResponse.canShowMIMEType {
+      decisionHandler(.download)
+      return
+    }
+    decisionHandler(.allow)
+  }
+
+  func webView(_ webView: WKWebView, navigationResponse: WKNavigationResponse, didBecome download: WKDownload) {
+    download.delegate = self
+  }
+
+  func webView(_ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload) {
+    download.delegate = self
+  }
+
+  // MARK: - WKDownloadDelegate
+
+  func download(
+    _ download: WKDownload,
+    decideDestinationUsing response: URLResponse,
+    suggestedFilename: String,
+    completionHandler: @escaping (URL?) -> Void
+  ) {
+    let panel = NSSavePanel()
+    panel.nameFieldStringValue = suggestedFilename
+    panel.beginSheetModal(for: window) { [weak self] result in
+      guard result == .OK, let dest = panel.url else {
+        completionHandler(nil)
+        return
+      }
+      if FileManager.default.fileExists(atPath: dest.path) {
+        try? FileManager.default.removeItem(at: dest)
+      }
+      self?.downloadDestinations[ObjectIdentifier(download)] = dest
+      completionHandler(dest)
+    }
+  }
+
+  func downloadDidFinish(_ download: WKDownload) {
+    downloadDestinations.removeValue(forKey: ObjectIdentifier(download))
+  }
+
+  func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) {
+    downloadDestinations.removeValue(forKey: ObjectIdentifier(download))
+  }
+
+  // MARK: - WKUIDelegate
+
+  func webView(
+    _ webView: WKWebView,
+    createWebViewWith configuration: WKWebViewConfiguration,
+    for navigationAction: WKNavigationAction,
+    windowFeatures: WKWindowFeatures
+  ) -> WKWebView? {
+    if let url = navigationAction.request.url {
+      if isLocalAppURL(url) {
+        webView.load(navigationAction.request)
+      } else {
+        NSWorkspace.shared.open(url)
+      }
+    }
+    return nil
+  }
+
+  func webView(
+    _ webView: WKWebView,
+    runOpenPanelWith parameters: WKOpenPanelParameters,
+    initiatedByFrame frame: WKFrameInfo,
+    completionHandler: @escaping ([URL]?) -> Void
+  ) {
+    let panel = NSOpenPanel()
+    panel.allowsMultipleSelection = parameters.allowsMultipleSelection
+    panel.canChooseDirectories = parameters.allowsDirectories
+    panel.canChooseFiles = true
+    panel.beginSheetModal(for: window) { result in
+      completionHandler(result == .OK ? panel.urls : nil)
+    }
+  }
+
+  func webView(
+    _ webView: WKWebView,
+    runJavaScriptAlertPanelWithMessage message: String,
+    initiatedByFrame frame: WKFrameInfo,
+    completionHandler: @escaping () -> Void
+  ) {
+    let alert = NSAlert()
+    alert.messageText = "Agent Control"
+    alert.informativeText = message
+    alert.addButton(withTitle: "确定")
+    alert.beginSheetModal(for: window) { _ in
+      completionHandler()
+    }
+  }
+
+  func webView(
+    _ webView: WKWebView,
+    runJavaScriptConfirmPanelWithMessage message: String,
+    initiatedByFrame frame: WKFrameInfo,
+    completionHandler: @escaping (Bool) -> Void
+  ) {
+    let alert = NSAlert()
+    alert.messageText = "确认操作"
+    alert.informativeText = message
+    alert.addButton(withTitle: "确定")
+    alert.addButton(withTitle: "取消")
+    alert.beginSheetModal(for: window) { response in
+      completionHandler(response == .alertFirstButtonReturn)
+    }
+  }
+
+  func webView(
+    _ webView: WKWebView,
+    runJavaScriptTextInputPanelWithPrompt prompt: String,
+    defaultText: String?,
+    initiatedByFrame frame: WKFrameInfo,
+    completionHandler: @escaping (String?) -> Void
+  ) {
+    let alert = NSAlert()
+    alert.messageText = prompt
+    let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
+    field.stringValue = defaultText ?? ""
+    alert.accessoryView = field
+    alert.addButton(withTitle: "确定")
+    alert.addButton(withTitle: "取消")
+    alert.beginSheetModal(for: window) { response in
+      completionHandler(response == .alertFirstButtonReturn ? field.stringValue : nil)
+    }
+  }
+
+  @available(macOS 12.0, *)
+  func webView(
+    _ webView: WKWebView,
+    requestMediaCapturePermissionFor origin: WKSecurityOrigin,
+    initiatedByFrame frame: WKFrameInfo,
+    type: WKMediaCaptureType,
+    decisionHandler: @escaping (WKPermissionDecision) -> Void
+  ) {
+    let host = origin.host.lowercased()
+    if host == "127.0.0.1" || host == "localhost" || host == "::1" {
+      decisionHandler(.grant)
+    } else {
+      decisionHandler(.prompt)
+    }
+  }
+}
+
+let app = NSApplication.shared
+app.setActivationPolicy(.regular)
+let delegate = AgentControlAppDelegate()
+app.delegate = delegate
+app.run()

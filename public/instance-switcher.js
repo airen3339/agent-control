@@ -1,0 +1,1930 @@
+import { iconSvg, providerIconSvg } from "./icons.js?v=20261116a";
+
+export const PROVIDER_META = Object.freeze({
+  all: { id: "all", label: "全部", short: "全部" },
+  codex: { id: "codex", label: "Codex", short: "Codex" },
+  claude: { id: "claude", label: "Claude Code", short: "Claude" },
+  antigravity: { id: "antigravity", label: "Antigravity", short: "Agy" },
+  grok: { id: "grok", label: "Grok", short: "Grok" },
+});
+
+export const UI_PERMISSION_MODES = Object.freeze([
+  { value: "turbo", label: "Turbo（自动批准）" },
+  { value: "workspace", label: "工作区读写" },
+  { value: "full", label: "自动安全命令 (Auto)" },
+  { value: "safe", label: "只读 / 询问" },
+  { value: "plan", label: "仅规划 (Plan)" },
+]);
+
+export const CLIENT_FALLBACK_MODELS = Object.freeze({
+  antigravity: Object.freeze([
+    {
+      id: "gemini-pro-orchestrator",
+      model: "gemini-pro-orchestrator",
+      displayName: "Orchestrator (Carbon)",
+      provider: "antigravity",
+      isDefault: true,
+      defaultReasoningEffort: "high",
+      supportedReasoningEfforts: [],
+    },
+    {
+      id: "gemini-4-carbon-high",
+      model: "gemini-4-carbon-high",
+      displayName: "Gemini 4 Carbon (High)",
+      provider: "antigravity",
+      isDefault: false,
+      defaultReasoningEffort: "high",
+      supportedReasoningEfforts: ["low", "medium", "high"],
+    },
+    {
+      id: "gemini-4-carbon-medium",
+      model: "gemini-4-carbon-medium",
+      displayName: "Gemini 4 Carbon (Medium)",
+      provider: "antigravity",
+      isDefault: false,
+      defaultReasoningEffort: "medium",
+      supportedReasoningEfforts: ["low", "medium", "high"],
+    },
+    {
+      id: "gemini-4-argon-medium",
+      model: "gemini-4-argon-medium",
+      displayName: "Gemini 4 Argon (Medium)",
+      provider: "antigravity",
+      isDefault: false,
+      defaultReasoningEffort: "medium",
+      supportedReasoningEfforts: ["low", "medium", "high"],
+    },
+    {
+      id: "gemini-4-hydrogen-low",
+      model: "gemini-4-hydrogen-low",
+      displayName: "Gemini 4 Hydrogen (Low)",
+      provider: "antigravity",
+      isDefault: false,
+      defaultReasoningEffort: "low",
+      supportedReasoningEfforts: ["low", "medium", "high", "xhigh"],
+    },
+    {
+      id: "gemini-4-hydrogen-medium",
+      model: "gemini-4-hydrogen-medium",
+      displayName: "Gemini 4 Hydrogen (Medium)",
+      provider: "antigravity",
+      isDefault: false,
+      defaultReasoningEffort: "medium",
+      supportedReasoningEfforts: ["low", "medium", "high", "xhigh"],
+    },
+    {
+      id: "claude-opus-5-5-medium",
+      model: "claude-opus-5-5-medium",
+      displayName: "Claude Opus 5.5 (Medium)",
+      provider: "antigravity",
+      isDefault: false,
+      defaultReasoningEffort: "medium",
+      supportedReasoningEfforts: ["low", "medium", "high"],
+    },
+    {
+      id: "claude-sonnet-4-6-medium",
+      model: "claude-sonnet-4-6-medium",
+      displayName: "Claude Sonnet 4.6 (Medium)",
+      provider: "antigravity",
+      isDefault: false,
+      defaultReasoningEffort: "medium",
+      supportedReasoningEfforts: ["low", "medium", "high"],
+    },
+  ]),
+  codex: Object.freeze([
+    {
+      id: "gpt-5.4",
+      model: "gpt-5.4",
+      displayName: "GPT-5.4",
+      provider: "codex",
+      isDefault: true,
+      defaultReasoningEffort: "medium",
+      supportedReasoningEfforts: ["low", "medium", "high"],
+    },
+    {
+      id: "gpt-5.3-codex",
+      model: "gpt-5.3-codex",
+      displayName: "GPT-5.3 Codex",
+      provider: "codex",
+      isDefault: false,
+      defaultReasoningEffort: "medium",
+      supportedReasoningEfforts: ["low", "medium", "high"],
+    },
+  ]),
+  claude: Object.freeze([
+    {
+      id: "claude-opus-5-5",
+      model: "claude-opus-5-5",
+      displayName: "Claude Opus 5.5",
+      section: "main",
+      provider: "claude",
+      isDefault: false,
+      defaultReasoningEffort: "medium",
+      supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max"],
+    },
+    {
+      id: "claude-sonnet-5-5",
+      model: "claude-sonnet-5-5",
+      displayName: "Claude Sonnet 5.5",
+      section: "main",
+      provider: "claude",
+      isDefault: true,
+      defaultReasoningEffort: "medium",
+      supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max"],
+    },
+    {
+      id: "claude-fable-5-2",
+      model: "claude-fable-5-2",
+      displayName: "Claude Fable 5.2",
+      section: "main",
+      provider: "claude",
+      isDefault: false,
+      defaultReasoningEffort: "medium",
+      supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max"],
+    },
+    {
+      id: "claude-haiku-5-5",
+      model: "claude-haiku-5-5",
+      displayName: "Claude Haiku 5.5",
+      section: "main",
+      provider: "claude",
+      isDefault: false,
+      defaultReasoningEffort: "medium",
+      supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max"],
+    },
+    {
+      id: "claude-fable-5-1",
+      model: "claude-fable-5-1",
+      displayName: "Claude Fable 5.1",
+      section: "overflow",
+      provider: "claude",
+      isDefault: false,
+      defaultReasoningEffort: "high",
+      supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max"],
+    },
+    {
+      id: "claude-opus-4-8",
+      model: "claude-opus-4-8",
+      displayName: "Claude Opus 4.8",
+      section: "overflow",
+      provider: "claude",
+      isDefault: false,
+      defaultReasoningEffort: "high",
+      supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max"],
+    },
+    {
+      id: "claude-opus-4-7",
+      model: "claude-opus-4-7",
+      displayName: "Claude Opus 4.7",
+      section: "overflow",
+      provider: "claude",
+      isDefault: false,
+      defaultReasoningEffort: "xhigh",
+      supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max"],
+    },
+    {
+      id: "claude-opus-4-6",
+      model: "claude-opus-4-6",
+      displayName: "Claude Opus 4.6",
+      section: "overflow",
+      provider: "claude",
+      isDefault: false,
+      defaultReasoningEffort: "high",
+      supportedReasoningEfforts: ["low", "medium", "high", "max"],
+    },
+    {
+      id: "claude-sonnet-4-6",
+      model: "claude-sonnet-4-6",
+      displayName: "Claude Sonnet 4.6",
+      section: "overflow",
+      provider: "claude",
+      isDefault: false,
+      defaultReasoningEffort: "high",
+      supportedReasoningEfforts: ["low", "medium", "high", "max"],
+    },
+    {
+      id: "claude-haiku-4-5",
+      model: "claude-haiku-4-5",
+      displayName: "Claude Haiku 4.5",
+      section: "overflow",
+      provider: "claude",
+      isDefault: false,
+      defaultReasoningEffort: "",
+      supportedReasoningEfforts: [],
+    },
+  ]),
+  grok: Object.freeze([
+    {
+      id: "grok-4.7",
+      model: "grok-4.7",
+      displayName: "Grok 4.7",
+      provider: "grok",
+      isDefault: true,
+      defaultReasoningEffort: "high",
+      supportedReasoningEfforts: ["low", "medium", "high", "xhigh"],
+    },
+    {
+      id: "grok-4.7-build-fast",
+      model: "grok-4.7-build-fast",
+      displayName: "Grok 4.7 Fast",
+      provider: "grok",
+      isDefault: false,
+      defaultReasoningEffort: "high",
+      supportedReasoningEfforts: ["low", "medium", "high", "xhigh"],
+    },
+    {
+      id: "grok-4.6",
+      model: "grok-4.6",
+      displayName: "Grok 4.6",
+      provider: "grok",
+      isDefault: false,
+      defaultReasoningEffort: "high",
+      supportedReasoningEfforts: ["low", "medium", "high", "xhigh"],
+    },
+    {
+      id: "grok-4.5",
+      model: "grok-4.5",
+      displayName: "Grok 4.5",
+      provider: "grok",
+      isDefault: false,
+      defaultReasoningEffort: "high",
+      supportedReasoningEfforts: ["low", "medium", "high"],
+    },
+  ]),
+});
+
+export function normalizeUiPermissionMode(mode, fallback = "turbo") {
+  const clean = String(mode || "").trim().toLowerCase();
+  if (UI_PERMISSION_MODES.some((item) => item.value === clean)) return clean;
+  return fallback;
+}
+
+export function permissionModeDisplayLabel(mode) {
+  const clean = normalizeUiPermissionMode(mode);
+  return UI_PERMISSION_MODES.find((item) => item.value === clean)?.label || clean;
+}
+
+export function resolveModelsForProvider(modelsByProvider = {}, allModels = [], provider = "antigravity") {
+  const direct = Array.isArray(modelsByProvider?.[provider]) ? modelsByProvider[provider] : [];
+  if (direct.length) return direct;
+  const filtered = (Array.isArray(allModels) ? allModels : []).filter((m) => m.provider === provider);
+  if (filtered.length) return filtered;
+  return [...(CLIENT_FALLBACK_MODELS[provider] || [])];
+}
+
+export function providerDisplayName(provider) {
+  return PROVIDER_META[provider]?.label || provider || "Agent";
+}
+
+export function providerShortBadge(provider) {
+  return PROVIDER_META[provider]?.short || provider || "Agent";
+}
+
+export function providerVisualMeta(provider = "antigravity") {
+  switch (provider) {
+    case "antigravity":
+      return { id: "antigravity", label: "Antigravity", short: "Agy", glyph: "", iconSvg: providerIconSvg("antigravity", { size: 12 }), tone: "antigravity" };
+    case "codex":
+      return { id: "codex", label: "Codex", short: "Codex", glyph: "", iconSvg: providerIconSvg("codex", { size: 12 }), tone: "codex" };
+    case "claude":
+      return { id: "claude", label: "Claude Code", short: "Claude", glyph: "", iconSvg: providerIconSvg("claude", { size: 12 }), tone: "claude" };
+    case "grok":
+      return { id: "grok", label: "Grok", short: "Grok", glyph: "", iconSvg: providerIconSvg("grok", { size: 12 }), tone: "grok" };
+    default:
+      return {
+        id: provider || "agent",
+        label: providerDisplayName(provider),
+        short: providerShortBadge(provider),
+        glyph: "",
+        iconSvg: providerIconSvg(provider || "default", { size: 12 }),
+        tone: "default",
+      };
+  }
+}
+
+export function permissionVisualMeta(mode = "turbo") {
+  const clean = normalizeUiPermissionMode(mode, "turbo");
+  const label = permissionModeDisplayLabel(clean);
+  switch (clean) {
+    case "turbo":
+      return { value: "turbo", iconName: "bolt", icon: iconSvg("bolt", { size: 12 }), shortLabel: "Turbo", tone: "turbo", label };
+    case "full":
+      return { value: "full", iconName: "rocket", icon: iconSvg("rocket", { size: 12 }), shortLabel: "Auto", tone: "auto", label };
+    case "workspace":
+      return { value: "workspace", iconName: "edit", icon: iconSvg("edit", { size: 12 }), shortLabel: "读写", tone: "workspace", label };
+    case "safe":
+      return { value: "safe", iconName: "shield", icon: iconSvg("shield", { size: 12 }), shortLabel: "询问", tone: "safe", label };
+    case "plan":
+      return { value: "plan", iconName: "compass", icon: iconSvg("compass", { size: 12 }), shortLabel: "规划", tone: "plan", label };
+    default:
+      return { value: clean, iconName: "bolt", icon: iconSvg("bolt", { size: 12 }), shortLabel: clean, tone: "turbo", label };
+  }
+}
+
+export function compactModelBadgeLabel(rawModel = "") {
+  const clean = String(rawModel || "").trim();
+  if (!clean) return "默认";
+  const lower = clean.toLowerCase();
+  if (clean === "gemini-pro-orchestrator" || lower.includes("orchestrator")) {
+    return "Carbon";
+  }
+  if (clean === "gemini-4-carbon-high" || /carbon.*\(high\)/i.test(clean)) {
+    return "Carbon H";
+  }
+  if (clean === "gemini-4-carbon-medium" || /carbon.*\(medium\)/i.test(clean)) {
+    return "Carbon M";
+  }
+  if (lower.includes("argon")) {
+    return "Argon";
+  }
+  if (lower.includes("hydrogen")) {
+    if (lower.includes("xhigh")) return "Hydrogen XH";
+    if (lower.includes("high")) return "Hydrogen H";
+    if (lower.includes("low")) return "Hydrogen L";
+    return "Hydrogen";
+  }
+  if (lower.includes("opus")) {
+    const ver = clean.match(/(\d+(?:[.-]\d+)?)/);
+    return ver ? `Opus ${ver[1].replace(/-/g, ".")}` : "Opus";
+  }
+  if (lower.includes("sonnet")) {
+    const ver = clean.match(/(\d+(?:[.-]\d+)?)/);
+    return ver ? `Sonnet ${ver[1].replace(/-/g, ".")}` : "Sonnet";
+  }
+  if (lower.includes("fable")) {
+    const ver = clean.match(/(\d+(?:[.-]\d+)?)/);
+    return ver ? `Fable ${ver[1].replace(/-/g, ".")}` : "Fable";
+  }
+  if (lower.includes("haiku")) {
+    const ver = clean.match(/(\d+(?:[.-]\d+)?)/);
+    return ver ? `Haiku ${ver[1].replace(/-/g, ".")}` : "Haiku";
+  }
+  if (clean === "gpt-5.3-codex" || /5\.3.*codex/i.test(clean)) {
+    return "5.3 Codex";
+  }
+  if (lower.includes("gpt-")) {
+    return clean.replace(/^.*?(gpt-[0-9a-z.-]+).*$/i, "$1").toUpperCase().slice(0, 12);
+  }
+  if (lower.startsWith("grok-")) {
+    if (lower.includes("4.7-build-fast") || lower.includes("4.7 fast")) return "Grok 4.7F";
+    const ver = clean.match(/grok-(\d+(?:[.-]\d+)?)/i);
+    return ver ? `Grok ${ver[1].replace(/-/g, ".")}` : clean.slice(0, 12);
+  }
+  const stripped = clean
+    .replace(/\s*\([^)]*\)\s*/g, " ")
+    .replace(/^(Claude|Gemini)\s+/i, "")
+    .trim();
+  if (!stripped) return "默认";
+  return stripped.length > 12 ? stripped.slice(0, 12) : stripped;
+}
+
+export function compactEffortBadgeLabel(effort = "") {
+  const clean = String(effort || "").trim().toLowerCase();
+  const map = { low: "L", medium: "M", high: "H", xhigh: "XH", max: "MAX" };
+  return map[clean] || "";
+}
+
+function escapeAttrHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+const TELEMETRY_PROVIDER_ORDER = ["codex", "claude", "antigravity", "grok"];
+
+export function formatTokensPerSec(value = 0) {
+  const num = Number(value);
+  if (!Number.isFinite(num) || num <= 0) return "0";
+  if (num >= 100) return String(Math.round(num));
+  return Number(num.toFixed(1)).toString();
+}
+
+function normalizeResetSec(raw) {
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return n > 1e12 ? Math.floor(n / 1000) : Math.floor(n);
+}
+
+function parseFinitePercent(raw) {
+  if (raw === null || raw === undefined || raw === "") return null;
+  const num = Number(raw);
+  return Number.isFinite(num) ? Math.max(0, Math.min(100, Math.round(num))) : null;
+}
+
+function classifyTelemetryTone(remainingPercent, fallbackStatus = "ok") {
+  if (Number.isFinite(remainingPercent)) {
+    if (remainingPercent <= 5) return "danger";
+    if (remainingPercent <= 25) return "warn";
+    return "ok";
+  }
+  if (fallbackStatus === "exhausted" || fallbackStatus === "unavailable") return "danger";
+  if (fallbackStatus === "low" || fallbackStatus === "warn") return "warn";
+  return "ok";
+}
+
+function isSameQuotaBucket(a, b) {
+  if (!a || !b) return false;
+  if (a === b) return true;
+  if (a.id && b.id && String(a.id).toLowerCase() === String(b.id).toLowerCase()) return true;
+  if (a.windowKind && b.windowKind && String(a.windowKind) === String(b.windowKind)) {
+    const la = String(a.label || "").trim().toLowerCase();
+    const lb = String(b.label || "").trim().toLowerCase();
+    if (!la || !lb || la === lb) return true;
+  }
+  return false;
+}
+
+function classifyQuotaBucketSlot(bucket) {
+  const kind = String(bucket?.windowKind || "");
+  const id = String(bucket?.id || "").toLowerCase();
+  const label = String(bucket?.label || "").toLowerCase();
+  if (kind === "third_party_5h" || (id.includes("3p") && id.includes("5h"))) return "third_party_5h";
+  if (kind === "third_party_weekly" || (id.includes("3p") && (id.includes("week") || id.includes("7d")))) return "third_party_weekly";
+  if (kind === "five_hour" || id === "5h" || id.includes("5h") || id.includes("five_hour") || label.includes("5h")) return "five_hour";
+  if (kind === "weekly" || id.includes("week") || id.includes("7d") || id.includes("seven_day") || label.includes("周") || label.includes("7天")) return "weekly";
+  return "";
+}
+
+function resolveQuotaWindowsForUi(quota) {
+  if (!quota || typeof quota !== "object") {
+    return { fiveHour: null, weekly: null, thirdPartyFiveHour: null, thirdPartyWeekly: null, extraBuckets: [] };
+  }
+  const buckets = Array.isArray(quota.buckets) ? quota.buckets : [];
+  const existing = quota.windows && typeof quota.windows === "object" ? quota.windows : {};
+  let fiveHour = existing.fiveHour || null;
+  let weekly = existing.weekly || null;
+  let thirdPartyFiveHour = existing.thirdPartyFiveHour || null;
+  let thirdPartyWeekly = existing.thirdPartyWeekly || null;
+  const extraBuckets = [];
+  const seenExtraKeys = new Set();
+
+  for (const b of buckets) {
+    if (!b || typeof b !== "object") continue;
+    const slot = classifyQuotaBucketSlot(b);
+    if (slot === "third_party_5h") {
+      if (!thirdPartyFiveHour) thirdPartyFiveHour = b;
+      continue;
+    }
+    if (slot === "third_party_weekly") {
+      if (!thirdPartyWeekly) thirdPartyWeekly = b;
+      continue;
+    }
+    if (slot === "five_hour") {
+      if (!fiveHour) {
+        fiveHour = b;
+        continue;
+      }
+      if (isSameQuotaBucket(b, fiveHour)) continue;
+    }
+    if (slot === "weekly") {
+      if (!weekly) {
+        weekly = b;
+        continue;
+      }
+      if (isSameQuotaBucket(b, weekly)) continue;
+    }
+    if (
+      isSameQuotaBucket(b, fiveHour)
+      || isSameQuotaBucket(b, weekly)
+      || isSameQuotaBucket(b, thirdPartyFiveHour)
+      || isSameQuotaBucket(b, thirdPartyWeekly)
+    ) {
+      continue;
+    }
+    const extraKey = `${String(b.id || "").toLowerCase()}::${String(b.label || "").toLowerCase()}`;
+    if (seenExtraKeys.has(extraKey)) continue;
+    seenExtraKeys.add(extraKey);
+    extraBuckets.push(b);
+  }
+  return { fiveHour, weekly, thirdPartyFiveHour, thirdPartyWeekly, extraBuckets };
+}
+
+function selectRepresentativeProfilesForProvider(profiles = [], provider = "") {
+  const scoped = filterProfilesByProvider(profiles, provider);
+  if (!scoped.length) return [];
+  const installed = scoped.filter((p) => p.installed !== false && !p.health?.disabled);
+  const pool = installed.length ? installed : scoped;
+  const nonEmptyPool = pool.filter((p) => !(
+    p.authenticated === false
+    || (provider === "grok" && p.id === "default" && (p.quota?.status === "unavailable" || p.quota?.statusTone === "unknown"))
+  ));
+  const activePool = nonEmptyPool.length ? nonEmptyPool : pool;
+
+  const deduped = [];
+  const seenAccounts = new Set();
+  for (const p of activePool) {
+    const accountKey = String(
+      p.account?.email
+      || p.quota?.accountLabel
+      || p.endpointLabel
+      || "",
+    ).trim().toLowerCase();
+    if (accountKey) {
+      if (seenAccounts.has(accountKey)) continue;
+      seenAccounts.add(accountKey);
+    }
+    deduped.push(p);
+  }
+  return deduped;
+}
+
+function compactBucketDetailText(detail = "") {
+  const clean = String(detail || "").trim();
+  if (!clean) return "";
+  return clean.replace(/^近\s*/, "").replace(/\s+消息$/, "次").slice(0, 14);
+}
+
+function renderWindowChipHtml(tagLabel, bucket, { nowSec, fallbackStatus = "ok" } = {}) {
+  if (!bucket) return "";
+  const pct = parseFinitePercent(bucket.remainingPercent);
+  const tone = classifyTelemetryTone(pct, fallbackStatus);
+  const resetSec = normalizeResetSec(bucket.resetsAt);
+  const resetRel = resetSec ? formatQuotaResetRelative(resetSec, nowSec) : "";
+  const titleParts = [bucket.label || tagLabel];
+  if (pct != null) titleParts.push(`剩余 ${pct}%`);
+  if (bucket.detail) titleParts.push(String(bucket.detail));
+  if (resetRel) titleParts.push(resetRel);
+
+  let valueText = pct != null ? `${pct}%` : compactBucketDetailText(bucket.detail) || "正常";
+  if (pct != null && pct <= 25 && resetRel) {
+    valueText += ` · ${resetRel.replace(/后重置$/, "")}`;
+  }
+
+  return `<span class="telemetry-quota-chip is-${tone}" title="${escapeAttrHtml(titleParts.join(" · "))}">`
+    + `<span class="telemetry-chip-k">${escapeAttrHtml(tagLabel)}</span>`
+    + `<span class="telemetry-chip-v">${escapeAttrHtml(valueText)}</span>`
+    + `</span>`;
+}
+
+function compactCreditCount(raw) {
+  const num = Number(raw);
+  if (!Number.isFinite(num) || num < 0) return "";
+  if (num >= 10000) return `${(num / 10000).toFixed(1)}w`;
+  if (num >= 1000) return `${(num / 1000).toFixed(1)}k`;
+  return String(Math.round(num));
+}
+
+function buildCompactQuotaChipsHtml(provider, repProfiles, nowSec) {
+  if (!repProfiles.length) {
+    return {
+      chipsHtml: `<span class="telemetry-quota-chip is-muted">未接入</span>`,
+      meterPct: null,
+      meterTone: "muted",
+    };
+  }
+
+  const chips = [];
+  const pctCandidates = [];
+  let worstTone = "ok";
+  const bumpTone = (tone) => {
+    if (tone === "danger") worstTone = "danger";
+    else if (tone === "warn" && worstTone !== "danger") worstTone = "warn";
+  };
+
+  if (repProfiles.length > 1) {
+    for (const p of repProfiles.slice(0, 2)) {
+      const q = p.quota;
+      const qTone = q?.statusTone || q?.status || "ok";
+      const win = resolveQuotaWindowsForUi(q);
+      const shortName = String(q?.planLabel || "").trim()
+        || String(p.health?.alias || p.label || p.id || "")
+          .replace(/^(Codex|Claude|Antigravity|Grok)\s*[·-]?\s*/i, "")
+          .trim()
+          .slice(0, 8)
+        || p.id;
+      const parts = [];
+      const pct5 = parseFinitePercent(win.fiveHour?.remainingPercent);
+      if (pct5 != null) {
+        parts.push(`5h ${pct5}%`);
+        pctCandidates.push(pct5);
+      }
+      const pctW = parseFinitePercent(win.weekly?.remainingPercent);
+      if (pctW != null) {
+        parts.push(`周 ${pctW}%`);
+        pctCandidates.push(pctW);
+      }
+      if (!parts.length && win.extraBuckets[0]) {
+        const b0 = win.extraBuckets[0];
+        const pctB0 = parseFinitePercent(b0.remainingPercent);
+        parts.push(pctB0 != null ? `${pctB0}%` : (b0.label || "正常"));
+      }
+      const creditBalance = q?.credits?.balance;
+      if (creditBalance !== null && creditBalance !== undefined && Number.isFinite(Number(creditBalance))) {
+        const cr = compactCreditCount(creditBalance);
+        if (cr) parts.push(`积分${cr}`);
+      } else {
+        const creditBucket = win.extraBuckets.find((b) => String(b.id || "").includes("credit") || String(b.label || "").includes("积分"));
+        if (creditBucket?.detail) {
+          const cr = compactCreditCount(creditBucket.detail.replace(/[^\d.]/g, ""));
+          if (cr) parts.push(`积分${cr}`);
+        }
+      }
+      const chipText = parts.join(" · ") || q?.summaryText || q?.headline || (qTone === "unavailable" ? "不可用" : "就绪");
+      const tone = classifyTelemetryTone(
+        win.fiveHour?.remainingPercent ?? win.weekly?.remainingPercent ?? null,
+        qTone,
+      );
+      bumpTone(tone);
+      chips.push(
+        `<span class="telemetry-quota-chip is-${tone}" title="${escapeAttrHtml(`${shortName}: ${chipText}`)}">`
+        + `<span class="telemetry-chip-k">${escapeAttrHtml(shortName)}</span>`
+        + `<span class="telemetry-chip-v">${escapeAttrHtml(chipText)}</span>`
+        + `</span>`,
+      );
+    }
+  } else {
+    const p = repProfiles[0];
+    const q = p.quota;
+    const qTone = q?.statusTone || q?.status || "ok";
+    if (p.authenticated === false || !q || q.status === "unavailable") {
+      return {
+        chipsHtml: `<span class="telemetry-quota-chip is-muted" title="${escapeAttrHtml(q?.detail || "未认证或仅本地历史")}">${escapeAttrHtml(q?.summaryText || q?.headline || "仅历史")}</span>`,
+        meterPct: null,
+        meterTone: "muted",
+      };
+    }
+    const win = resolveQuotaWindowsForUi(q);
+    if (win.fiveHour) {
+      chips.push(renderWindowChipHtml("5h", win.fiveHour, { nowSec, fallbackStatus: qTone }));
+      const p5 = parseFinitePercent(win.fiveHour.remainingPercent);
+      if (p5 != null) {
+        pctCandidates.push(p5);
+        bumpTone(classifyTelemetryTone(p5, qTone));
+      }
+    }
+    if (win.weekly) {
+      chips.push(renderWindowChipHtml("周", win.weekly, { nowSec, fallbackStatus: qTone }));
+      const pw = parseFinitePercent(win.weekly.remainingPercent);
+      if (pw != null) {
+        pctCandidates.push(pw);
+        bumpTone(classifyTelemetryTone(pw, qTone));
+      }
+    }
+    if (provider === "antigravity" && (win.thirdPartyFiveHour || win.thirdPartyWeekly)) {
+      const tp = win.thirdPartyFiveHour || win.thirdPartyWeekly;
+      chips.push(renderWindowChipHtml("3P", tp, { nowSec, fallbackStatus: qTone }));
+      const pt = parseFinitePercent(tp.remainingPercent);
+      if (pt != null) pctCandidates.push(pt);
+    }
+    for (const b of win.extraBuckets.slice(0, Math.max(0, 3 - chips.length))) {
+      const shortK = String(b.label || b.id || "").replace(/^(订阅|Grok\s*)/i, "").slice(0, 10) || "额度";
+      const pb = parseFinitePercent(b.remainingPercent);
+      if (pb != null) {
+        pctCandidates.push(pb);
+        bumpTone(classifyTelemetryTone(pb, qTone));
+        chips.push(renderWindowChipHtml(shortK, b, { nowSec, fallbackStatus: qTone }));
+      } else if (b.detail) {
+        const shortV = String(b.id || "").includes("credit")
+          ? (compactCreditCount(b.detail.replace(/[^\d.]/g, "")) || b.detail.slice(0, 10))
+          : b.detail.slice(0, 12);
+        chips.push(
+          `<span class="telemetry-quota-chip is-ok" title="${escapeAttrHtml(`${b.label}: ${b.detail}`)}">`
+          + `<span class="telemetry-chip-k">${escapeAttrHtml(shortK)}</span>`
+          + `<span class="telemetry-chip-v">${escapeAttrHtml(shortV)}</span>`
+          + `</span>`,
+        );
+      }
+    }
+    const hasCreditBucket = win.extraBuckets.some((b) => String(b.id || "").includes("credit") || String(b.label || "").includes("积分"));
+    if (!hasCreditBucket && q.credits?.balance != null && chips.length < 3) {
+      const cr = compactCreditCount(q.credits.balance);
+      if (cr) {
+        chips.push(
+          `<span class="telemetry-quota-chip is-ok" title="${escapeAttrHtml(`积分余额 ${q.credits.balance}`)}">`
+          + `<span class="telemetry-chip-k">积分</span>`
+          + `<span class="telemetry-chip-v">${escapeAttrHtml(cr)}</span>`
+          + `</span>`,
+        );
+      }
+    }
+    if (!chips.length) {
+      const hint = q.summaryText || q.headline || q.detail || "额度就绪";
+      chips.push(`<span class="telemetry-quota-chip is-${classifyTelemetryTone(null, qTone)}">${escapeAttrHtml(hint)}</span>`);
+    }
+  }
+
+  const meterPct = pctCandidates.length ? Math.min(...pctCandidates) : null;
+  return { chipsHtml: chips.join(""), meterPct, meterTone: worstTone };
+}
+
+function isTelemetryPlaceholderProfile(profile, siblingCount = 1) {
+  if (!profile) return true;
+  if (profile.installed === false) return true;
+  if (siblingCount <= 1) return false;
+  if (profile.health?.disabled) return true;
+  if (profile.authenticated === false) return true;
+  if (profile.quota?.status === "unavailable") return true;
+  return false;
+}
+
+function compactEmailDomainShort(email = "") {
+  const clean = String(email || "").trim();
+  const atIdx = clean.indexOf("@");
+  if (atIdx < 0) return "";
+  return clean.slice(atIdx + 1).split(".")[0] || "";
+}
+
+function formatTelemetryCardTitle(provider, profile, totalForProvider) {
+  const meta = providerVisualMeta(provider);
+  const alias = String(profile?.health?.alias || "").trim();
+  if (alias) return alias;
+  if (totalForProvider <= 1) return meta.short;
+
+  const rawLabel = String(profile?.label || profile?.id || "").trim();
+  const domainShort = compactEmailDomainShort(profile?.account?.email || profile?.quota?.accountLabel || "");
+  if (profile?.id === "default" || rawLabel === `${meta.short} 默认` || rawLabel === `${meta.label} 默认`) {
+    return domainShort ? `${meta.short} · ${domainShort}` : `${meta.short} 默认`;
+  }
+  return rawLabel || `${meta.short} · ${profile?.id || ""}`;
+}
+
+export function buildSelectableTelemetryItems(profiles = []) {
+  const safeProfiles = Array.isArray(profiles) ? profiles : [];
+  const items = [];
+
+  for (const prov of TELEMETRY_PROVIDER_ORDER) {
+    const meta = providerVisualMeta(prov);
+    const scoped = filterProfilesByProvider(safeProfiles, prov).filter((p) => p && p.installed !== false);
+    if (!scoped.length) continue;
+
+    if (prov === "antigravity") {
+      const grouped = [];
+      const groupByAccount = new Map();
+      for (const p of scoped) {
+        const acct = String(
+          p.account?.email
+          || p.quota?.accountLabel
+          || p.endpointLabel
+          || "",
+        ).trim().toLowerCase();
+        const fallbackGroup = (p.id === "desktop" || p.id === "cli") ? "__agy_shared__" : `id:${p.id}`;
+        const gKey = acct || fallbackGroup;
+        if (!groupByAccount.has(gKey)) {
+          const g = [];
+          groupByAccount.set(gKey, g);
+          grouped.push(g);
+        }
+        groupByAccount.get(gKey).push(p);
+      }
+
+      const usableGroups = grouped.filter((g) => g.some((p) => !isTelemetryPlaceholderProfile(p, grouped.length)));
+      const hasUsable = usableGroups.length > 0;
+      const seenTitles = new Map();
+
+      for (const group of grouped) {
+        const primary = group.find((p) => p.id === "desktop") || group[0];
+        const key = primary.key || `antigravity:${primary.id}`;
+        const profileKeys = group.map((p) => p.key || `antigravity:${p.id}`);
+        const placeholder = group.every((p) => isTelemetryPlaceholderProfile(p, grouped.length));
+        let shortTitle = grouped.length <= 1
+          ? meta.short
+          : formatTelemetryCardTitle(prov, primary, grouped.length);
+        const dupIdx = (seenTitles.get(shortTitle) || 0) + 1;
+        seenTitles.set(shortTitle, dupIdx);
+        if (dupIdx > 1) {
+          const dom = compactEmailDomainShort(primary.account?.email || primary.quota?.accountLabel || "");
+          shortTitle = dom ? `${shortTitle} (${dom})` : `${shortTitle} (${primary.id})`;
+        }
+        const identity = formatProfileIdentityHint(primary);
+        const pickerLabel = identity && !shortTitle.toLowerCase().includes(identity.toLowerCase())
+          ? `${shortTitle} (${identity})`
+          : shortTitle;
+
+        items.push({
+          key,
+          provider: prov,
+          profileKeys,
+          profiles: [primary],
+          shortTitle,
+          pickerLabel,
+          defaultVisible: !(grouped.length > 1 && hasUsable && placeholder),
+        });
+      }
+      continue;
+    }
+
+    const hasUsable = scoped.some((p) => !isTelemetryPlaceholderProfile(p, scoped.length));
+    const seenTitles = new Map();
+    for (const p of scoped) {
+      const key = p.key || `${prov}:${p.id}`;
+      const placeholder = isTelemetryPlaceholderProfile(p, scoped.length);
+      let shortTitle = formatTelemetryCardTitle(prov, p, scoped.length);
+      const dupIdx = (seenTitles.get(shortTitle) || 0) + 1;
+      seenTitles.set(shortTitle, dupIdx);
+      if (dupIdx > 1) {
+        const dom = compactEmailDomainShort(p.account?.email || p.quota?.accountLabel || "");
+        shortTitle = dom ? `${shortTitle} (${dom})` : `${shortTitle} (${p.id})`;
+      }
+      const identity = formatProfileIdentityHint(p);
+      const baseLabel = String(p.health?.alias || p.label || shortTitle).trim() || shortTitle;
+      const pickerLabel = identity && !baseLabel.toLowerCase().includes(identity.toLowerCase())
+        ? `${baseLabel} (${identity})`
+        : baseLabel;
+
+      items.push({
+        key,
+        provider: prov,
+        profileKeys: [key],
+        profiles: [p],
+        shortTitle,
+        pickerLabel,
+        defaultVisible: !(scoped.length > 1 && hasUsable && placeholder),
+      });
+    }
+  }
+
+  return items;
+}
+
+export function resolveVisibleTelemetryKeys(items = [], savedPrefs = null) {
+  const list = Array.isArray(items) ? items : [];
+  if (!list.length) return [];
+
+  if (savedPrefs == null) {
+    return list.filter((item) => item.defaultVisible).map((item) => item.key);
+  }
+
+  if (Array.isArray(savedPrefs)) {
+    const selectedSet = new Set(savedPrefs.map((k) => String(k || "")));
+    return list.filter((item) => selectedSet.has(item.key)).map((item) => item.key);
+  }
+
+  if (typeof savedPrefs === "object") {
+    const hasSelected = Array.isArray(savedPrefs.selectedKeys);
+    if (!hasSelected) {
+      return list.filter((item) => item.defaultVisible).map((item) => item.key);
+    }
+    const selectedSet = new Set(savedPrefs.selectedKeys.map((k) => String(k || "")));
+    const knownSet = new Set(
+      (Array.isArray(savedPrefs.knownKeys) ? savedPrefs.knownKeys : []).map((k) => String(k || "")),
+    );
+    return list
+      .filter((item) => selectedSet.has(item.key) || (item.defaultVisible && knownSet.size > 0 && !knownSet.has(item.key)))
+      .map((item) => item.key);
+  }
+
+  return list.filter((item) => item.defaultVisible).map((item) => item.key);
+}
+
+function resolveTelemetryItemMetrics(item, byProvider = {}, byProfile = null, defaultCountByProv = {}) {
+  if (byProfile && typeof byProfile === "object") {
+    let matched = false;
+    let running = 0;
+    let queued = 0;
+    let tokensPerSec = 0;
+    for (const pKey of item.profileKeys) {
+      const stat = byProfile[pKey];
+      if (!stat) continue;
+      matched = true;
+      running += Math.max(0, Number(stat.runningCount || 0));
+      queued += Math.max(0, Number(stat.queuedCount || 0));
+      tokensPerSec += Math.max(0, Number(stat.tokensPerSec || 0));
+    }
+    if (matched) {
+      return {
+        running,
+        queued,
+        tokensPerSec: Math.round(tokensPerSec * 10) / 10,
+      };
+    }
+  }
+
+  const provStat = byProvider?.[item.provider] || {};
+  const provDefaultCount = defaultCountByProv[item.provider] || 1;
+  if (provDefaultCount <= 1 && item.defaultVisible) {
+    return {
+      running: Math.max(0, Number(provStat.runningCount || 0)),
+      queued: Math.max(0, Number(provStat.queuedCount || 0)),
+      tokensPerSec: Math.max(0, Number(provStat.tokensPerSec || 0)),
+    };
+  }
+
+  const threads = Array.isArray(provStat.activeThreads) ? provStat.activeThreads : [];
+  const matching = threads.filter((t) => item.profileKeys.some((pk) => String(t?.id || "").startsWith(`${pk}:`)));
+  return {
+    running: matching.length,
+    queued: 0,
+    tokensPerSec: matching.length > 0 ? Math.max(0, Number(provStat.tokensPerSec || 0)) : 0,
+  };
+}
+
+export function summarizeTelemetryMobileBadge(profiles = [], telemetry = null, visibleKeys = null, { nowSec = Math.floor(Date.now() / 1000) } = {}) {
+  const safeProfiles = Array.isArray(profiles) ? profiles : [];
+  const items = buildSelectableTelemetryItems(safeProfiles);
+  const resolvedKeys = resolveVisibleTelemetryKeys(items, visibleKeys);
+  const visibleSet = new Set(resolvedKeys);
+  const visibleItems = items.filter((item) => visibleSet.has(item.key));
+
+  const byProvider = telemetry?.byProvider || {};
+  const byProfile = telemetry?.byProfile || null;
+  let running = 0;
+  let queued = 0;
+
+  if (byProfile && visibleItems.length) {
+    for (const prov of TELEMETRY_PROVIDER_ORDER) {
+      running += Math.max(0, Number(byProvider[prov]?.runningCount || 0));
+      queued += Math.max(0, Number(byProvider[prov]?.queuedCount || 0));
+    }
+  } else if (telemetry?.totals) {
+    running = Math.max(0, Number(telemetry.totals.runningCount || 0));
+    queued = Math.max(0, Number(telemetry.totals.queuedCount || 0));
+  } else {
+    for (const prov of TELEMETRY_PROVIDER_ORDER) {
+      running += Math.max(0, Number(byProvider[prov]?.runningCount || 0));
+      queued += Math.max(0, Number(byProvider[prov]?.queuedCount || 0));
+    }
+  }
+
+  let worstTone = "ok";
+  const quotaTargetItems = visibleItems.length ? visibleItems : items;
+  for (const item of quotaTargetItems) {
+    const { meterTone } = buildCompactQuotaChipsHtml(item.provider, item.profiles, nowSec);
+    if (meterTone === "danger") {
+      worstTone = "danger";
+      break;
+    }
+    if (meterTone === "warn") {
+      worstTone = "warn";
+    }
+  }
+
+  const text = running > 0 ? `${running}运行` : (queued > 0 ? `${queued}排队` : "额度");
+  const dotClass = running > 0
+    ? "is-running"
+    : (worstTone === "danger" ? "is-danger" : (worstTone === "warn" ? "is-warn" : ""));
+
+  return {
+    text,
+    dotClass,
+    runningCount: running,
+    queuedCount: queued,
+    worstTone,
+  };
+}
+
+function renderTelemetryPickerPanelHtml(items, visibleSet) {
+  return `<div class="telemetry-picker-panel" role="group" aria-label="选择要显示的 Agent 实例">
+    <div class="telemetry-picker-head">
+      <span class="telemetry-picker-title">勾选展示实例 (${visibleSet.size}/${items.length})</span>
+      <div class="telemetry-picker-quick">
+        <button type="button" class="telemetry-picker-link" data-telemetry-pick-action="default">恢复默认</button>
+        <button type="button" class="telemetry-picker-link" data-telemetry-pick-action="all">全选</button>
+      </div>
+    </div>
+    <div class="telemetry-picker-pills">
+      ${items.map((item) => {
+        const checked = visibleSet.has(item.key);
+        const meta = providerVisualMeta(item.provider);
+        return `<button type="button" class="telemetry-pick-pill ${checked ? "is-checked" : ""}" data-telemetry-pick-key="${escapeAttrHtml(item.key)}" aria-pressed="${checked ? "true" : "false"}" title="${escapeAttrHtml(item.pickerLabel)}">`
+          + `<span class="telemetry-pick-check">${checked ? iconSvg("check", { size: 10 }) : ""}</span>`
+          + `<span class="telemetry-provider-glyph is-${escapeAttrHtml(meta.tone)}">${providerIconSvg(item.provider, { size: 12 })}</span>`
+          + `<span class="telemetry-pick-name">${escapeAttrHtml(item.pickerLabel)}</span>`
+          + `</button>`;
+      }).join("")}
+    </div>
+  </div>`;
+}
+
+function renderTelemetryDrawerHtml(profiles, byProvider, { providerFilter, nowSec } = {}) {
+  const runningEntries = [];
+  for (const prov of TELEMETRY_PROVIDER_ORDER) {
+    const stat = byProvider?.[prov];
+    const threads = Array.isArray(stat?.activeThreads) ? stat.activeThreads : [];
+    for (const t of threads) {
+      if (!t?.id) continue;
+      runningEntries.push({ provider: prov, id: t.id, title: t.title || t.id });
+    }
+  }
+
+  const activeThreadsHtml = runningEntries.length
+    ? `<div class="telemetry-drawer-section">
+        <div class="telemetry-drawer-heading">正在运行的任务 (${runningEntries.length})</div>
+        <div class="telemetry-running-pills">
+          ${runningEntries.map((item) => {
+            const meta = providerVisualMeta(item.provider);
+            return `<button type="button" class="telemetry-jump-pill is-${escapeAttrHtml(meta.tone)}" data-telemetry-jump-thread="${escapeAttrHtml(item.id)}" title="点击跳转到该会话">`
+              + `<span class="telemetry-jump-badge">${providerIconSvg(item.provider, { size: 11 })} ${escapeAttrHtml(meta.short)}</span>`
+              + `<span class="telemetry-jump-title">${escapeAttrHtml(item.title)}</span>`
+              + `</button>`;
+          }).join("")}
+        </div>
+      </div>`
+    : `<div class="telemetry-drawer-section">
+        <div class="telemetry-drawer-empty">当前所有 Agent 均无正在执行的任务</div>
+      </div>`;
+
+  const accountCards = [];
+  for (const prov of TELEMETRY_PROVIDER_ORDER) {
+    const meta = providerVisualMeta(prov);
+    const scoped = filterProfilesByProvider(profiles, prov);
+    const usable = scoped.filter((p) => !(scoped.length > 1 && isTelemetryPlaceholderProfile(p, scoped.length)));
+    const list = usable.length ? usable : scoped;
+    if (!list.length) continue;
+
+    for (const p of list) {
+      const q = p.quota;
+      const qTone = q?.statusTone || q?.status || "ok";
+      const win = resolveQuotaWindowsForUi(q);
+      const identity = formatProfileIdentityHint(p);
+      const titleName = p.health?.alias || p.label || p.id || meta.label;
+      const subParts = [];
+      const planLabel = String(q?.planLabel || "").trim();
+      if (planLabel && !titleName.toLowerCase().includes(planLabel.toLowerCase())) subParts.push(planLabel);
+      if (identity && !titleName.toLowerCase().includes(identity.toLowerCase())) subParts.push(identity);
+      const bucketList = [
+        win.fiveHour,
+        win.weekly,
+        win.thirdPartyFiveHour,
+        win.thirdPartyWeekly,
+        ...win.extraBuckets,
+      ].filter(Boolean);
+
+      const rows = bucketList.map((b) => {
+        const pct = parseFinitePercent(b.remainingPercent);
+        const tone = classifyTelemetryTone(pct, qTone);
+        const resetSec = normalizeResetSec(b.resetsAt);
+        const resetRel = resetSec ? formatQuotaResetRelative(resetSec, nowSec) : "";
+        const rightText = pct != null
+          ? `剩 ${pct}%${resetRel ? ` · ${resetRel}` : ""}`
+          : (b.detail || "正常");
+        return `<div class="telemetry-drawer-bucket">`
+          + `<span class="telemetry-db-label">${escapeAttrHtml(b.label || b.id)}</span>`
+          + `<span class="telemetry-db-val is-${tone}">${escapeAttrHtml(rightText)}</span>`
+          + `</div>`;
+      });
+
+      const hasCreditRow = bucketList.some((b) => String(b.id || "").includes("credit") || String(b.label || "").includes("积分"));
+      if (!hasCreditRow && q?.credits?.balance != null) {
+        rows.push(
+          `<div class="telemetry-drawer-bucket">`
+          + `<span class="telemetry-db-label">积分</span>`
+          + `<span class="telemetry-db-val is-ok">${escapeAttrHtml(String(q.credits.balance))}</span>`
+          + `</div>`,
+        );
+      }
+
+      const rowsHtml = rows.length
+        ? rows.join("")
+        : `<div class="telemetry-drawer-bucket"><span class="telemetry-db-label">状态</span><span class="telemetry-db-val">${escapeAttrHtml(q?.summaryText || q?.detail || q?.headline || "就绪")}</span></div>`;
+
+      const filterActive = providerFilter === prov;
+      accountCards.push(`<div class="telemetry-drawer-card">
+        <div class="telemetry-drawer-card-head">
+          <div class="telemetry-drawer-card-title">
+            <span class="telemetry-provider-glyph is-${escapeAttrHtml(meta.tone)}">${providerIconSvg(prov, { size: 12 })}</span>
+            <span>${escapeAttrHtml(titleName)}</span>
+            ${subParts.length ? `<span class="telemetry-drawer-sub">${escapeAttrHtml(subParts.join(" · "))}</span>` : ""}
+          </div>
+          <button type="button" class="telemetry-filter-btn ${filterActive ? "is-active" : ""}" data-telemetry-filter-provider="${escapeAttrHtml(prov)}">${filterActive ? "取消筛选" : "只看此 Agent"}</button>
+        </div>
+        <div class="telemetry-drawer-buckets">${rowsHtml}</div>
+      </div>`);
+    }
+  }
+
+  return `<div class="telemetry-drawer" role="region" aria-label="Agent 实时运行与额度明细">
+    ${activeThreadsHtml}
+    ${accountCards.length ? `<div class="telemetry-drawer-grid">${accountCards.join("")}</div>` : ""}
+  </div>`;
+}
+
+function formatSimplifiedQuotaSummary(provider, repProfiles = [], nowSec = Math.floor(Date.now() / 1000)) {
+  if (!repProfiles.length) return { summaryText: "未接入", tone: "muted" };
+  const p = repProfiles[0];
+  const q = p?.quota;
+  const qTone = q?.statusTone || q?.status || "ok";
+  if (p?.authenticated === false || !q || q.status === "unavailable") {
+    return { summaryText: q?.summaryText || q?.headline || "未认证", tone: "muted" };
+  }
+
+  const win = resolveQuotaWindowsForUi(q);
+  const parts = [];
+  const pcts = [];
+  let worstTone = "ok";
+  const bumpTone = (tone) => {
+    if (tone === "danger") worstTone = "danger";
+    else if (tone === "warn" && worstTone !== "danger") worstTone = "warn";
+  };
+
+  const p5 = parseFinitePercent(win.fiveHour?.remainingPercent);
+  if (p5 != null) {
+    parts.push(`5h ${p5}%`);
+    pcts.push(p5);
+    bumpTone(classifyTelemetryTone(p5, qTone));
+  } else if (win.fiveHour?.detail) {
+    parts.push(`5h ${compactBucketDetailText(win.fiveHour.detail)}`);
+  }
+  const pw = parseFinitePercent(win.weekly?.remainingPercent);
+  if (pw != null) {
+    parts.push(`周 ${pw}%`);
+    pcts.push(pw);
+    bumpTone(classifyTelemetryTone(pw, qTone));
+  } else if (win.weekly?.detail) {
+    parts.push(`周 ${compactBucketDetailText(win.weekly.detail)}`);
+  }
+  if (!parts.length && provider === "antigravity" && (win.thirdPartyFiveHour || win.thirdPartyWeekly)) {
+    const tp = win.thirdPartyFiveHour || win.thirdPartyWeekly;
+    const pt = parseFinitePercent(tp.remainingPercent);
+    if (pt != null) {
+      parts.push(`3P ${pt}%`);
+      pcts.push(pt);
+      bumpTone(classifyTelemetryTone(pt, qTone));
+    }
+  }
+  for (const b of win.extraBuckets) {
+    if (parts.length >= 2) break;
+    const shortK = String(b.label || b.id || "").replace(/^(订阅|Grok\s*)/i, "").slice(0, 10) || "额度";
+    const pb = parseFinitePercent(b.remainingPercent);
+    if (pb != null) {
+      parts.push(`${shortK} ${pb}%`);
+      pcts.push(pb);
+      bumpTone(classifyTelemetryTone(pb, qTone));
+    } else if (b.detail && (String(b.id || "").includes("credit") || String(b.label || "").includes("积分"))) {
+      const cr = compactCreditCount(b.detail.replace(/[^\d.]/g, ""));
+      if (cr) parts.push(`积分 ${cr}`);
+    }
+  }
+  if (parts.length < 2 && q.credits?.balance != null) {
+    const hasCreditPart = parts.some((x) => x.includes("积分"));
+    const cr = compactCreditCount(q.credits.balance);
+    if (!hasCreditPart && cr) parts.push(`积分 ${cr}`);
+  }
+  if (!parts.length) {
+    return {
+      summaryText: q.summaryText || q.headline || "就绪",
+      tone: classifyTelemetryTone(null, qTone),
+    };
+  }
+  return {
+    summaryText: parts.slice(0, 2).join(" · "),
+    tone: pcts.length ? worstTone : classifyTelemetryTone(null, qTone),
+  };
+}
+
+function itemMatchesActiveTarget(item, activeProvider = "", activeProfileId = "") {
+  const prov = String(activeProvider || "").trim().toLowerCase();
+  const profId = String(activeProfileId || "").trim().toLowerCase();
+  if (!prov || item.provider !== prov) return false;
+  if (!profId) return true;
+  const fullKey = `${prov}:${profId}`;
+  return (item.profileKeys || []).some((pk) => {
+    const clean = String(pk || "").toLowerCase();
+    return clean === fullKey || clean.endsWith(`:${profId}`);
+  });
+}
+
+function selectCompactTelemetryEntries(entries = [], { activeProvider = "", activeProfileId = "" } = {}) {
+  if (!entries.length) return [];
+  const activeOrQueued = entries
+    .filter((e) => e.running > 0 || e.queued > 0)
+    .sort((a, b) => (b.running - a.running) || (b.queued - a.queued) || (b.tokensPerSec - a.tokensPerSec));
+
+  const picked = [...activeOrQueued];
+  const pickedKeys = new Set(picked.map((e) => e.item.key));
+
+  const exactCurrent = activeProfileId
+    ? entries.find((e) => itemMatchesActiveTarget(e.item, activeProvider, activeProfileId))
+    : null;
+  const providerCurrent = !exactCurrent && activeProvider
+    ? entries.find((e) => e.item.provider === String(activeProvider).toLowerCase())
+    : null;
+  const currentEntry = exactCurrent || providerCurrent;
+
+  if (currentEntry && !pickedKeys.has(currentEntry.item.key)) {
+    picked.push(currentEntry);
+    pickedKeys.add(currentEntry.item.key);
+  }
+  if (!picked.length && entries[0]) {
+    picked.push(entries[0]);
+  }
+  return picked;
+}
+
+export function renderAgentTelemetryBarHtml(profiles = [], telemetry = null, {
+  providerFilter = "all",
+  expanded = false,
+  refreshing = false,
+  visibleKeys = null,
+  pickerOpen = false,
+  activeProvider = "",
+  activeProfileId = "",
+  nowSec = Math.floor(Date.now() / 1000),
+} = {}) {
+  const safeProfiles = Array.isArray(profiles) ? profiles : [];
+  if (!safeProfiles.length && !telemetry) return "";
+
+  const byProvider = telemetry?.byProvider || {};
+  const byProfile = telemetry?.byProfile || null;
+  const totalRunning = TELEMETRY_PROVIDER_ORDER.reduce((sum, p) => sum + Number(byProvider[p]?.runningCount || 0), 0);
+  const totalQueued = TELEMETRY_PROVIDER_ORDER.reduce((sum, p) => sum + Number(byProvider[p]?.queuedCount || 0), 0);
+  const totalTps = TELEMETRY_PROVIDER_ORDER.reduce((sum, p) => sum + Number(byProvider[p]?.tokensPerSec || 0), 0);
+
+  const items = buildSelectableTelemetryItems(safeProfiles);
+  const resolvedKeys = resolveVisibleTelemetryKeys(items, visibleKeys);
+  const visibleSet = new Set(resolvedKeys);
+  const visibleItems = items.filter((item) => visibleSet.has(item.key));
+
+  const defaultCountByProv = {};
+  for (const item of items) {
+    if (item.defaultVisible) {
+      defaultCountByProv[item.provider] = (defaultCountByProv[item.provider] || 0) + 1;
+    }
+  }
+
+  let worstTone = "ok";
+  const renderCardItems = items.length ? visibleItems : TELEMETRY_PROVIDER_ORDER.map((prov) => ({
+    key: prov,
+    provider: prov,
+    profileKeys: [],
+    profiles: [],
+    shortTitle: providerVisualMeta(prov).short,
+    pickerLabel: providerVisualMeta(prov).label,
+    defaultVisible: true,
+  }));
+
+  const entries = renderCardItems.map((item) => {
+    const prov = item.provider;
+    const { running, queued, tokensPerSec } = resolveTelemetryItemMetrics(
+      item,
+      byProvider,
+      byProfile,
+      defaultCountByProv,
+    );
+    const compactChips = buildCompactQuotaChipsHtml(prov, item.profiles, nowSec);
+    if (compactChips.meterTone === "danger") worstTone = "danger";
+    else if (compactChips.meterTone === "warn" && worstTone !== "danger") worstTone = "warn";
+    return {
+      item,
+      running,
+      queued,
+      tokensPerSec,
+      compactChips,
+    };
+  });
+
+  const isExpandedMode = Boolean(expanded || pickerOpen);
+  if (!isExpandedMode) {
+    const compactEntries = selectCompactTelemetryEntries(entries, { activeProvider, activeProfileId });
+    const hiddenExtraCount = Math.max(0, renderCardItems.length - compactEntries.length);
+    const shownRunning = compactEntries.reduce((sum, e) => sum + e.running, 0);
+    const shownQueued = compactEntries.reduce((sum, e) => sum + e.queued, 0);
+    const hiddenRunning = Math.max(0, totalRunning - shownRunning);
+    const hiddenQueued = Math.max(0, totalQueued - shownQueued);
+
+    const pillsHtml = compactEntries.map(({ item, running, queued, tokensPerSec }) => {
+      const prov = item.provider;
+      const meta = providerVisualMeta(prov);
+      const isCurrent = itemMatchesActiveTarget(item, activeProvider, activeProfileId);
+      const runText = running > 0
+        ? `${running} 运行${queued > 0 ? ` · ${queued} 排队` : ""}`
+        : (queued > 0 ? `${queued} 排队` : "");
+      const tpsText = tokensPerSec > 0 ? `${formatTokensPerSec(tokensPerSec)} tok/s` : "";
+      const { summaryText, tone } = formatSimplifiedQuotaSummary(prov, item.profiles, nowSec);
+      const dotClass = running > 0 ? "is-running" : (queued > 0 ? "is-queued" : "");
+      return `<button type="button" class="telemetry-compact-pill ${running > 0 ? "is-running" : ""} ${isCurrent ? "is-current" : ""}" data-telemetry-item-key="${escapeAttrHtml(item.key)}" data-telemetry-toggle title="点击展开全部 Agent 监控与额度详情">`
+        + `<span class="telemetry-live-dot ${dotClass}" aria-hidden="true"></span>`
+        + `<span class="telemetry-provider-glyph is-${escapeAttrHtml(meta.tone)}">${providerIconSvg(prov, { size: 12 })}</span>`
+        + `<span class="telemetry-compact-name">${escapeAttrHtml(item.shortTitle)}</span>`
+        + (runText ? `<span class="telemetry-compact-run ${running > 0 ? "is-running" : "is-queued"}">${escapeAttrHtml(runText)}</span>` : "")
+        + (tpsText ? `<span class="telemetry-compact-tps">${escapeAttrHtml(tpsText)}</span>` : "")
+        + `<span class="telemetry-compact-sep" aria-hidden="true">·</span>`
+        + `<span class="telemetry-compact-quota is-${escapeAttrHtml(tone)}">${escapeAttrHtml(summaryText)}</span>`
+        + `</button>`;
+    }).join("");
+
+    const overflowParts = [];
+    if (hiddenRunning > 0) overflowParts.push(`${compactEntries.length ? "+" : ""}${hiddenRunning} 运行`);
+    if (hiddenQueued > 0) overflowParts.push(`${compactEntries.length ? "+" : ""}${hiddenQueued} 排队`);
+    const overflowPillHtml = overflowParts.length
+      ? `<button type="button" class="telemetry-compact-pill telemetry-overflow-pill ${hiddenRunning > 0 ? "is-running" : ""}" data-telemetry-toggle title="其他智能体有后台运行/排队任务，点击展开查看">`
+        + `<span class="telemetry-live-dot ${hiddenRunning > 0 ? "is-running" : "is-queued"}" aria-hidden="true"></span>`
+        + `<span class="telemetry-compact-run ${hiddenRunning > 0 ? "is-running" : "is-queued"}">${escapeAttrHtml(overflowParts.join(" · "))}</span>`
+        + `</button>`
+      : "";
+
+    const expandLabel = hiddenExtraCount > 0 ? `详情 (${renderCardItems.length})` : "详情";
+    return `<div class="telemetry-bar-shell is-compact">
+      <div class="telemetry-compact-row">
+        <div class="telemetry-compact-items">${pillsHtml || `<span class="telemetry-summary-title">Agent 就绪</span>`}${overflowPillHtml}</div>
+        <div class="telemetry-summary-actions">
+          <button type="button" class="telemetry-action-btn" data-telemetry-refresh ${refreshing ? "disabled" : ""} title="手动刷新 Agent 额度与状态" aria-label="刷新额度">${refreshing ? "…" : iconSvg("refresh", { size: 12 })}</button>
+          <button type="button" class="telemetry-action-btn" data-telemetry-toggle aria-expanded="false"><span>${escapeAttrHtml(expandLabel)}</span>${iconSvg("chevron-down", { size: 11 })}</button>
+        </div>
+      </div>
+    </div>`;
+  }
+
+  const cardsHtml = entries.map(({ item, running, queued, tokensPerSec, compactChips }) => {
+    const prov = item.provider;
+    const meta = providerVisualMeta(prov);
+    const tpsText = formatTokensPerSec(tokensPerSec);
+    const hasTps = tokensPerSec > 0;
+    const { chipsHtml, meterPct, meterTone } = compactChips;
+
+    const isFiltered = providerFilter === prov;
+    const runLabel = running > 0
+      ? `${running} 运行${queued > 0 ? ` · ${queued}排队` : ""}`
+      : (queued > 0 ? `${queued} 排队` : "空闲");
+
+    return `<div class="telemetry-agent-card ${running > 0 ? "is-running" : ""} ${isFiltered ? "is-filtered" : ""}" data-telemetry-item-key="${escapeAttrHtml(item.key)}" data-telemetry-toggle title="点击展开/收起 ${escapeAttrHtml(item.pickerLabel)} 详情">
+      <div class="telemetry-card-top">
+        <div class="telemetry-card-id">
+          <span class="telemetry-live-dot ${running > 0 ? "is-running" : queued > 0 ? "is-queued" : ""}" aria-hidden="true"></span>
+          <span class="telemetry-provider-glyph is-${escapeAttrHtml(meta.tone)}">${providerIconSvg(prov, { size: 12 })}</span>
+          <span class="telemetry-provider-name">${escapeAttrHtml(item.shortTitle)}</span>
+        </div>
+        <div class="telemetry-card-metrics">
+          <span class="telemetry-run-badge ${running > 0 ? "is-running" : queued > 0 ? "is-queued" : ""}">${escapeAttrHtml(runLabel)}</span>
+          <span class="telemetry-tps-badge ${hasTps ? "is-active" : ""}">${escapeAttrHtml(tpsText)} tok/s</span>
+        </div>
+      </div>
+      <div class="telemetry-card-quotas">${chipsHtml}</div>
+      ${meterPct != null ? `<div class="telemetry-meter"><span class="telemetry-meter-fill is-${meterTone}" style="width:${meterPct}%"></span></div>` : ""}
+    </div>`;
+  }).join("");
+
+  const totalRunText = totalRunning > 0
+    ? `${totalRunning} 运行中${totalQueued > 0 ? ` · ${totalQueued} 排队` : ""}`
+    : (totalQueued > 0 ? `${totalQueued} 排队` : "全空闲");
+  const totalTpsText = `${formatTokensPerSec(totalTps)} tok/s`;
+  const summaryDotClass = totalRunning > 0
+    ? "is-running"
+    : (worstTone === "danger" ? "is-danger" : (worstTone === "warn" ? "is-warn" : ""));
+
+  const gridOrEmptyHtml = items.length && !visibleItems.length
+    ? `<div class="telemetry-empty-hint">未选择展示任何实例 · 点击上方「显示」勾选需要展示的 Agent</div>`
+    : `<div class="telemetry-bar-grid">${cardsHtml}</div>`;
+
+  return `<div class="telemetry-bar-shell is-expanded">
+    <div class="telemetry-bar-summary">
+      <div class="telemetry-summary-left">
+        <span class="telemetry-summary-dot ${summaryDotClass}" aria-hidden="true"></span>
+        <span class="telemetry-summary-title">Agent 实时监控</span>
+        <span class="telemetry-summary-stat ${totalRunning > 0 ? "is-active" : ""}">${escapeAttrHtml(totalRunText)}</span>
+        <span class="telemetry-summary-sep">·</span>
+        <span class="telemetry-summary-stat ${totalTps > 0 ? "is-tps" : ""}">${escapeAttrHtml(totalTpsText)}</span>
+      </div>
+      <div class="telemetry-summary-actions">
+        ${items.length ? `<button type="button" class="telemetry-action-btn ${pickerOpen ? "is-open" : ""}" data-telemetry-picker-toggle aria-expanded="${pickerOpen ? "true" : "false"}" title="选择要显示的 Agent 实例">${iconSvg("settings", { size: 12 })} <span>显示 (${visibleItems.length}/${items.length})</span></button>` : ""}
+        <button type="button" class="telemetry-action-btn" data-telemetry-refresh ${refreshing ? "disabled" : ""} title="手动刷新 Agent 额度与状态">${refreshing ? "刷新中…" : `${iconSvg("refresh", { size: 12 })} <span>刷新</span>`}</button>
+        <button type="button" class="telemetry-action-btn ${expanded ? "is-open" : ""}" data-telemetry-toggle aria-expanded="${expanded ? "true" : "false"}">${expanded ? `<span>收起</span>${iconSvg("chevron-up", { size: 11 })}` : `<span>详情</span>${iconSvg("chevron-down", { size: 11 })}`}</button>
+        <button type="button" class="telemetry-action-btn mobile-only" data-telemetry-mobile-close title="收起监控面板" aria-label="收起监控面板">${iconSvg("close", { size: 12 })}</button>
+      </div>
+    </div>
+    ${pickerOpen && items.length ? renderTelemetryPickerPanelHtml(items, visibleSet) : ""}
+    ${gridOrEmptyHtml}
+    ${expanded ? renderTelemetryDrawerHtml(safeProfiles, byProvider, { providerFilter, nowSec }) : ""}
+  </div>`;
+}
+
+export function profileHealthVisualMeta(profile) {
+  const health = profile?.health || {};
+  if (health.disabled) {
+    return {
+      status: "disabled",
+      rank: 4,
+      available: false,
+      dotClass: "is-disabled",
+      icon: "",
+      badgeText: "已停用",
+      labelPrefix: "",
+    };
+  }
+  if (profile?.installed === false) {
+    return {
+      status: "unavailable",
+      rank: 3,
+      available: false,
+      dotClass: "is-unavailable",
+      icon: "",
+      badgeText: "未安装",
+      labelPrefix: "",
+    };
+  }
+  if (profile?.authenticated === false) {
+    return {
+      status: "unauthenticated",
+      rank: 3,
+      available: false,
+      dotClass: "is-unavailable",
+      icon: "",
+      badgeText: "仅历史",
+      labelPrefix: "",
+    };
+  }
+  const status = health.status || "unknown";
+  if (status !== "unavailable" && profile?.quota?.statusTone === "exhausted") {
+    return {
+      status: "cooldown",
+      rank: 2,
+      available: false,
+      dotClass: "is-cooldown",
+      icon: "",
+      badgeText: profile.quota.summaryText || "额度耗尽",
+      labelPrefix: "",
+    };
+  }
+  const latency = Number.isFinite(Number(health.latencyMs)) && Number(health.latencyMs) > 0
+    ? `${Math.round(Number(health.latencyMs))}ms`
+    : "";
+  switch (status) {
+    case "healthy":
+      return {
+        status: "healthy",
+        rank: 0,
+        available: true,
+        dotClass: "is-healthy",
+        icon: "",
+        badgeText: latency || "可用",
+        labelPrefix: "",
+      };
+    case "cooldown":
+      return {
+        status: "cooldown",
+        rank: 2,
+        available: false,
+        dotClass: "is-cooldown",
+        icon: "",
+        badgeText: health.shortReason || "限额冷却",
+        labelPrefix: "",
+      };
+    case "unavailable":
+      return {
+        status: "unavailable",
+        rank: 3,
+        available: false,
+        dotClass: "is-unavailable",
+        icon: "",
+        badgeText: health.shortReason || "暂不可用",
+        labelPrefix: "",
+      };
+    default:
+      return {
+        status: "unknown",
+        rank: 1,
+        available: true,
+        dotClass: "is-unknown",
+        icon: "",
+        badgeText: "待测",
+        labelPrefix: "",
+      };
+  }
+}
+
+export function sortProfilesByAvailability(profiles = []) {
+  return [...(Array.isArray(profiles) ? profiles : [])].sort((a, b) => {
+    const metaA = profileHealthVisualMeta(a);
+    const metaB = profileHealthVisualMeta(b);
+    if (metaA.rank !== metaB.rank) return metaA.rank - metaB.rank;
+    const authDiff = Number(Boolean(b?.authenticated !== false)) - Number(Boolean(a?.authenticated !== false));
+    if (authDiff !== 0) return authDiff;
+    const remA = a?.quota?.primary?.remainingPercent;
+    const remB = b?.quota?.primary?.remainingPercent;
+    const hasRemA = typeof remA === "number" && Number.isFinite(remA);
+    const hasRemB = typeof remB === "number" && Number.isFinite(remB);
+    if (hasRemA || hasRemB) {
+      const scoreA = hasRemA ? remA : -1;
+      const scoreB = hasRemB ? remB : -1;
+      if (scoreA !== scoreB) return scoreB - scoreA;
+    }
+    const latA = Number.isFinite(Number(a?.health?.latencyMs)) ? Number(a.health.latencyMs) : Number.MAX_SAFE_INTEGER;
+    const latB = Number.isFinite(Number(b?.health?.latencyMs)) ? Number(b.health.latencyMs) : Number.MAX_SAFE_INTEGER;
+    return latA - latB;
+  });
+}
+
+export function pickBestAvailableProfile(profiles = [], preferredId = "") {
+  const sorted = sortProfilesByAvailability(profiles);
+  if (!sorted.length) return null;
+  if (preferredId) {
+    const exact = sorted.find((p) => p.id === preferredId);
+    if (exact && profileHealthVisualMeta(exact).rank <= 1) return exact;
+  }
+  return sorted.find((p) => profileHealthVisualMeta(p).rank <= 1)
+    || sorted.find((p) => !p.health?.disabled)
+    || sorted[0];
+}
+
+export function findFailoverCandidateProfile(profiles = [], provider = "", failedProfileId = "") {
+  const scoped = sortProfilesByAvailability(filterProfilesByProvider(profiles, provider));
+  return scoped.find((p) => (
+    p.id !== failedProfileId
+    && p.installed !== false
+    && !p.health?.disabled
+    && profileHealthVisualMeta(p).rank <= 2
+    && profileHealthVisualMeta(p).status !== "unavailable"
+  )) || null;
+}
+
+export function formatProfileIdentityHint(profile) {
+  if (!profile) return "";
+  const alias = String(profile.health?.alias || "").trim();
+  if (alias) return alias.slice(0, 22);
+  const email = String(profile.account?.email || "").trim();
+  if (email) {
+    if (email.length <= 24) return email;
+    const atIdx = email.indexOf("@");
+    if (atIdx > 0) {
+      const local = email.slice(0, atIdx);
+      const domain = email.slice(atIdx + 1).split(".")[0] || email.slice(atIdx + 1);
+      return `${local.slice(0, 14)}@${domain.slice(0, 8)}`;
+    }
+    return email.slice(0, 24);
+  }
+  const endpoint = String(profile.endpointLabel || "").trim();
+  if (endpoint) return endpoint.slice(0, 24);
+  if (profile.identityLabel) return String(profile.identityLabel).slice(0, 22);
+  return "";
+}
+
+export function compactProfileChipText(profile) {
+  if (!profile) return "";
+  const alias = String(profile.health?.alias || "").trim();
+  if (alias) return alias.length > 9 ? alias.slice(0, 9) : alias;
+  const label = String(profile.label || "").trim();
+  const stripped = label
+    .replace(/^(Codex|Claude\s*Code|Claude|Antigravity|Grok)\s*[·:/\-]?\s*/i, "")
+    .trim();
+  if (stripped) return stripped.length > 9 ? stripped.slice(0, 9) : stripped;
+  if (profile.id === "desktop") return "桌面";
+  if (profile.id === "cli") return "CLI";
+  if (label) return label.length > 9 ? label.slice(0, 9) : label;
+  const fallback = String(profile.id || "默认").trim();
+  return fallback.length > 9 ? fallback.slice(0, 9) : fallback;
+}
+
+function extractCompactVariantLabel(thread) {
+  const provider = String(thread?.provider || "").trim().toLowerCase();
+  const profileId = String(thread?.profileId || "").trim().toLowerCase();
+  const rawLabel = String(thread?.profileLabel || thread?.profileId || "").trim();
+  if (profileId === "desktop" || /桌面|desktop/i.test(rawLabel)) return "桌面";
+  if (profileId === "cli" || /\bcli\b|命令行/i.test(rawLabel)) return "CLI";
+
+  let cleaned = rawLabel
+    .replace(/^(Antigravity|Codex|Claude\s*Code|Claude|Grok)\s*[·:/\-]?\s*/i, "")
+    .trim();
+  if (!cleaned) return "";
+  const lower = cleaned.toLowerCase();
+  if (lower === provider || /^(默认|default)$/i.test(cleaned)) return "";
+  return cleaned.length > 6 ? cleaned.slice(0, 6) : cleaned;
+}
+
+export function compactThreadSourceChip(thread, {
+  providerFilter = "all",
+  profileFilter = "all",
+  profiles = [],
+} = {}) {
+  if (profileFilter && profileFilter !== "all") return null;
+  const provider = String(thread?.provider || "antigravity");
+  const meta = providerVisualMeta(provider);
+  const scopedProfiles = filterProfilesByProvider(profiles, provider).filter((p) => p?.installed !== false);
+  const shortVariant = extractCompactVariantLabel(thread);
+  const title = `${meta.label}${thread?.profileLabel ? ` · ${thread.profileLabel}` : ""}`;
+
+  if (providerFilter && providerFilter !== "all") {
+    if (!shortVariant) return null;
+    if (scopedProfiles.length > 0 && scopedProfiles.length <= 1) return null;
+    return {
+      glyph: "",
+      text: shortVariant,
+      tone: meta.tone,
+      title,
+    };
+  }
+
+  let text = meta.short;
+  if (provider === "antigravity") {
+    const hasMultiOrExplicitVariant = scopedProfiles.length >= 2
+      || /桌面|desktop|\bcli\b|命令行/i.test(String(thread?.profileLabel || ""));
+    text = (hasMultiOrExplicitVariant && shortVariant) ? shortVariant : meta.short;
+  } else if (provider === "codex") {
+    text = shortVariant || "Codex";
+  } else if (provider === "claude") {
+    text = shortVariant || "Claude";
+  } else if (provider === "grok") {
+    text = shortVariant || "Grok";
+  } else if (shortVariant) {
+    text = shortVariant;
+  }
+
+  return {
+    glyph: "",
+    iconSvg: meta.iconSvg,
+    text,
+    tone: meta.tone,
+    title,
+  };
+}
+
+export function profileOptionLabel(profile) {
+  if (!profile) return "默认";
+  const meta = profileHealthVisualMeta(profile);
+  const idHint = formatProfileIdentityHint(profile);
+  const name = profile.label || profile.id || "默认";
+  const parts = [name];
+  if (idHint && !name.includes(idHint)) parts.push(idHint);
+  if (meta.status !== "unknown" && meta.badgeText) parts.push(meta.badgeText);
+  const quotaSummary = String(profile.quota?.summaryText || "").trim();
+  if (quotaSummary && quotaSummary !== meta.badgeText && !parts.includes(quotaSummary)) {
+    parts.push(quotaSummary);
+  }
+  return `${meta.labelPrefix}${parts.join(" · ")}`;
+}
+
+export function renderProfilePillsHtml(profiles = [], {
+  selectedId = "",
+  probingKeys = new Set(),
+  activeLocked = false,
+} = {}) {
+  const sorted = sortProfilesByAvailability(profiles);
+  if (!sorted.length) {
+    return `<div class="profile-pills-empty">未检测到可用实例</div>`;
+  }
+  const showDisableToggle = sorted.length >= 2;
+  return sorted.map((p) => {
+    const meta = profileHealthVisualMeta(p);
+    const key = p.key || `${p.provider}:${p.id}`;
+    const isSelected = p.id === selectedId;
+    const isProbing = probingKeys?.has?.(key) || probingKeys?.has?.(`${p.provider}:*`);
+    const hint = formatProfileIdentityHint(p);
+    const isRelayTarget = Boolean(activeLocked && !isSelected && meta.available);
+    const quota = p.quota || null;
+    const quotaSummary = String(quota?.summaryText || "").trim();
+    const quotaPlan = String(quota?.planLabel || "").trim();
+    const quotaPct = quota?.primary?.remainingPercent;
+    const hasQuotaPct = typeof quotaPct === "number" && Number.isFinite(quotaPct);
+    const subParts = [];
+    if (hint) subParts.push(hint);
+    if (quotaPlan && quotaPlan !== "未登录" && !subParts.includes(quotaPlan)) subParts.push(quotaPlan);
+    if (isProbing) subParts.push("测通中…");
+    else if (isRelayTarget) subParts.push(meta.badgeText !== "待测" ? `${meta.badgeText} · 点此接力` : "点此同目录接力");
+    else subParts.push(meta.badgeText);
+    if (!isProbing && quotaSummary && quotaSummary !== meta.badgeText) subParts.push(quotaSummary);
+    const subText = subParts.filter(Boolean).join(" · ");
+    const displayName = p.label || p.id || "默认";
+    const toneClass = quota?.statusTone ? `tone-${quota.statusTone}` : "";
+
+    return `
+      <div class="profile-pill-card ${meta.dotClass}${isSelected ? " is-selected" : ""}${isProbing ? " is-probing" : ""}" data-profile-key="${escapeAttrHtml(key)}">
+        <button
+          type="button"
+          class="profile-pill-main"
+          data-select-profile="${escapeAttrHtml(p.id)}"
+          data-profile-provider="${escapeAttrHtml(p.provider || "")}"
+          ${isRelayTarget ? `data-relay-profile="${escapeAttrHtml(p.id)}"` : ""}
+          title="${escapeAttrHtml(p.health?.detail || p.home || displayName)}"
+        >
+          <span class="profile-status-dot ${meta.dotClass}" aria-hidden="true"></span>
+          <span class="profile-pill-copy">
+            <span class="profile-pill-name">${escapeAttrHtml(displayName)}${isSelected && activeLocked ? `<span class="profile-pill-lock">当前</span>` : ""}</span>
+            <span class="profile-pill-sub">${escapeAttrHtml(subText)}</span>
+            ${hasQuotaPct ? `<span class="quota-mini-bar profile-pill-meter" aria-hidden="true"><span class="quota-mini-fill ${toneClass}" style="width:${Math.max(0, Math.min(100, Math.round(quotaPct)))}%"></span></span>` : ""}
+          </span>
+        </button>
+        <div class="profile-pill-actions">
+          <button
+            type="button"
+            class="profile-pill-action-btn"
+            data-probe-profile="${escapeAttrHtml(p.id)}"
+            data-probe-provider="${escapeAttrHtml(p.provider || "")}"
+            ${isProbing ? "disabled" : ""}
+            title="手动测通该实例"
+          >${isProbing ? "…" : "测通"}</button>
+          ${(showDisableToggle || meta.status === "disabled") ? `
+            <button
+              type="button"
+              class="profile-pill-action-btn ${meta.status === "disabled" ? "is-enable" : "is-disable"}"
+              data-toggle-disable-profile="${escapeAttrHtml(p.id)}"
+              data-profile-provider="${escapeAttrHtml(p.provider || "")}"
+              data-next-disabled="${meta.status === "disabled" ? "0" : "1"}"
+              title="${meta.status === "disabled" ? "重新启用该实例" : "停用该实例（不再作为默认首选项）"}"
+            >${meta.status === "disabled" ? "启用" : "停用"}</button>
+          ` : ""}
+        </div>
+      </div>
+    `;
+  }).join("");
+}
+
+export function filterProfilesByProvider(profiles = [], provider = "all") {
+  if (!provider || provider === "all") return profiles;
+  return profiles.filter((p) => p.provider === provider);
+}
+
+export function ensurePreferredModelInList(models = [], provider = "", preferredModel = "") {
+  const list = Array.isArray(models) ? [...models] : [];
+  const cleanPreferred = String(preferredModel || "").trim();
+  if (!cleanPreferred) return list;
+  if (list.some((m) => m?.id === cleanPreferred || m?.model === cleanPreferred)) {
+    return list;
+  }
+  if (provider === "claude" && !/^claude-/i.test(cleanPreferred)) return list;
+  if (provider === "codex" && /^(claude-|gemini-|grok-)/i.test(cleanPreferred)) return list;
+  if (provider === "antigravity" && /^(gpt-|grok-)/i.test(cleanPreferred)) return list;
+  if (provider === "grok" && !/^grok-/i.test(cleanPreferred)) return list;
+  return [
+    {
+      id: cleanPreferred,
+      model: cleanPreferred,
+      displayName: cleanPreferred,
+      section: "main",
+      provider: provider || "",
+      isDefault: false,
+      defaultReasoningEffort: "medium",
+      supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max"],
+    },
+    ...list,
+  ];
+}
+
+export function pickDefaultModelForProvider(models = [], provider = "", preferredModel = "") {
+  const scoped = provider ? models.filter((m) => m.provider === provider) : models;
+  if (!scoped.length) return null;
+  if (preferredModel) {
+    const exact = scoped.find((m) => m.id === preferredModel || m.model === preferredModel);
+    if (exact) return exact;
+  }
+  return scoped.find((m) => m.isDefault) || scoped[0];
+}
+
+export function formatQuotaResetRelative(resetsAtSec, nowSec = Math.floor(Date.now() / 1000)) {
+  const target = Number(resetsAtSec);
+  const now = Number(nowSec);
+  if (!Number.isFinite(target) || target <= 0 || !Number.isFinite(now)) return "";
+  const diffSec = Math.floor(target - now);
+  if (diffSec <= 0) return "";
+  const mins = Math.ceil(diffSec / 60);
+  if (mins < 60) return `${Math.max(1, mins)}分后重置`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) {
+    const remMins = mins % 60;
+    return remMins >= 15 ? `${hours}小时${remMins}分后重置` : `${hours}小时后重置`;
+  }
+  const days = Math.floor(hours / 24);
+  const remHours = hours % 24;
+  return remHours > 0 ? `${days}天${remHours}小时后重置` : `${days}天后重置`;
+}
+
+function shortQuotaProfileLabel(profile) {
+  const raw = String(profile?.label || profile?.id || "").trim();
+  const provider = String(profile?.provider || "").trim();
+  const cleaned = raw
+    .replace(/^(Antigravity|Codex|Claude\s*Code|Claude|Grok)\s*[·:/\-]?\s*/i, "")
+    .trim();
+  if (!cleaned || /^(默认|default)$/i.test(cleaned)) {
+    return providerVisualMeta(provider).short;
+  }
+  const metaShort = providerVisualMeta(provider).short;
+  if (provider === "antigravity") {
+    return `${metaShort} ${cleaned.length > 6 ? cleaned.slice(0, 6) : cleaned}`;
+  }
+  return cleaned.length > 10 ? cleaned.slice(0, 10) : cleaned;
+}
+
+export function renderQuotaOverviewHtml(profiles = [], {
+  providerFilter = "all",
+  expanded = false,
+  refreshing = false,
+  nowSec = Math.floor(Date.now() / 1000),
+} = {}) {
+  const installed = (Array.isArray(profiles) ? profiles : []).filter((p) => p && p.installed !== false);
+  if (!installed.length) return "";
+
+  const authedProviders = new Set(
+    installed.filter((p) => p.authenticated !== false && !p.health?.disabled).map((p) => p.provider),
+  );
+
+  let visible = installed;
+  if (providerFilter && providerFilter !== "all") {
+    const matching = visible.filter((p) => p.provider === providerFilter);
+    if (matching.length) visible = matching;
+  }
+  if (!expanded) {
+    const compactFiltered = visible.filter((p) => (
+      !p.health?.disabled
+      && (p.authenticated !== false || !authedProviders.has(p.provider))
+    ));
+    if (compactFiltered.length) visible = compactFiltered;
+  }
+
+  const chipsHtml = visible.map((p) => {
+    const visual = providerVisualMeta(p.provider);
+    const q = p.quota || null;
+    const tone = q?.statusTone || (p.authenticated === false ? "unknown" : "unknown");
+    const pct = q?.primary?.remainingPercent;
+    const hasPct = typeof pct === "number" && Number.isFinite(pct);
+    const summaryText = q?.summaryText || (p.authenticated === false ? "仅历史" : "待测");
+    const shortName = shortQuotaProfileLabel(p);
+    const resetText = formatQuotaResetRelative(q?.primary?.resetsAt, nowSec);
+    const tipParts = [p.label || p.id, q?.planLabel, q?.accountLabel, summaryText, resetText].filter(Boolean);
+
+    return `
+      <button
+        type="button"
+        class="quota-chip tone-${escapeAttrHtml(tone)}"
+        data-quota-filter-provider="${escapeAttrHtml(p.provider || "")}"
+        data-quota-profile-id="${escapeAttrHtml(p.id || "")}"
+        title="${escapeAttrHtml(tipParts.join(" · "))}"
+      >
+        <span class="quota-chip-top">
+          <span class="quota-chip-provider is-${escapeAttrHtml(visual.tone)}">${providerIconSvg(p.provider, { size: 12 })} ${escapeAttrHtml(shortName)}</span>
+          <span class="quota-chip-val tone-${escapeAttrHtml(tone)}">${escapeAttrHtml(summaryText)}</span>
+        </span>
+        <span class="quota-mini-bar" aria-hidden="true">
+          <span class="quota-mini-fill tone-${escapeAttrHtml(tone)}" style="width:${hasPct ? Math.max(0, Math.min(100, Math.round(pct))) : (tone === "ok" ? 100 : (tone === "exhausted" ? 0 : 35))}%"></span>
+        </span>
+      </button>
+    `;
+  }).join("");
+
+  let detailHtml = "";
+  if (expanded) {
+    const cardsHtml = visible.map((p) => {
+      const visual = providerVisualMeta(p.provider);
+      const q = p.quota || {};
+      const tone = q.statusTone || "unknown";
+      const planLabel = String(q.planLabel || "").trim();
+      const accountLabel = String(q.accountLabel || "").trim();
+      const buckets = Array.isArray(q.buckets) && q.buckets.length
+        ? q.buckets
+        : (q.primary ? [q.primary] : []);
+
+      const bucketsHtml = buckets.map((b) => {
+        const bRem = b?.remainingPercent;
+        const hasBRem = typeof bRem === "number" && Number.isFinite(bRem);
+        const bTone = hasBRem
+          ? (bRem <= 0 ? "exhausted" : (bRem <= 20 ? "warn" : "ok"))
+          : tone;
+        const resetStr = formatQuotaResetRelative(b?.resetsAt, nowSec);
+        const valueLabel = hasBRem ? `${Math.round(bRem)}%` : (b?.detail || q.summaryText || "正常");
+        const metaLine = [hasBRem ? b?.detail : "", resetStr].filter(Boolean).join(" · ");
+
+        return `
+          <div class="quota-bucket-row">
+            <div class="quota-bucket-head">
+              <span class="quota-bucket-label">${escapeAttrHtml(b?.label || "配额")}</span>
+              <span class="quota-bucket-val tone-${escapeAttrHtml(bTone)}">${escapeAttrHtml(valueLabel)}</span>
+            </div>
+            ${hasBRem ? `
+              <div class="quota-mini-bar is-detail" aria-hidden="true">
+                <span class="quota-mini-fill tone-${escapeAttrHtml(bTone)}" style="width:${Math.max(0, Math.min(100, Math.round(bRem)))}%"></span>
+              </div>
+            ` : ""}
+            ${metaLine ? `<div class="quota-bucket-meta">${escapeAttrHtml(metaLine)}</div>` : ""}
+          </div>
+        `;
+      }).join("");
+
+      const creditsText = q.credits?.balance !== null && q.credits?.balance !== undefined
+        ? `积分 ${escapeAttrHtml(String(q.credits.balance))}`
+        : "";
+
+      return `
+        <div class="quota-detail-card tone-${escapeAttrHtml(tone)}">
+          <div class="quota-detail-card-head">
+            <span class="quota-detail-title">
+              <span class="is-${escapeAttrHtml(visual.tone)}">${providerIconSvg(p.provider, { size: 13 })}</span>
+              <strong>${escapeAttrHtml(p.label || p.id)}</strong>
+              ${planLabel ? `<span class="quota-plan-pill">${escapeAttrHtml(planLabel)}</span>` : ""}
+              ${creditsText ? `<span class="quota-plan-pill is-credits">${creditsText}</span>` : ""}
+            </span>
+            <span class="quota-detail-summary tone-${escapeAttrHtml(tone)}">${escapeAttrHtml(q.summaryText || "待测")}</span>
+          </div>
+          ${accountLabel ? `<div class="quota-detail-account">${escapeAttrHtml(accountLabel)}</div>` : ""}
+          ${bucketsHtml ? `<div class="quota-bucket-list">${bucketsHtml}</div>` : ""}
+        </div>
+      `;
+    }).join("");
+
+    detailHtml = `<div class="quota-detail-list">${cardsHtml}</div>`;
+  }
+
+  return `
+    <div class="quota-strip-head">
+      <button
+        type="button"
+        class="quota-strip-toggle"
+        data-quota-toggle="1"
+        aria-expanded="${expanded ? "true" : "false"}"
+        title="${expanded ? "收起各智能体额度明细" : "展开查看所有智能体额度与重置时间"}"
+      >
+        <span class="quota-strip-title">可用额度</span>
+        <span class="quota-strip-count">${visible.length}</span>
+        <span class="quota-strip-caret" aria-hidden="true">${expanded ? iconSvg("chevron-down", { size: 11 }) : iconSvg("chevron-up", { size: 11 })}</span>
+      </button>
+      <button
+        type="button"
+        class="quota-refresh-btn${refreshing ? " is-spinning" : ""}"
+        data-quota-refresh="1"
+        ${refreshing ? "disabled" : ""}
+        title="刷新各智能体额度"
+        aria-label="刷新各智能体额度"
+      >${iconSvg("refresh", { size: 12 })}</button>
+    </div>
+    <div class="quota-chip-row">${chipsHtml}</div>
+    ${detailHtml}
+  `;
+}

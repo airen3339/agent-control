@@ -1,0 +1,3917 @@
+import assert from "node:assert/strict";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import { resolve } from "node:path";
+import { DatabaseSync } from "node:sqlite";
+import test from "node:test";
+import { fileURLToPath } from "node:url";
+import { createRelayServer } from "../relay/relay-server.mjs";
+import { readAntigravityIndexedThreadById } from "../src/providers/antigravity-history.mjs";
+import {
+  antigravityModeId,
+  claudePermissionMode,
+  codexExecutionPolicy,
+  isTurboPermissionMode,
+  PERMISSION_MODES,
+} from "../src/permissions.mjs";
+import { createGoalController } from "../src/goal-controller.mjs";
+import { classifyProfileError, normalizeProfileHealth, sortProfilesByHealth } from "../src/profile-health.mjs";
+import { mergeActiveTurnIntoHistory } from "../src/thread-display.mjs";
+import { createAgentControlServer } from "../src/server.mjs";
+import {
+  buildDeterministicVoicePlan,
+  resolveFuzzyVoiceTarget,
+} from "../src/voice-call-service.mjs";
+import { createHotExtensionServer, mergeUpstreamLiveThreadState } from "../src/hot-extension.mjs";
+import { apiGet, apiUrl, clearApiEtagCache, isHostOfflineError } from "../public/api-client.js";
+import { extractGoalDirective, renderQueuedTurnsPanelHtml, resolveComposerSubmission } from "../public/composer-mode.js";
+import {
+  computeScaledDimensions,
+  estimateDataUrlBytes,
+  formatByteSize,
+  shouldKeepOriginalImageDataUrl,
+  validateImageBatchBudget,
+} from "../public/image-attachment.js";
+import {
+  capOversizedThreadInlineImages,
+  sanitizeEventForSse,
+  summarizeQueuedTurnEntry,
+} from "../src/provider-hub.mjs";
+import {
+  buildSelectableTelemetryItems,
+  compactEffortBadgeLabel,
+  compactModelBadgeLabel,
+  compactProfileChipText,
+  compactThreadSourceChip,
+  ensurePreferredModelInList,
+  findFailoverCandidateProfile,
+  formatProfileIdentityHint,
+  formatQuotaResetRelative,
+  formatTokensPerSec,
+  normalizeUiPermissionMode,
+  permissionModeDisplayLabel,
+  permissionVisualMeta,
+  pickBestAvailableProfile,
+  pickDefaultModelForProvider,
+  profileHealthVisualMeta,
+  profileOptionLabel,
+  providerDisplayName,
+  providerVisualMeta,
+  renderAgentTelemetryBarHtml,
+  renderProfilePillsHtml,
+  renderQuotaOverviewHtml,
+  resolveModelsForProvider,
+  resolveVisibleTelemetryKeys,
+  sortProfilesByAvailability,
+  summarizeTelemetryMobileBadge,
+  UI_PERMISSION_MODES,
+} from "../public/instance-switcher.js";
+import { humanizeLiveActivity, mergeLiveActivity } from "../public/live-state.js";
+import {
+  dedupeAdjacentTurns,
+  formatCompactPath,
+  formatToolExecutionError,
+  isRawToolEchoItem,
+  isRecoverableToolErrorText,
+  isStreamingTextAlreadyPersisted,
+  normalizeTurnForRender,
+  renderMarkdown,
+  renderTurnHtml,
+  summarizeProcessItems,
+  turnEndsWithProcessGroup,
+  unwrapToolText,
+} from "../public/markdown.js";
+import {
+  buildProjectGroups,
+  computeProjectGroupSelectionState,
+  dedupeThreadPreview,
+  isUserHomeCwd,
+  normalizeProjectCwd,
+  partitionSidebarProjectGroups,
+  projectBaseName,
+  renderBatchActionBarHtml,
+  renderProjectBoardHtml,
+  renderProjectTaskStripHtml,
+  renderSidebarThreadListHtml,
+  resolveProjectGroupCollapsed,
+  suggestFocusProjects,
+} from "../public/project-board.js";
+import { renderServerRequestCard } from "../public/server-request-ui.js";
+import {
+  buildLocalProgressBriefing,
+  buildVoiceLiveProgressItems,
+  createVadTurnDetector,
+  downsampleFloat32ToInt16,
+  encodePcm16SamplesToWav,
+  matchVoiceTarget,
+  pcm16Base64ToWavBytes,
+  renderVoiceCallTranscriptHtml,
+  renderVoiceLiveProgressHtml,
+  stripMarkdownForSpeech,
+  uint8ArrayToBase64,
+} from "../public/voice-copilot.js";
+
+const MOCK_CODEX_BIN = fileURLToPath(new URL("./helpers/mock-codex-cli.mjs", import.meta.url));
+const MOCK_CLAUDE_BIN = fileURLToPath(new URL("./helpers/mock-claude-cli.mjs", import.meta.url));
+const MOCK_AGY_BIN = fileURLToPath(new URL("./helpers/mock-agy-cli.mjs", import.meta.url));
+const MOCK_EDGE_TTS_BIN = fileURLToPath(new URL("./helpers/mock-edge-tts.mjs", import.meta.url));
+const MOCK_VOICE_ASR_BIN = fileURLToPath(new URL("./helpers/mock-voice-asr.mjs", import.meta.url));
+
+test("apiUrl preserves relay instance prefix and builds clean relative paths", () => {
+  assert.equal(
+    apiUrl("/api/threads?archived=0", "https://relay.example.com/i/mac01/"),
+    "https://relay.example.com/i/mac01/api/threads?archived=0",
+  );
+  assert.equal(
+    apiUrl("api/events", "http://127.0.0.1:43310/"),
+    "http://127.0.0.1:43310/api/events",
+  );
+  assert.equal(isHostOfflineError({ status: 503 }), true);
+  assert.equal(isHostOfflineError({ code: "host_offline" }), true);
+});
+
+test("composer-mode and live-state helpers compute actions and monotonic updates", () => {
+  assert.deepEqual(resolveComposerSubmission({ hasActiveThread: true, isSubmitting: true, text: "hi" }), {
+    action: "busy",
+    canSubmit: false,
+    buttonLabel: "发送中…",
+  });
+  assert.equal(resolveComposerSubmission({ hasActiveThread: false, text: "hi" }).action, "new");
+  assert.equal(resolveComposerSubmission({ hasActiveThread: true, isRunning: false, text: "hi" }).action, "turn");
+  assert.equal(resolveComposerSubmission({ hasActiveThread: true, isRunning: true, mode: "queue", text: "hi" }).action, "queue");
+  assert.equal(resolveComposerSubmission({ hasActiveThread: true, isRunning: true, mode: "steer", text: "hi" }).action, "steer");
+
+  assert.deepEqual(extractGoalDirective("/goal 完成所有重构"), {
+    hasDirective: true,
+    cleanedText: "完成所有重构",
+  });
+
+  const terminal = { turnId: "t1", status: "completed", phase: "已完成" };
+  const merged = mergeLiveActivity(terminal, { turnId: "t1", status: "running", phase: "旧进度" });
+  assert.equal(merged.status, "completed");
+});
+
+test("markdown, turn renderer, and server-request UI support all 3 agents cleanly without XSS", () => {
+  const md = renderMarkdown("# 标题\n<script>alert(1)</script>\n\n已完成\n<!-- GOAL_COMPLETE -->");
+  assert.doesNotMatch(md, /<script>/);
+  assert.match(md, /&lt;script&gt;/);
+  assert.doesNotMatch(md, /GOAL_COMPLETE/);
+
+  const turnHtml = renderTurnHtml({
+    id: "turn-1",
+    items: [
+      { type: "userMessage", content: [{ type: "text", text: "测试输入" }] },
+      { type: "agentMessage", text: "执行完毕 <!-- GOAL_COMPLETE -->", phase: "final_answer" },
+    ],
+  }, { agentLabel: providerDisplayName("claude") });
+  assert.match(turnHtml, /Claude Code/);
+  assert.match(turnHtml, /目标已达成/);
+
+  const cmdCard = renderServerRequestCard({
+    id: "codex:default:1",
+    provider: "codex",
+    kind: "command",
+    command: "ls -la",
+    availableDecisions: ["accept", "decline"],
+  });
+  assert.match(cmdCard, /Codex/);
+  assert.match(cmdCard, /允许一次/);
+
+  const acpCard = renderServerRequestCard({
+    id: "antigravity:cli:2",
+    provider: "antigravity",
+    kind: "acpPermission",
+    title: "Antigravity 请求授权",
+    options: [
+      { optionId: "allow_once", name: "Allow Once", kind: "allow_once" },
+      { optionId: "reject_once", name: "Reject Once", kind: "reject_once" },
+    ],
+  });
+  assert.match(acpCard, /data-option-id="allow_once"/);
+
+  const askCard = renderServerRequestCard({
+    id: "claude:default:3",
+    provider: "claude",
+    kind: "userInput",
+    questions: [{
+      id: "q1",
+      header: "确认",
+      question: "继续吗？",
+      options: [{ label: "是", description: "立即继续" }],
+    }],
+  });
+  assert.match(askCard, /Claude Code/);
+  assert.match(askCard, /提交回答/);
+
+  assert.equal(pickDefaultModelForProvider([{ id: "m1", provider: "codex", isDefault: true }], "codex")?.id, "m1");
+  const claudeFallback = resolveModelsForProvider({}, [], "claude");
+  assert.equal(pickDefaultModelForProvider(claudeFallback, "claude")?.id, "claude-sonnet-5-5");
+  assert.deepEqual(
+    claudeFallback.filter((m) => m.section === "main").map((m) => m.id),
+    ["claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-2", "claude-haiku-5-5"],
+  );
+});
+
+test("relay mobile send flow delivers Antigravity turns, returns explicit errors, and serves no-store UI assets", async (t) => {
+  const root = await mkdtemp(resolve(os.tmpdir(), "ac-mobile-relay-"));
+  const dataDir = resolve(root, "data");
+  await mkdir(dataDir, { recursive: true });
+
+  const relay = createRelayServer({
+    port: 0,
+    relayKey: "mobile-test-key",
+    dataPath: resolve(root, "relay-state.json"),
+  });
+  await relay.start();
+
+  const srv = await createAgentControlServer({
+    port: 0,
+    disableRelay: false,
+    dataDir,
+    env: {
+      ...process.env,
+      CODEX_BIN: MOCK_CODEX_BIN,
+      CLAUDE_BIN: MOCK_CLAUDE_BIN,
+      AGY_BIN: MOCK_AGY_BIN,
+      AGENT_CONTROL_CODEX_HOMES: JSON.stringify([{ id: "default", label: "Codex 默认", home: resolve(root, "codex") }]),
+      AGENT_CONTROL_CLAUDE_CONFIG_DIRS: JSON.stringify([{ id: "default", label: "Claude 默认", home: resolve(root, "claude") }]),
+      AGENT_CONTROL_AGY_APP_DATA_DIRS: JSON.stringify([{ id: "cli", label: "Antigravity CLI", home: resolve(root, "agy-cli"), profileType: "cli" }]),
+    },
+  });
+  await srv.start();
+  t.after(async () => {
+    await srv.close();
+    await relay.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const invite = await (await fetch(`${relay.url}/admin/invites`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Relay-Key": "mobile-test-key" },
+    body: JSON.stringify({ label: "手机测试" }),
+  })).json();
+  const pairData = await (await fetch(`${srv.url}/api/remote/pair`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ relayUrl: relay.url, inviteCode: invite.inviteCode, label: "手机测试" }),
+  })).json();
+
+  // Wait until WebSocket tunnel connects.
+  for (let i = 0; i < 40; i += 1) {
+    const h = await (await fetch(`${relay.url}/health`)).json();
+    if (h.onlineHosts === 1) break;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+
+  const connectRes = await fetch(pairData.pairUrl, { redirect: "manual" });
+  assert.equal(connectRes.status, 302);
+  const cookieHeader = (connectRes.headers.get("set-cookie") || "").split(";")[0];
+  const basePrefix = `${relay.url}/i/${srv.identity.instanceId}/`;
+
+  // Static UI assets served with Cache-Control: no-store and mobile composer elements.
+  const htmlRes = await fetch(apiUrl("", basePrefix), { headers: { Cookie: cookieHeader } });
+  assert.equal(htmlRes.status, 200);
+  assert.equal(htmlRes.headers.get("cache-control"), "no-store");
+  const html = await htmlRes.text();
+  assert.match(html, /id="composerStatus"/);
+  assert.match(html, /id="composerConfigBtn"/);
+  assert.match(html, /id="composerConfigPopover"/);
+  assert.match(html, /id="topbarMoreBtn"/);
+  assert.match(html, /id="sendBtn"/);
+  assert.match(html, /id="projectBoard"/);
+  assert.match(html, /id="projectTaskStrip"/);
+  assert.match(html, /id="voiceCopilotModal"/);
+  assert.match(html, /id="newModelSelect"/);
+
+  const provRes = await fetch(apiUrl("api/providers", basePrefix), { headers: { Cookie: cookieHeader } });
+  assert.equal(provRes.status, 200);
+  const provPayload = await provRes.json();
+  assert.equal(provPayload.defaultProvider, "antigravity");
+
+  const metaRes = await fetch(apiUrl("api/project/meta", basePrefix), {
+    method: "POST",
+    headers: {
+      Cookie: cookieHeader,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      cwd: "/tmp/mock-agy-project",
+      pinned: true,
+      alias: "粉丝站",
+    }),
+  });
+  assert.equal(metaRes.status, 200);
+  const metaJson = await metaRes.json();
+  assert.equal(metaJson.projectsMeta["/tmp/mock-agy-project"]?.pinned, true);
+  assert.equal(metaJson.projectsMeta["/tmp/mock-agy-project"]?.alias, "粉丝站");
+
+  const threadsRes = await fetch(apiUrl("api/threads", basePrefix), { headers: { Cookie: cookieHeader } });
+  const threadsJson = await threadsRes.json();
+  assert.equal(threadsJson.projectsMeta?.["/tmp/mock-agy-project"]?.alias, "粉丝站");
+
+  const jsRes = await fetch(apiUrl("app.js", basePrefix), { headers: { Cookie: cookieHeader } });
+  assert.equal(jsRes.status, 200);
+  assert.equal(jsRes.headers.get("cache-control"), "no-store");
+
+  // Sending to Antigravity session over relay succeeds (200) instead of failing with absolute path error.
+  const turnRes = await fetch(apiUrl("api/turn", basePrefix), {
+    method: "POST",
+    headers: {
+      Cookie: cookieHeader,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    body: JSON.stringify({
+      threadId: "antigravity:cli:agy-seed-session-1",
+      text: "手机端发送验证",
+      model: "gemini-pro-orchestrator",
+      effort: "high",
+      permissionMode: "workspace",
+    }),
+  });
+  assert.equal(turnRes.status, 200);
+  const turnPayload = await turnRes.json();
+  assert.equal(turnPayload.turn?.status, "inProgress");
+
+  // Error responses over relay are returned explicitly as structured JSON (never silent 200).
+  const badRes = await fetch(apiUrl("api/turn", basePrefix), {
+    method: "POST",
+    headers: {
+      Cookie: cookieHeader,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    body: JSON.stringify({ threadId: "invalid-id", text: "触发错误" }),
+  });
+  assert.ok(badRes.status >= 400);
+  const badJson = await badRes.json();
+  assert.ok(badJson.error?.message);
+
+  // Switching an active thread with a pending permission request to Turbo via /api/thread/prefs auto-approves immediately!
+  const permNewRes = await fetch(apiUrl("api/thread/new", basePrefix), {
+    method: "POST",
+    headers: {
+      Cookie: cookieHeader,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    body: JSON.stringify({
+      provider: "antigravity",
+      profileId: "cli",
+      cwd: root,
+      text: "需要授权 [AGY_PERMISSION]",
+      permissionMode: "workspace",
+    }),
+  });
+  assert.equal(permNewRes.status, 200);
+  const permThreadId = (await permNewRes.json()).thread.id;
+
+  // Wait until pending request appears on thread read.
+  const deadline = Date.now() + 4000;
+  let pendingCount = 0;
+  while (Date.now() < deadline) {
+    const thRes = await fetch(apiUrl(`api/thread?id=${encodeURIComponent(permThreadId)}`, basePrefix), {
+      headers: { Cookie: cookieHeader },
+    });
+    const thJson = await thRes.json();
+    pendingCount = (thJson.pendingRequests || []).length;
+    if (pendingCount > 0) break;
+    await new Promise((r) => setTimeout(r, 40));
+  }
+  assert.equal(pendingCount, 1);
+
+  const prefsRes = await fetch(apiUrl("api/thread/prefs", basePrefix), {
+    method: "POST",
+    headers: {
+      Cookie: cookieHeader,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    body: JSON.stringify({
+      threadId: permThreadId,
+      model: "gemini-4-carbon-high",
+      permissionMode: "turbo",
+    }),
+  });
+  assert.equal(prefsRes.status, 200);
+  const prefsJson = await prefsRes.json();
+  assert.equal(prefsJson.autoApprovedCount, 1);
+  assert.equal(prefsJson.prefs.permissionMode, "turbo");
+  assert.equal(prefsJson.prefs.model, "gemini-4-carbon-high");
+});
+
+test("project-board and voice-copilot modules prioritize pinned projects, match voice targets, and build valid WAV", async () => {
+  const threads = [
+    {
+      id: "codex:default:t-home",
+      provider: "codex",
+      profileId: "default",
+      profileLabel: "默认",
+      title: "临时提问",
+      preview: "看个报错",
+      cwd: "/Users/demo",
+      updatedAt: 300,
+    },
+    {
+      id: "antigravity:cli:t-demo-1",
+      provider: "antigravity",
+      profileId: "cli",
+      profileLabel: "CLI",
+      title: "家具透视修复",
+      preview: "完成布局朝向检查",
+      cwd: "/workspace/demo/demo-app",
+      updatedAt: 200,
+      live: true,
+    },
+    {
+      id: "claude:default:t-demo-2",
+      provider: "claude",
+      profileId: "default",
+      profileLabel: "默认",
+      title: "登录接口联调",
+      preview: "等待确认权限",
+      cwd: "/workspace/demo/demo-app",
+      updatedAt: 150,
+    },
+    {
+      id: "antigravity:cli:t-ctrl-1",
+      provider: "antigravity",
+      profileId: "cli",
+      profileLabel: "CLI",
+      title: "Agent Control <script>XSS</script>",
+      preview: "语音模式改造",
+      cwd: "/workspace/demo/agent-control",
+      updatedAt: 250,
+    },
+  ];
+  const pendingRequests = [{
+    id: "claude:default:req-1",
+    threadId: "claude:default:t-demo-2",
+    title: "允许运行 npm test",
+  }];
+  const projectsMeta = {
+    "/workspace/demo/demo-app": { pinned: true, alias: "示例小屋" },
+  };
+
+  const groups = buildProjectGroups(threads, { pendingRequests, projectsMeta });
+  assert.equal(groups[0].cwd, "/workspace/demo/demo-app");
+  assert.equal(groups[0].pinned, true);
+  assert.equal(groups[0].name, "示例小屋");
+  assert.equal(groups[0].threads[0].id, "antigravity:cli:t-demo-1"); // Strictly sorted by updatedAt (200 > 150), not pending status.
+  assert.equal(groups[1].cwd, "/Users/demo"); // Unpinned groups strictly follow latestUpdatedAt (300 > 250).
+  assert.equal(groups[2].cwd, "/workspace/demo/agent-control");
+  assert.equal(suggestFocusProjects(groups).some((g) => g.isHomeDir), false);
+
+  const boardHtml = renderProjectBoardHtml({ groups, allGroups: groups, pendingRequests });
+  assert.match(boardHtml, /ac-icon-star-filled/);
+  assert.match(boardHtml, /我关注的项目/);
+  assert.match(boardHtml, /示例小屋/);
+  assert.doesNotMatch(boardHtml, /<script>XSS<\/script>/);
+
+  const stripHtml = renderProjectTaskStripHtml({
+    projectGroup: groups[0],
+    activeThreadId: "antigravity:cli:t-demo-1",
+  });
+  assert.match(stripHtml, /示例小屋/);
+  assert.match(stripHtml, /家具透视修复/);
+  assert.match(stripHtml, /登录接口联调/);
+  assert.match(stripHtml, /strip-status-dot is-antigravity is-live/);
+  assert.match(stripHtml, /strip-status-dot is-claude is-pending/);
+  const idleStripHtml = renderProjectTaskStripHtml({
+    projectGroup: groups.find((g) => g.cwd === "/workspace/demo/agent-control"),
+    activeThreadId: "antigravity:cli:t-ctrl-1",
+  });
+  assert.match(idleStripHtml, /strip-status-dot is-antigravity is-done/);
+
+  // Speech sanitization and briefing.
+  assert.equal(
+    stripMarkdownForSpeech("请查看 [server.mjs](file:///a/b/c) ```js\nconst x=1;\n``` <!-- GOAL_COMPLETE -->"),
+    "请查看 server.mjs ，代码部分已省略，",
+  );
+  const briefing = buildLocalProgressBriefing({ groups, pendingRequests });
+  assert.match(briefing, /等待你确认/);
+  assert.match(briefing, /示例小屋/);
+
+  // Local fuzzy voice matching.
+  const matched = matchVoiceTarget("帮我看看示例小屋家具透视怎么样了", { groups, threads });
+  assert.equal(matched.bestProject?.group?.cwd, "/workspace/demo/demo-app");
+  assert.equal(matched.bestThread?.thread?.id, "antigravity:cli:t-demo-1");
+
+  const carbonPref = matchVoiceTarget("在控制台新开一个协调者 carbon 任务排查连接", { groups, threads });
+  assert.equal(carbonPref.preferredProvider, "antigravity");
+  assert.equal(carbonPref.preferredModel, "gemini-pro-orchestrator");
+  assert.equal(carbonPref.detectedIntent, "create_thread");
+
+  // PCM16 -> WAV encapsulation & VAD turn detection.
+  const pcmSample = Buffer.from([0x00, 0x10, 0x00, 0x20, 0x00, 0x30, 0x00, 0x40]).toString("base64");
+  const wav = pcm16Base64ToWavBytes(pcmSample, 24000);
+  assert.equal(Buffer.from(wav.slice(0, 4)).toString("ascii"), "RIFF");
+  assert.equal(Buffer.from(wav.slice(8, 12)).toString("ascii"), "WAVE");
+  assert.equal(wav.length, 52);
+
+  const downsampled = downsampleFloat32ToInt16(new Float32Array(960).fill(0.25), 48000, 16000);
+  assert.equal(downsampled.length, 320);
+
+  const vad = createVadTurnDetector({
+    sampleRate: 16000,
+    preRollMs: 120,
+    silenceMs: 300,
+    minSpeechMs: 150,
+    rmsThreshold: 0.018,
+  });
+  // Silence pre-roll
+  assert.equal(vad.pushSamples(new Int16Array(1600), 0.002).type, "listening");
+  // Speech onset (two chunks >= 110ms)
+  const loudChunk = new Int16Array(1600).fill(6000);
+  assert.equal(vad.pushSamples(loudChunk, 0.08).type, "speech_start");
+  assert.equal(vad.pushSamples(loudChunk, 0.08).type, "recording");
+  // Trailing silence >= silenceMs triggers utterance
+  assert.equal(vad.pushSamples(new Int16Array(1600), 0.001).type, "recording");
+  assert.equal(vad.pushSamples(new Int16Array(1600), 0.001).type, "recording");
+  const uttered = vad.pushSamples(new Int16Array(1600), 0.001);
+  assert.equal(uttered.type, "utterance");
+  const utteredWav = encodePcm16SamplesToWav(uttered.samples, 16000);
+  assert.equal(Buffer.from(utteredWav.slice(0, 4)).toString("ascii"), "RIFF");
+  assert.equal(Buffer.from(utteredWav.slice(8, 12)).toString("ascii"), "WAVE");
+
+  // Voice live progress items use goalState.turnCount correctly and sort pending items first.
+  const liveProgressItems = buildVoiceLiveProgressItems({
+    groups,
+    threads: threads.map((t) => (
+      t.id === "antigravity:cli:t-demo-1"
+        ? { ...t, goalState: { active: true, turnCount: 3, maxTurns: 20 } }
+        : t
+    )),
+    pendingRequests: [
+      { id: "req-1", threadId: "claude:default:t-demo-2", title: "确认写入家具目录" },
+    ],
+  });
+  const demoLiveItem = liveProgressItems.find((it) => it.threadId === "antigravity:cli:t-demo-1");
+  assert.equal(demoLiveItem?.goalBadge, "3/20");
+  assert.equal(liveProgressItems[0].status, "pending");
+  const liveProgressHtml = renderVoiceLiveProgressHtml(liveProgressItems);
+  assert.match(liveProgressHtml, /ac-icon-target[^>]*>[\s\S]*?<\/svg>\s*3\/20/);
+  assert.match(liveProgressHtml, /data-voice-approve="req-1"/);
+
+  // Server-side fuzzy voice target fallback matches short alias / project basename / thread title.
+  const voiceSnapshot = {
+    projects: groups.map((g) => ({
+      cwd: g.cwd,
+      name: g.name,
+      alias: g.alias,
+      pinned: g.pinned,
+      liveCount: g.liveCount,
+      pendingCount: g.pendingCount,
+      threads: g.threads.map((t) => ({ id: t.id, title: t.title, provider: t.provider })),
+    })),
+  };
+  const fuzzyByAlias = resolveFuzzyVoiceTarget({
+    intent: "open_thread",
+    targetProjectCwd: "demo-app",
+    heardText: "打开示例小屋透视检查对话",
+  }, voiceSnapshot);
+  assert.equal(fuzzyByAlias.cwd, "/workspace/demo/demo-app");
+  assert.equal(fuzzyByAlias.threadId, "antigravity:cli:t-demo-1");
+});
+
+test("model fallback selector and turbo permission helpers never leave UI selectors empty or locked", () => {
+  assert.ok(PERMISSION_MODES.includes("turbo"));
+  assert.equal(isTurboPermissionMode("turbo"), true);
+  assert.equal(isTurboPermissionMode("workspace"), false);
+  assert.deepEqual(codexExecutionPolicy("turbo"), { approvalPolicy: "never", sandbox: "danger-full-access" });
+  assert.equal(claudePermissionMode("turbo"), "bypassPermissions");
+  assert.equal(antigravityModeId("turbo"), "auto");
+
+  assert.equal(UI_PERMISSION_MODES[0].value, "turbo");
+  assert.equal(normalizeUiPermissionMode("", "turbo"), "turbo");
+  assert.equal(normalizeUiPermissionMode("turbo"), "turbo");
+  assert.match(permissionModeDisplayLabel("turbo"), /Turbo/);
+
+  // Even when /api/models has not responded yet, resolveModelsForProvider supplies full Antigravity models with Carbon Orchestrator default.
+  const agyFallback = resolveModelsForProvider({}, [], "antigravity");
+  assert.ok(agyFallback.length >= 4);
+  const def = pickDefaultModelForProvider(agyFallback, "antigravity");
+  assert.equal(def?.id, "gemini-pro-orchestrator");
+  assert.equal(def?.displayName, "Orchestrator (Carbon)");
+
+  const claudeFallback = resolveModelsForProvider({}, [], "claude");
+  assert.ok(claudeFallback.some((m) => m.id === "claude-sonnet-5-5" && m.isDefault));
+  assert.ok(claudeFallback.some((m) => m.id === "claude-opus-5-5"));
+  assert.ok(claudeFallback.some((m) => m.id === "claude-fable-5-2"));
+
+  const preserved = ensurePreferredModelInList(claudeFallback, "claude", "claude-opus-5-6");
+  assert.equal(preserved[0]?.id, "claude-opus-5-6");
+  const rejectedCrossClaude = ensurePreferredModelInList(claudeFallback, "claude", "gpt-5.4");
+  assert.equal(rejectedCrossClaude.some((m) => m.id === "gpt-5.4"), false);
+  const codexFallback = resolveModelsForProvider({}, [], "codex");
+  const rejectedCrossCodex = ensurePreferredModelInList(codexFallback, "codex", "claude-opus-5-5");
+  assert.equal(rejectedCrossCodex.some((m) => m.id === "claude-opus-5-5"), false);
+});
+
+test("UI noise reduction collapses process items, filters legacy agy-gen echoes, and humanizes live activity", () => {
+  assert.equal(isRawToolEchoItem({ type: "agentMessage", id: "agy-gen-12", text: "Showing lines 1-10", phase: "commentary" }), true);
+  assert.equal(
+    isRawToolEchoItem({
+      type: "agentMessage",
+      id: "other-1",
+      phase: "commentary",
+      text: "Created At: 2026-11-14T08:00:00+08:00\nShowing lines 1-50 of 100",
+    }),
+    true,
+  );
+  assert.equal(isRawToolEchoItem({ type: "mcpToolCall", tool: "exit_plan_mode" }), true);
+  assert.equal(isRawToolEchoItem({ type: "agentMessage", id: "agy-msg-1", text: "正常回复", phase: "final_answer" }), false);
+
+  assert.equal(
+    unwrapToolText('"\\"File ../../workspace/demo/agent-control/src/server.mjs\\""'),
+    "workspace/demo/agent-control/src/server.mjs",
+  );
+  assert.equal(
+    formatCompactPath('"/workspace/demo/agent-control/src/server.mjs"'),
+    "src/server.mjs",
+  );
+
+  const compactSummary = summarizeProcessItems([
+    { type: "reasoning", content: ["internal thought"] },
+    { type: "mcpToolCall", tool: "read_file", arguments: { Path: '"/repo/public/app.js"' } },
+    { type: "mcpToolCall", tool: "edit_file", arguments: { Path: '"/repo/public/markdown.js"' } },
+    { type: "commandExecution", command: '"npm test"' },
+  ]);
+  assert.equal(compactSummary, "已执行 · 改动 markdown.js · 命令 1 次");
+
+  const repeatedItems = [
+    { type: "userMessage", content: [{ type: "text", text: "帮我优化界面" }] },
+    { type: "reasoning", content: ["English internal chain of thought"] },
+    { type: "mcpToolCall", tool: "read_file", arguments: { Path: '"/workspace/demo/agent-control/public/app.js"' }, status: "completed" },
+    { type: "mcpToolCall", tool: "read_file", arguments: { Path: '"/workspace/demo/agent-control/public/markdown.js"' }, status: "completed" },
+    { type: "agentMessage", id: "agy-gen-3", phase: "commentary", text: "Created At: 2026-11-14\nShowing lines 1-200 of 500" },
+    { type: "mcpToolCall", tool: "exit_plan_mode", arguments: { plan: "hidden" }, status: "completed" },
+    { type: "agentMessage", id: "agy-msg-4", phase: "commentary", text: "先检查前端渲染模块，再合并展示。" },
+  ];
+  for (let n = 0; n < 4; n += 1) {
+    repeatedItems.push({
+      type: "fileChange",
+      status: "completed",
+      changes: [{ path: '"/workspace/demo/agent-control/public/app.js"', kind: "modify", diff: `"const hugeDiff${n} = ${"x".repeat(500)};"` }],
+    });
+    repeatedItems.push({
+      type: "mcpToolCall",
+      tool: "edit_file",
+      status: "completed",
+      arguments: { TargetFile: '"/workspace/demo/agent-control/src/server.mjs"' },
+    });
+  }
+  repeatedItems.push(
+    { type: "commandExecution", command: '"npm test"', status: "completed", aggregatedOutput: "19/19 passed" },
+    { type: "agentMessage", id: "agy-msg-5", phase: "final_answer", text: "已完成精简，过程收起为单条摘要 <!-- GOAL_COMPLETE -->" },
+  );
+
+  const rendered = renderTurnHtml({
+    id: "turn-compact",
+    status: "completed",
+    items: repeatedItems,
+  }, { agentLabel: "Antigravity" });
+
+  assert.doesNotMatch(rendered, /过程汇报/);
+  assert.doesNotMatch(rendered, /Showing lines 1-200/);
+  assert.doesNotMatch(rendered, /exit_plan_mode/);
+  assert.doesNotMatch(rendered, /<details[^>]*\bopen\b/);
+  assert.doesNotMatch(rendered, /\/workspace\//);
+  assert.doesNotMatch(rendered, /const hugeDiff/);
+  assert.equal((rendered.match(/class="process-summary-box"/g) || []).length, 1);
+  assert.equal((rendered.match(/public\/app\.js/g) || []).length, 1);
+  assert.equal((rendered.match(/src\/server\.mjs/g) || []).length, 1);
+  assert.match(rendered, /已执行 · 改动 app\.js、server\.mjs · 命令 1 次/);
+  assert.match(rendered, /4 处/);
+  assert.match(rendered, /查阅<\/span>\s*<span class="process-note-text">app\.js、markdown\.js/);
+  assert.match(rendered, /内部推理记录（共 1 段，按需展开）/);
+  assert.match(rendered, /已完成精简，过程收起为单条摘要/);
+  assert.match(rendered, /目标已达成/);
+
+  assert.deepEqual(
+    humanizeLiveActivity({ phase: "File ../../workspace/demo/agent-control/public/app.js", text: "completed" }),
+    { phase: "正在处理 app.js…", detail: "" },
+  );
+  assert.deepEqual(
+    humanizeLiveActivity({ phase: "read_file", text: "in_progress" }),
+    { phase: "正在查阅文件…", detail: "" },
+  );
+  assert.deepEqual(
+    humanizeLiveActivity({ phase: "Check git status", text: "completed" }),
+    { phase: "正在检查代码…", detail: "" },
+  );
+  assert.deepEqual(
+    humanizeLiveActivity({ phase: "准备工具 edit_file", text: "in_progress" }),
+    { phase: "正在修改代码…", detail: "" },
+  );
+  assert.deepEqual(
+    humanizeLiveActivity({ phase: "Codex 执行中", text: "处理中" }),
+    { phase: "Codex 执行中", detail: "处理中" },
+  );
+  assert.deepEqual(
+    humanizeLiveActivity({ phase: "read_file", text: "in_progress" }, { isStreamingText: true }),
+    { phase: "正在生成回复…", detail: "" },
+  );
+
+  // Voice briefing skips legacy agy-gen-* raw tool output.
+  const briefing = buildLocalProgressBriefing({
+    activeThread: {
+      title: "手机端精简",
+      turns: [{
+        items: [
+          { type: "agentMessage", id: "agy-msg-ok", phase: "final_answer", text: "已收敛工具输出" },
+          { type: "agentMessage", id: "agy-gen-99", phase: "commentary", text: "Created At: 2026-11-14 Showing lines 1-800" },
+        ],
+      }],
+    },
+  });
+  assert.match(briefing, /已收敛工具输出/);
+  assert.doesNotMatch(briefing, /Showing lines/);
+});
+
+test("formatTokensPerSec and renderAgentTelemetryBarHtml render 4-agent HUD, 5h/weekly windows, deduped accounts, and drawer jump pills", () => {
+  assert.equal(formatTokensPerSec(0), "0");
+  assert.equal(formatTokensPerSec(12.34), "12.3");
+  assert.equal(formatTokensPerSec(128.6), "129");
+
+  const nowSec = 1_794_680_000;
+  const profiles = [
+    {
+      key: "antigravity:desktop",
+      provider: "antigravity",
+      id: "desktop",
+      label: "Antigravity 桌面",
+      installed: true,
+      account: { email: "guo.deqing@gmail.com" },
+      quota: {
+        status: "ok",
+        accountLabel: "guo.deqing@gmail.com",
+        windows: {
+          fiveHour: { id: "gemini-5h", windowKind: "five_hour", label: "Gemini 5h", remainingPercent: 100 },
+          weekly: { id: "gemini-weekly", windowKind: "weekly", label: "Gemini 周", remainingPercent: 100 },
+          thirdPartyFiveHour: { id: "3p-5h", windowKind: "third_party_5h", label: "3P 5h", remainingPercent: 95 },
+        },
+        buckets: [],
+      },
+    },
+    {
+      key: "antigravity:cli",
+      provider: "antigravity",
+      id: "cli",
+      label: "Antigravity CLI",
+      installed: true,
+      account: { email: "guo.deqing@gmail.com" },
+      quota: {
+        status: "ok",
+        accountLabel: "guo.deqing@gmail.com",
+        windows: {
+          fiveHour: { id: "gemini-5h", windowKind: "five_hour", label: "Gemini 5h", remainingPercent: 100 },
+          weekly: { id: "gemini-weekly", windowKind: "weekly", label: "Gemini 周", remainingPercent: 100 },
+        },
+        buckets: [],
+      },
+    },
+    {
+      key: "codex:default",
+      provider: "codex",
+      id: "default",
+      label: "Codex Pro",
+      installed: true,
+      account: { email: "pro@example.com" },
+      quota: {
+        status: "warn",
+        windows: {
+          fiveHour: { id: "5h", windowKind: "five_hour", label: "5h 窗口", remainingPercent: 84 },
+          weekly: { id: "weekly", windowKind: "weekly", label: "周限额", remainingPercent: 67, resetsAt: nowSec + 7200 },
+        },
+        buckets: [
+          { id: "credits", windowKind: "credits", label: "积分", remainingPercent: null, detail: "积分 38591" },
+        ],
+      },
+    },
+    {
+      key: "claude:default",
+      provider: "claude",
+      id: "default",
+      label: "Claude Code",
+      installed: true,
+      quota: {
+        status: "exhausted",
+        windows: {
+          fiveHour: { id: "claude-5h", windowKind: "five_hour", label: "5h 窗口", remainingPercent: 0, resetsAt: nowSec + 3600 },
+          weekly: { id: "claude-7d", windowKind: "weekly", label: "周限额", remainingPercent: 72 },
+        },
+        buckets: [],
+      },
+    },
+    {
+      key: "grok:cockpit-1",
+      provider: "grok",
+      id: "cockpit-1",
+      label: "SuperGrok",
+      installed: true,
+      quota: {
+        status: "ok",
+        buckets: [
+          { id: "billing", windowKind: "subscription", label: "订阅额度", remainingPercent: 84 },
+          { id: "build", windowKind: "other", label: "Grok Build", remainingPercent: 87 },
+        ],
+      },
+    },
+    {
+      key: "grok:default",
+      provider: "grok",
+      id: "default",
+      label: "Grok 默认",
+      installed: true,
+      quota: { status: "unavailable", headline: "仅有本地历史" },
+    },
+  ];
+
+  const telemetry = {
+    updatedAt: nowSec,
+    totals: { runningCount: 3, queuedCount: 1, tokensPerSec: 42.5 },
+    byProvider: {
+      codex: {
+        provider: "codex",
+        runningCount: 2,
+        queuedCount: 0,
+        tokensPerSec: 30.2,
+        activeThreads: [{ id: "codex:default:t-1", title: "重构调度器" }],
+      },
+      claude: { provider: "claude", runningCount: 0, queuedCount: 1, tokensPerSec: 0, activeThreads: [] },
+      antigravity: {
+        provider: "antigravity",
+        runningCount: 1,
+        queuedCount: 0,
+        tokensPerSec: 12.3,
+        activeThreads: [{ id: "antigravity:desktop:c-1", title: "生成看板" }],
+      },
+      grok: { provider: "grok", runningCount: 0, queuedCount: 0, tokensPerSec: 0, activeThreads: [] },
+    },
+  };
+
+  const compactHtml = renderAgentTelemetryBarHtml(profiles, telemetry, { expanded: false, nowSec });
+  assert.match(compactHtml, /2 运行/);
+  assert.match(compactHtml, /30\.2 tok\/s/);
+  assert.match(compactHtml, /12\.3 tok\/s/);
+  assert.match(compactHtml, /1 排队/);
+  assert.match(compactHtml, /5h/);
+  assert.match(compactHtml, /周/);
+  assert.match(compactHtml, /67%/);
+  assert.match(compactHtml, /84%/);
+  assert.doesNotMatch(compactHtml, /仅有本地历史/);
+  assert.doesNotMatch(compactHtml, /data-telemetry-jump-thread/);
+
+  const expandedHtml = renderAgentTelemetryBarHtml(profiles, telemetry, {
+    expanded: true,
+    providerFilter: "codex",
+    nowSec,
+  });
+  assert.match(expandedHtml, /data-telemetry-jump-thread="codex:default:t-1"/);
+  assert.match(expandedHtml, /重构调度器/);
+  assert.match(expandedHtml, /data-telemetry-jump-thread="antigravity:desktop:c-1"/);
+  assert.match(expandedHtml, /data-telemetry-filter-provider="codex"/);
+  assert.match(expandedHtml, /取消筛选/);
+});
+
+test("dual Claude instances, selectable telemetry picker, identity hints, and mobile topbar summary work cleanly", () => {
+  const nowSec = 1_794_680_000;
+  assert.equal(formatProfileIdentityHint({ account: { email: "alice@example.com" } }), "alice@example.com");
+  assert.equal(formatProfileIdentityHint({ account: { email: "bob@example.com" } }), "bob@example.com");
+
+  const profiles = [
+    {
+      key: "antigravity:desktop",
+      provider: "antigravity",
+      id: "desktop",
+      label: "Antigravity 桌面",
+      installed: true,
+      account: { email: "agy@example.com" },
+      quota: { status: "ok", accountLabel: "agy@example.com", windows: { fiveHour: { remainingPercent: 100 } }, buckets: [] },
+    },
+    {
+      key: "antigravity:cli",
+      provider: "antigravity",
+      id: "cli",
+      label: "Antigravity CLI",
+      installed: true,
+      account: { email: "agy@example.com" },
+      quota: { status: "ok", accountLabel: "agy@example.com", windows: { fiveHour: { remainingPercent: 100 } }, buckets: [] },
+    },
+    {
+      key: "codex:default",
+      provider: "codex",
+      id: "default",
+      label: "Codex 默认",
+      installed: true,
+      account: { email: "codex-a@example.com" },
+      quota: { status: "ok", windows: { fiveHour: { remainingPercent: 88 }, weekly: { remainingPercent: 60 } }, buckets: [] },
+    },
+    {
+      key: "codex:codex",
+      provider: "codex",
+      id: "codex",
+      label: "Codex · personal",
+      installed: true,
+      account: { email: "codex-b@example.com" },
+      quota: { status: "ok", windows: { fiveHour: { remainingPercent: 95 }, weekly: { remainingPercent: 70 } }, buckets: [] },
+    },
+    {
+      key: "claude:default",
+      provider: "claude",
+      id: "default",
+      label: "Claude 默认",
+      installed: true,
+      account: { email: "alice@example.com" },
+      quota: { status: "ok", planLabel: "Max", windows: { fiveHour: { remainingPercent: 92 }, weekly: { remainingPercent: 21 } }, buckets: [] },
+    },
+    {
+      key: "claude:claude-hotmail",
+      provider: "claude",
+      id: "claude-hotmail",
+      label: "claude hotmail",
+      installed: true,
+      account: { email: "bob@example.com" },
+      quota: {
+        statusTone: "exhausted",
+        planLabel: "Pro",
+        windows: {
+          fiveHour: { remainingPercent: 0, resetsAt: nowSec + 3600 },
+          weekly: { remainingPercent: 28 },
+        },
+        buckets: [],
+      },
+    },
+    {
+      key: "grok:work",
+      provider: "grok",
+      id: "work",
+      label: "Grok · work",
+      installed: true,
+      authenticated: true,
+      quota: { status: "ok", buckets: [{ id: "billing", windowKind: "subscription", label: "订阅额度", remainingPercent: 80 }] },
+    },
+    {
+      key: "grok:default",
+      provider: "grok",
+      id: "default",
+      label: "Grok 默认",
+      installed: true,
+      authenticated: false,
+      quota: { status: "unavailable", headline: "仅有本地历史" },
+    },
+  ];
+
+  const items = buildSelectableTelemetryItems(profiles);
+  // Antigravity desktop+cli share account -> deduplicated; both Codex & both Claude instances stay distinct.
+  assert.deepEqual(
+    items.map((i) => ({ key: i.key, defaultVisible: i.defaultVisible })),
+    [
+      { key: "codex:default", defaultVisible: true },
+      { key: "codex:codex", defaultVisible: true },
+      { key: "claude:default", defaultVisible: true },
+      { key: "claude:claude-hotmail", defaultVisible: true },
+      { key: "antigravity:desktop", defaultVisible: true },
+      { key: "grok:work", defaultVisible: true },
+      { key: "grok:default", defaultVisible: false },
+    ],
+  );
+
+  // Newly added defaultVisible instances appear automatically even with persisted prefs.
+  const upgradedVisible = resolveVisibleTelemetryKeys(items, {
+    selectedKeys: ["codex:default", "claude:default"],
+    knownKeys: ["codex:default", "claude:default", "antigravity:desktop", "grok:work", "grok:default"],
+  });
+  assert.deepEqual(upgradedVisible, ["codex:default", "codex:codex", "claude:default", "claude:claude-hotmail"]);
+
+  const telemetry = {
+    updatedAt: nowSec,
+    byProvider: {
+      codex: { provider: "codex", runningCount: 1, queuedCount: 0, tokensPerSec: 18.2, activeThreads: [] },
+      claude: { provider: "claude", runningCount: 1, queuedCount: 1, tokensPerSec: 22.4, activeThreads: [] },
+      antigravity: { provider: "antigravity", runningCount: 0, queuedCount: 0, tokensPerSec: 0, activeThreads: [] },
+      grok: { provider: "grok", runningCount: 0, queuedCount: 0, tokensPerSec: 0, activeThreads: [] },
+    },
+    byProfile: {
+      "codex:default": { key: "codex:default", runningCount: 0, queuedCount: 0, tokensPerSec: 0, activeThreads: [] },
+      "codex:codex": { key: "codex:codex", runningCount: 1, queuedCount: 0, tokensPerSec: 18.2, activeThreads: [] },
+      "claude:default": { key: "claude:default", runningCount: 0, queuedCount: 0, tokensPerSec: 0, activeThreads: [] },
+      "claude:claude-hotmail": { key: "claude:claude-hotmail", runningCount: 1, queuedCount: 1, tokensPerSec: 22.4, activeThreads: [] },
+      "antigravity:desktop": { key: "antigravity:desktop", runningCount: 0, queuedCount: 0, tokensPerSec: 0, activeThreads: [] },
+      "grok:work": { key: "grok:work", runningCount: 0, queuedCount: 0, tokensPerSec: 0, activeThreads: [] },
+    },
+  };
+
+  const fullBar = renderAgentTelemetryBarHtml(profiles, telemetry, { pickerOpen: true, nowSec });
+  assert.match(fullBar, /Codex · personal/);
+  assert.match(fullBar, /Claude · example/);
+  assert.match(fullBar, /claude hotmail/);
+  assert.match(fullBar, /92%/);
+  assert.match(fullBar, /21%/);
+  assert.match(fullBar, /28%/);
+  assert.match(fullBar, /22\.4 tok\/s/);
+  assert.match(fullBar, /data-telemetry-pick-key="claude:claude-hotmail"/);
+  assert.match(fullBar, /data-telemetry-mobile-close/);
+
+  // Compact mode by default only renders active/in-use items; expanded mode shows full subset grid & picker count.
+  const subsetCompactBar = renderAgentTelemetryBarHtml(profiles, telemetry, {
+    visibleKeys: ["claude:default", "claude:claude-hotmail"],
+    activeProvider: "claude",
+    activeProfileId: "claude-hotmail",
+    nowSec,
+  });
+  assert.match(subsetCompactBar, /is-compact/);
+  assert.match(subsetCompactBar, /data-telemetry-item-key="claude:claude-hotmail"/);
+  assert.match(subsetCompactBar, /telemetry-overflow-pill[\s\S]*?\+1 运行</);
+  assert.doesNotMatch(subsetCompactBar, /data-telemetry-item-key="claude:default"/);
+  assert.doesNotMatch(subsetCompactBar, /data-telemetry-item-key="codex:default"/);
+  assert.doesNotMatch(subsetCompactBar, /data-telemetry-item-key="grok:work"/);
+
+  const subsetBar = renderAgentTelemetryBarHtml(profiles, telemetry, {
+    visibleKeys: ["claude:default", "claude:claude-hotmail"],
+    expanded: true,
+    nowSec,
+  });
+  assert.match(subsetBar, /data-telemetry-item-key="claude:default"/);
+  assert.match(subsetBar, /data-telemetry-item-key="claude:claude-hotmail"/);
+  assert.doesNotMatch(subsetBar, /data-telemetry-item-key="codex:default"/);
+  assert.doesNotMatch(subsetBar, /data-telemetry-item-key="grok:work"/);
+  assert.match(subsetBar, /ac-icon-settings/);
+  assert.match(subsetBar, /显示 \(2\/7\)/);
+
+  const badge = summarizeTelemetryMobileBadge(profiles, telemetry, null, { nowSec });
+  assert.equal(badge.text, "2运行");
+  assert.equal(badge.dotClass, "is-running");
+
+  const idleExhaustedBadge = summarizeTelemetryMobileBadge(
+    profiles,
+    {
+      ...telemetry,
+      byProvider: {
+        codex: { runningCount: 0, queuedCount: 0, tokensPerSec: 0 },
+        claude: { runningCount: 0, queuedCount: 0, tokensPerSec: 0 },
+        antigravity: { runningCount: 0, queuedCount: 0, tokensPerSec: 0 },
+        grok: { runningCount: 0, queuedCount: 0, tokensPerSec: 0 },
+      },
+    },
+    null,
+    { nowSec },
+  );
+  assert.equal(idleExhaustedBadge.text, "额度");
+  assert.equal(idleExhaustedBadge.dotClass, "is-danger");
+});
+
+test("telemetry bar deduplicates cloned quota buckets and keeps default view ultra-compact for active agents", () => {
+  const nowSec = 1_794_710_000;
+  // Simulate HTTP JSON serialization where quota.windows.* and quota.buckets[*] are distinct object instances.
+  const clonedProfiles = [
+    {
+      key: "codex:default",
+      provider: "codex",
+      id: "default",
+      label: "Codex · 163",
+      installed: true,
+      account: { email: "user@163.com" },
+      quota: {
+        status: "ok",
+        windows: {
+          weekly: { id: "primary", windowKind: "weekly", label: "周限额", remainingPercent: 67 },
+        },
+        buckets: [
+          { id: "primary", windowKind: "weekly", label: "周限额", remainingPercent: 67 },
+          { id: "credits", windowKind: "credits", label: "积分", remainingPercent: null, detail: "38900" },
+        ],
+      },
+    },
+    {
+      key: "claude:default",
+      provider: "claude",
+      id: "default",
+      label: "Claude · icloud",
+      installed: true,
+      account: { email: "user@icloud.com" },
+      quota: {
+        statusTone: "exhausted",
+        windows: {
+          fiveHour: { id: "five_hour", windowKind: "five_hour", label: "5h 窗口", remainingPercent: null, detail: "充足" },
+          weekly: { id: "seven_day", windowKind: "weekly", label: "周限额", remainingPercent: 0 },
+        },
+        buckets: [
+          { id: "five_hour", windowKind: "five_hour", label: "5h 窗口", remainingPercent: null, detail: "充足" },
+          { id: "seven_day", windowKind: "weekly", label: "周限额", remainingPercent: 0 },
+        ],
+      },
+    },
+    {
+      key: "antigravity:desktop",
+      provider: "antigravity",
+      id: "desktop",
+      label: "Antigravity 桌面",
+      installed: true,
+      quota: {
+        status: "ok",
+        windows: {
+          fiveHour: { id: "agy-5h", windowKind: "five_hour", label: "Gemini 5h", remainingPercent: 98 },
+          weekly: { id: "agy-w", windowKind: "weekly", label: "Gemini 周", remainingPercent: 78 },
+        },
+        buckets: [
+          { id: "agy-5h", windowKind: "five_hour", label: "Gemini 5h", remainingPercent: 98 },
+          { id: "agy-w", windowKind: "weekly", label: "Gemini 周", remainingPercent: 78 },
+        ],
+      },
+    },
+    {
+      key: "grok:work",
+      provider: "grok",
+      id: "work",
+      label: "Grok · work",
+      installed: true,
+      authenticated: true,
+      quota: {
+        status: "ok",
+        buckets: [
+          { id: "billing", windowKind: "billing", label: "订阅额度", remainingPercent: 84 },
+          { id: "build", windowKind: "build", label: "Grok Build", remainingPercent: 87 },
+          { id: "product", windowKind: "product", label: "Grok Product 8", remainingPercent: 97 },
+        ],
+      },
+    },
+  ];
+
+  const telemetry = {
+    updatedAt: nowSec,
+    byProvider: {
+      codex: { runningCount: 0, queuedCount: 0, tokensPerSec: 0, activeThreads: [] },
+      claude: { runningCount: 0, queuedCount: 0, tokensPerSec: 0, activeThreads: [] },
+      antigravity: {
+        runningCount: 3,
+        queuedCount: 1,
+        tokensPerSec: 54.1,
+        activeThreads: [{ id: "antigravity:desktop:9e1678cb", title: "Remote Control" }],
+      },
+      grok: { runningCount: 0, queuedCount: 0, tokensPerSec: 0, activeThreads: [] },
+    },
+  };
+
+  // Default collapsed bar shows only running/current active items cleanly on one strip.
+  const compactBar = renderAgentTelemetryBarHtml(clonedProfiles, telemetry, {
+    expanded: false,
+    activeProvider: "codex",
+    activeProfileId: "default",
+    nowSec,
+  });
+  assert.match(compactBar, /is-compact/);
+  assert.match(compactBar, /data-telemetry-item-key="antigravity:desktop"/);
+  assert.match(compactBar, /data-telemetry-item-key="codex:default"/);
+  assert.doesNotMatch(compactBar, /data-telemetry-item-key="claude:default"/);
+  assert.doesNotMatch(compactBar, /data-telemetry-item-key="grok:work"/);
+  assert.match(compactBar, /5h 98%/);
+  assert.match(compactBar, /周 67%/);
+
+  // Expanded bar renders full grid and drawer with ZERO duplicate 周限额 / 5h 窗口 chips.
+  const expandedBar = renderAgentTelemetryBarHtml(clonedProfiles, telemetry, {
+    expanded: true,
+    nowSec,
+  });
+  assert.match(expandedBar, /is-expanded/);
+  assert.match(expandedBar, /Product 8/);
+  assert.doesNotMatch(expandedBar, /Produc<\/span>/);
+  assert.doesNotMatch(expandedBar, /telemetry-chip-k">周限额<\/span>/);
+  assert.doesNotMatch(expandedBar, /telemetry-chip-k">5h 窗口<\/span>/);
+  assert.match(expandedBar, /充足/);
+  assert.doesNotMatch(expandedBar, />5h<\/span><span class="telemetry-chip-v">0%/);
+  assert.equal((expandedBar.match(/telemetry-db-label">周限额</g) || []).length, 2);
+  assert.equal((expandedBar.match(/telemetry-db-label">5h 窗口</g) || []).length, 1);
+});
+
+test("compact mobile visual helpers and index.html preserve all existing IDs at version 20261116g", async () => {
+  assert.equal(compactModelBadgeLabel("Orchestrator (Carbon)"), "Carbon");
+  assert.equal(compactModelBadgeLabel("gemini-pro-orchestrator"), "Carbon");
+  assert.equal(compactModelBadgeLabel("Gemini 4 Carbon (High)"), "Carbon H");
+  assert.equal(compactModelBadgeLabel("Gemini 4 Carbon (Medium)"), "Carbon M");
+  assert.equal(compactModelBadgeLabel("Claude Opus 5.5 (Medium)"), "Opus 5.5");
+  assert.equal(compactModelBadgeLabel("Claude Sonnet 4.6"), "Sonnet 4.6");
+  assert.equal(compactModelBadgeLabel("Claude Fable 5.2"), "Fable 5.2");
+  assert.equal(compactModelBadgeLabel("claude-haiku-4-5-20251001"), "Haiku 4.5");
+  assert.equal(compactModelBadgeLabel("gpt-5.4"), "GPT-5.4");
+  assert.equal(compactModelBadgeLabel("gpt-5.3-codex"), "5.3 Codex");
+
+  assert.equal(compactEffortBadgeLabel("high"), "H");
+  assert.equal(compactEffortBadgeLabel("xhigh"), "XH");
+  assert.equal(compactEffortBadgeLabel(""), "");
+
+  const turboMeta = permissionVisualMeta("turbo");
+  assert.equal(turboMeta.value, "turbo");
+  assert.equal(turboMeta.iconName, "bolt");
+  assert.match(turboMeta.icon, /<svg[^>]*ac-icon-bolt/);
+  assert.equal(turboMeta.shortLabel, "Turbo");
+  assert.equal(turboMeta.tone, "turbo");
+  assert.equal(turboMeta.label, "Turbo（自动批准）");
+
+  assert.equal(permissionVisualMeta("plan").tone, "plan");
+  assert.equal(providerVisualMeta("antigravity").glyph, "");
+  assert.match(providerVisualMeta("antigravity").iconSvg, /<svg[^>]*is-antigravity/);
+  assert.equal(providerVisualMeta("codex").glyph, "");
+  assert.match(providerVisualMeta("codex").iconSvg, /<svg[^>]*is-codex/);
+  assert.equal(providerVisualMeta("claude").glyph, "");
+  assert.match(providerVisualMeta("claude").iconSvg, /<svg[^>]*is-claude/);
+
+  const indexPath = fileURLToPath(new URL("../public/index.html", import.meta.url));
+  const html = await readFile(indexPath, "utf8");
+  assert.match(html, /name="ac-ui-version" content="20261116g"/);
+  assert.match(html, /href="\.\/app\.css\?v=20261116g"/);
+  assert.match(html, /href="\.\/project-workspace\.css\?v=20261116g"/);
+  assert.match(html, /src="\.\/app\.js\?v=20261116g"/);
+  assert.match(html, /id="telemetryTopbarBtn"[^>]*hidden/);
+  assert.match(html, /id="activeProjectCrumb"[^>]*hidden/);
+  assert.match(html, /id="agentQuotaStrip"[^>]*hidden/);
+  assert.match(html, /id="projectTaskStrip"[^>]*hidden/);
+  assert.match(html, /<footer id="composerArea" class="composer-area" hidden>/);
+
+  for (const requiredId of [
+    "menuBtn",
+    "topbarTelemetrySlot",
+    "telemetryTopbarBtn",
+    "telemetryTopbarDot",
+    "telemetryTopbarText",
+    "providerTabs",
+    "agentQuotaStrip",
+    "agentTelemetryBar",
+    "topbarConnDot",
+    "activeProviderBadge",
+    "activeProfileBadge",
+    "activeProjectCrumb",
+    "activeTitle",
+    "activeCwd",
+    "activeGoalBadge",
+    "boardToggleBtn",
+    "boardAttentionDot",
+    "voiceModeBtn",
+    "voiceMinimizeBtn",
+    "voiceOrbBtn",
+    "voiceLiveProgressList",
+    "voiceCallTranscript",
+    "interruptBtn",
+    "topbarMoreBtn",
+    "topbarMoreMenu",
+    "goalToggleBtn",
+    "renameThreadBtn",
+    "archiveThreadBtn",
+    "refreshThreadBtn",
+    "liveBanner",
+    "livePhaseText",
+    "liveDetailText",
+    "composerProviderSelect",
+    "composerProfileSelect",
+    "composerProbeProfilesBtn",
+    "composerProfilePills",
+    "cfgChipProfileText",
+    "newModalProbeProfilesBtn",
+    "newProfilePills",
+    "modelSelect",
+    "effortSelect",
+    "permissionSelect",
+    "imageUploadBtn",
+    "composerVoiceBtn",
+    "composerGoalBtn",
+    "composerConfigBtn",
+    "composerConfigPopover",
+    "runningSubmitMode",
+    "sendBtn",
+    "remoteActiveDot",
+    "tunnelStateText",
+    "startTunnelBtn",
+    "rotateTunnelBtn",
+    "stopTunnelBtn",
+    "tunnelQrWrap",
+    "tunnelQrImg",
+    "tunnelPairUrlInput",
+    "copyTunnelUrlBtn",
+    "tunnelMissingBox",
+    "tunnelInstallCmdCode",
+    "relayAdvancedSection",
+  ]) {
+    assert.match(html, new RegExp(`id="${requiredId}"`), `missing required DOM id: ${requiredId}`);
+  }
+
+  assert.equal(normalizeProjectCwd("C:\\dev\\agent-control\\"), "C:\\dev\\agent-control");
+  assert.equal(normalizeProjectCwd("C:/"), "C:\\");
+  assert.equal(normalizeProjectCwd("\\\\nas\\share\\repo\\"), "\\\\nas\\share\\repo");
+  assert.equal(isUserHomeCwd("C:\\Users\\Alice"), true);
+  assert.equal(isUserHomeCwd("/Users/alice"), true);
+  assert.equal(isUserHomeCwd("/home/alice"), true);
+  assert.equal(projectBaseName("C:\\Users\\Alice"), "个人主目录 (~)");
+  assert.equal(projectBaseName("C:\\dev\\agent-control\\"), "agent-control");
+  assert.equal(projectBaseName("C:\\"), "C:\\");
+  assert.equal(projectBaseName("\\\\nas\\share\\repo\\"), "repo");
+});
+
+test("mergeActiveTurnIntoHistory and dedupeAdjacentTurns avoid duplicate live user bubbles without merging distinct repeated turns", () => {
+  const inProgressSamePrompt = mergeActiveTurnIntoHistory(
+    [{
+      id: "agy-step-10",
+      status: "completed",
+      items: [
+        { type: "userMessage", id: "u-10", content: [{ type: "text", text: "<USER_REQUEST>\n实现测通功能\n</USER_REQUEST>" }] },
+      ],
+    }],
+    {
+      turnId: "agy-turn-live-1",
+      userText: "实现测通功能",
+      lastText: "正在分析",
+      startedAt: 1000,
+    },
+  );
+  assert.equal(inProgressSamePrompt.length, 1);
+  assert.equal(inProgressSamePrompt[0].status, "inProgress");
+  assert.equal(inProgressSamePrompt[0].items.filter((it) => it.type === "userMessage").length, 1);
+  assert.equal(inProgressSamePrompt[0].items.some((it) => it.type === "agentMessage" && it.text === "正在分析"), true);
+
+  // Sending the same short word ("继续") after a completed turn must keep 2 separate turns.
+  const distinctRepeat = mergeActiveTurnIntoHistory(
+    [{
+      id: "agy-step-11",
+      status: "completed",
+      items: [
+        { type: "userMessage", id: "u-11", content: [{ type: "text", text: "继续" }] },
+        { type: "agentMessage", id: "a-11", text: "上一轮已完成答复", phase: "final_answer" },
+      ],
+    }],
+    {
+      turnId: "agy-turn-live-2",
+      userText: "继续",
+      lastText: "",
+      startedAt: 2000,
+    },
+  );
+  assert.equal(distinctRepeat.length, 2);
+
+  // Frontend fallback dedupeAdjacentTurns mirrors the same guarantee for running duplicate tails.
+  const frontMerged = dedupeAdjacentTurns([
+    {
+      id: "agy-step-20",
+      status: "completed",
+      items: [{ type: "userMessage", content: [{ type: "text", text: "手机端测试输入" }] }],
+    },
+    {
+      id: "agy-turn-uuid",
+      status: "inProgress",
+      items: [
+        { type: "userMessage", content: [{ type: "text", text: "手机端测试输入" }] },
+        { type: "agentMessage", text: "好的，收到", phase: "final_answer" },
+      ],
+    },
+  ]);
+  assert.equal(frontMerged.length, 1);
+  assert.equal(frontMerged[0].items.filter((it) => it.type === "userMessage").length, 1);
+  assert.equal(frontMerged[0].items.some((it) => it.text === "好的，收到"), true);
+
+  const frontDistinct = dedupeAdjacentTurns([
+    {
+      id: "agy-step-21",
+      status: "completed",
+      items: [
+        { type: "userMessage", content: [{ type: "text", text: "继续" }] },
+        { type: "agentMessage", text: "上一轮回答", phase: "final_answer" },
+      ],
+    },
+    {
+      id: "agy-turn-uuid-2",
+      status: "inProgress",
+      items: [{ type: "userMessage", content: [{ type: "text", text: "继续" }] }],
+    },
+  ]);
+  assert.equal(frontDistinct.length, 2);
+});
+
+test("running turns never duplicate previous turn summary at bottom across streaming reconciliation, hot-extension, or turn merging", () => {
+  const prevSummary = "第一轮任务已经全部排查完毕，修改了 server.mjs 并验证测试全部通过。";
+  const turnsWithRunningTail = [
+    {
+      id: "agy-step-10",
+      status: "completed",
+      startedAt: 1000,
+      items: [
+        { type: "userMessage", id: "u-10", content: [{ type: "text", text: "排查登录超时的原因" }] },
+        { type: "agentMessage", id: "agy-msg-10", text: prevSummary, phase: "final_answer" },
+      ],
+    },
+    {
+      id: "agy-step-20",
+      status: "inProgress",
+      startedAt: 2000,
+      items: [
+        { type: "userMessage", id: "u-20", content: [{ type: "text", text: "继续修复手机端列表样式" }] },
+        { type: "mcpToolCall", id: "tool-20", tool: "read_file", arguments: { path: "public/app.css" }, status: "completed" },
+      ],
+    },
+  ];
+
+  // 1. Stale streamingText matching an earlier completed turn (exact or >=24-char slice) is detected as persisted,
+  // while synthetic live reply items (:agent / :live) and genuine new streaming text are NOT suppressed.
+  assert.equal(isStreamingTextAlreadyPersisted(turnsWithRunningTail, prevSummary), true);
+  assert.equal(isStreamingTextAlreadyPersisted(turnsWithRunningTail, "修改了 server.mjs 并验证测试全部通过。"), true);
+  assert.equal(isStreamingTextAlreadyPersisted([
+    ...turnsWithRunningTail.slice(0, 1),
+    {
+      ...turnsWithRunningTail[1],
+      items: [
+        ...turnsWithRunningTail[1].items,
+        { type: "agentMessage", id: "agy-turn-20:agent", text: "正在生成新回复", phase: "final_answer" },
+      ],
+    },
+  ], "正在生成新回复"), false);
+
+  // 2. renderTurnHtml with hideSyntheticLiveReply suppresses synthetic :agent / :live bubble while #streamingTurn streams.
+  const hiddenLiveHtml = renderTurnHtml(
+    {
+      id: "agy-step-20",
+      status: "inProgress",
+      items: [
+        { type: "userMessage", id: "u-20", content: [{ type: "text", text: "继续" }] },
+        { type: "agentMessage", id: "agy-turn-20:agent", text: "重复的流式回复", phase: "final_answer" },
+      ],
+    },
+    { hideSyntheticLiveReply: true },
+  );
+  assert.doesNotMatch(hiddenLiveHtml, /重复的流式回复/);
+
+  // 3. mergeActiveTurnIntoHistory refuses to append a stale active turn below a newer turn.
+  const mergedWithoutStaleActive = mergeActiveTurnIntoHistory(turnsWithRunningTail, {
+    turnId: "agy-turn-old-10",
+    userText: "排查登录超时的原因",
+    lastText: prevSummary,
+    startedAt: 1000,
+  });
+  assert.equal(mergedWithoutStaleActive.length, 2);
+  assert.equal(mergedWithoutStaleActive[1].id, "agy-step-20");
+
+  // 4. mergeUpstreamLiveThreadState refuses to append stale lastUpstream turn below [Turn N, Turn N+1].
+  const upstreamMerged = mergeUpstreamLiveThreadState(
+    {
+      thread: {
+        id: "antigravity:desktop:abc",
+        live: true,
+        turns: turnsWithRunningTail,
+      },
+    },
+    {
+      thread: {
+        id: "antigravity:desktop:abc",
+        live: true,
+        turns: [
+          {
+            id: "agy-turn-stale-10",
+            status: "inProgress",
+            startedAt: 1000,
+            items: [
+              { type: "userMessage", content: [{ type: "text", text: "排查登录超时的原因" }] },
+              { type: "agentMessage", text: prevSummary, phase: "final_answer" },
+            ],
+          },
+        ],
+      },
+      activity: { status: "running" },
+    },
+  );
+  assert.equal(upstreamMerged.thread.turns.length, 2);
+  assert.equal(upstreamMerged.thread.turns[1].id, "agy-step-20");
+
+  // 5. dedupeAdjacentTurns removes trailing duplicate turn already completed earlier above current running turn.
+  const deduped = dedupeAdjacentTurns([
+    ...turnsWithRunningTail,
+    {
+      id: "agy-turn-dup-10",
+      status: "inProgress",
+      startedAt: 1000,
+      items: [
+        { type: "userMessage", id: "u-dup", content: [{ type: "text", text: "排查登录超时的原因" }] },
+        { type: "agentMessage", id: "a-dup", text: prevSummary, phase: "final_answer" },
+      ],
+    },
+  ]);
+  assert.equal(deduped.length, 2);
+  assert.equal(deduped[1].id, "agy-step-20");
+
+  // 6. dedupeAdjacentTurns keeps distinct turns even if turn.id collides across checkpoints when prompt or reply differs.
+  const preservedCollision = dedupeAdjacentTurns([
+    {
+      id: "agy-step-2609",
+      status: "completed",
+      items: [
+        { type: "userMessage", id: "u-old", content: [{ type: "text", text: "老问题" }] },
+        { type: "mcpToolCall", id: "t-old", tool: "read_file", arguments: { path: "a.js" }, status: "completed" },
+      ],
+    },
+    {
+      id: "agy-step-2611",
+      status: "completed",
+      items: [{ type: "userMessage", id: "u-mid", content: [{ type: "text", text: "中间问题" }] }],
+    },
+    {
+      id: "agy-step-2609",
+      status: "completed",
+      items: [
+        { type: "userMessage", id: "u-new", content: [{ type: "text", text: "新问题" }] },
+        { type: "agentMessage", id: "a-new", text: "新任务的完整汇总", phase: "final_answer" },
+      ],
+    },
+  ]);
+  assert.equal(preservedCollision.length, 3);
+  assert.equal(preservedCollision[2].items[1].text, "新任务的完整汇总");
+
+  // 7. renderTurnHtml displays clear status hints on process-only finished turns, and omits when summary exists or still running.
+  const processOnlyTurn = {
+    id: "agy-proc-1",
+    status: "completed",
+    items: [
+      { type: "userMessage", id: "u-p1", content: [{ type: "text", text: "查日志" }] },
+      { type: "mcpToolCall", id: "t-p1", tool: "read_file", arguments: { path: "a.js" }, status: "completed" },
+    ],
+  };
+  const supersededHtml = renderTurnHtml(processOnlyTurn, {
+    showIncompleteSummaryHint: true,
+    supersededByNextTurn: true,
+    suppressRunning: true,
+  });
+  assert.match(supersededHtml, /已由后续新消息接续处理/);
+
+  const stalledTailHtml = renderTurnHtml(processOnlyTurn, {
+    showIncompleteSummaryHint: true,
+    supersededByNextTurn: false,
+    suppressRunning: true,
+  });
+  assert.match(stalledTailHtml, /本轮停在工具执行步/);
+
+  const runningHtml = renderTurnHtml({ ...processOnlyTurn, status: "inProgress" }, {
+    showIncompleteSummaryHint: true,
+    supersededByNextTurn: false,
+    forceRunning: true,
+  });
+  assert.doesNotMatch(runningHtml, /本轮停在工具执行步/);
+
+  const completedWithReplyHtml = renderTurnHtml({
+    ...processOnlyTurn,
+    items: [
+      ...processOnlyTurn.items,
+      { type: "agentMessage", id: "a-p1", text: "正常汇总内容", phase: "final_answer" },
+    ],
+  }, {
+    showIncompleteSummaryHint: true,
+    supersededByNextTurn: false,
+    suppressRunning: true,
+  });
+  assert.doesNotMatch(completedWithReplyHtml, /本轮停在工具执行步/);
+  assert.doesNotMatch(completedWithReplyHtml, /已由后续新消息接续处理/);
+});
+
+test("profile health classification, sorting, failover, and visual pills handle multi-instance availability cleanly", () => {
+  const rateErr = classifyProfileError("HTTP 429 usage_limit exceeded");
+  assert.equal(rateErr.status, "cooldown");
+  assert.equal(rateErr.shortReason, "限额冷却");
+
+  const authErr = classifyProfileError("401 unauthorized invalid api key");
+  assert.equal(authErr.status, "unavailable");
+  assert.equal(authErr.shortReason, "鉴权失效");
+
+  const netErr = classifyProfileError("fetch failed ECONNREFUSED 502 Bad Gateway");
+  assert.equal(netErr.status, "unavailable");
+  assert.equal(netErr.shortReason, "线路不通");
+
+  const expiredCooldown = normalizeProfileHealth({
+    status: "cooldown",
+    cooldownUntil: Math.floor(Date.now() / 1000) - 10,
+  });
+  assert.equal(expiredCooldown.status, "unknown");
+
+  const profiles = [
+    {
+      id: "bad",
+      key: "codex:bad",
+      provider: "codex",
+      label: "Codex 默认",
+      installed: true,
+      endpointLabel: "relay-a.example.com",
+      health: { status: "unavailable", reasonCode: "auth", shortReason: "鉴权失效", detail: "<script>bad</script>" },
+    },
+    {
+      id: "slow",
+      key: "codex:slow",
+      provider: "codex",
+      label: "Codex · slow",
+      installed: true,
+      endpointLabel: "官方",
+      health: { status: "healthy", latencyMs: 420 },
+    },
+    {
+      id: "fast",
+      key: "codex:fast",
+      provider: "codex",
+      label: "Codex · fast",
+      installed: true,
+      account: { signedIn: true, email: "guo@example.com" },
+      health: { status: "healthy", latencyMs: 95 },
+    },
+    {
+      id: "cool",
+      key: "codex:cool",
+      provider: "codex",
+      label: "Codex · cool",
+      installed: true,
+      health: { status: "cooldown", shortReason: "限额冷却" },
+    },
+  ];
+
+  const backSorted = sortProfilesByHealth(profiles);
+  assert.deepEqual(backSorted.map((p) => p.id), ["fast", "slow", "cool", "bad"]);
+
+  const uiSorted = sortProfilesByAvailability(profiles);
+  assert.deepEqual(uiSorted.map((p) => p.id), ["fast", "slow", "cool", "bad"]);
+  assert.equal(pickBestAvailableProfile(profiles, "bad")?.id, "fast");
+  assert.equal(findFailoverCandidateProfile(profiles, "codex", "bad")?.id, "fast");
+  assert.equal(profileHealthVisualMeta(profiles[2]).badgeText, "95ms");
+  assert.match(profileOptionLabel(profiles[2]), /95ms/);
+  assert.doesNotMatch(profileOptionLabel(profiles[2]), /🟢|🟡|🔴/);
+  assert.equal(compactProfileChipText(profiles[3]), "cool");
+
+  const html = renderProfilePillsHtml(profiles, {
+    selectedId: "bad",
+    probingKeys: new Set(["codex:slow"]),
+    activeLocked: true,
+  });
+  assert.match(html, /data-probe-profile="fast"/);
+  assert.match(html, /data-relay-profile="fast"/);
+  assert.match(html, /测通中…/);
+  assert.doesNotMatch(html, /<script>bad<\/script>/);
+});
+
+test("multi-instance public endpoint extraction, manual /api/profile/probe, and /api/profile/meta work with zero token cost", async (t) => {
+  const root = await mkdtemp(resolve(os.tmpdir(), "ac-multi-prof-"));
+  const dataDir = resolve(root, "data");
+  const codexBad = resolve(root, "codex-default");
+  const codexOk = resolve(root, "codex-backup");
+  const claudeBad = resolve(root, "claude-default");
+  const claudeOk = resolve(root, "claude-alt");
+  const agyCli = resolve(root, "agy-cli");
+  await Promise.all([
+    mkdir(dataDir, { recursive: true }),
+    mkdir(codexBad, { recursive: true }),
+    mkdir(codexOk, { recursive: true }),
+    mkdir(claudeBad, { recursive: true }),
+    mkdir(claudeOk, { recursive: true }),
+    mkdir(agyCli, { recursive: true }),
+  ]);
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  await writeFile(
+    resolve(codexBad, "config.toml"),
+    'model_provider = "relay"\n[model_providers.relay]\nbase_url = "https://relay-a.example.com/v1?token=secret-url-param"\n',
+  );
+  await writeFile(resolve(codexBad, ".mock-probe-error"), "429 usage_limit exceeded");
+  await writeFile(resolve(codexOk, "auth.json"), JSON.stringify({ tokens: { access_token: "sk-must-not-leak" } }));
+
+  await writeFile(
+    resolve(claudeBad, "settings.json"),
+    JSON.stringify({
+      env: {
+        ANTHROPIC_BASE_URL: "https://claude-mirror.example.com/api",
+        ANTHROPIC_AUTH_TOKEN: "secret-should-never-leak",
+      },
+    }),
+  );
+  await writeFile(resolve(claudeBad, ".mock-probe-error"), "401 unauthorized invalid api key");
+
+  const srv = await createAgentControlServer({
+    port: 0,
+    disableRelay: true,
+    dataDir,
+    env: {
+      ...process.env,
+      CODEX_BIN: MOCK_CODEX_BIN,
+      CLAUDE_BIN: MOCK_CLAUDE_BIN,
+      AGY_BIN: MOCK_AGY_BIN,
+      AGENT_CONTROL_CODEX_HOMES: JSON.stringify([
+        { id: "default", label: "Codex · 主力", home: codexBad },
+        { id: "backup", label: "Codex · 备用", home: codexOk },
+      ]),
+      AGENT_CONTROL_CLAUDE_CONFIG_DIRS: JSON.stringify([
+        { id: "default", label: "Claude · 镜像", home: claudeBad },
+        { id: "alt", label: "Claude · 直连", home: claudeOk },
+      ]),
+      AGENT_CONTROL_AGY_APP_DATA_DIRS: JSON.stringify([
+        { id: "cli", label: "Antigravity CLI", home: agyCli, profileType: "cli" },
+      ]),
+    },
+  });
+  await srv.start();
+  t.after(() => srv.close());
+
+  const initialProvRes = await fetch(`${srv.url}/api/providers`);
+  assert.equal(initialProvRes.status, 200);
+  const initialProv = await initialProvRes.json();
+  const initialDump = JSON.stringify(initialProv);
+  assert.doesNotMatch(initialDump, /secret-should-never-leak/);
+  assert.doesNotMatch(initialDump, /sk-must-not-leak/);
+  assert.doesNotMatch(initialDump, /secret-url-param/);
+
+  const cBadInit = initialProv.profiles.find((p) => p.key === "codex:default");
+  const clBadInit = initialProv.profiles.find((p) => p.key === "claude:default");
+  assert.equal(cBadInit?.endpointLabel, "relay-a.example.com");
+  assert.equal(clBadInit?.endpointLabel, "claude-mirror.example.com");
+
+  // Manual probe on Codex -> bad marks cooldown, backup marks healthy & sorts first!
+  const codexProbeRes = await fetch(`${srv.url}/api/profile/probe`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ provider: "codex" }),
+  });
+  assert.equal(codexProbeRes.status, 200);
+  const codexProbeJson = await codexProbeRes.json();
+  const codexProfiles = codexProbeJson.profiles.filter((p) => p.provider === "codex");
+  assert.deepEqual(codexProfiles.map((p) => p.id), ["backup", "default"]);
+  assert.equal(codexProfiles[0].health.status, "healthy");
+  assert.ok(codexProfiles[0].health.latencyMs >= 1);
+  assert.equal(codexProfiles[1].health.status, "cooldown");
+  assert.equal(codexProfiles[1].health.shortReason, "限额冷却");
+
+  // Manual probe on Claude -> bad marks unavailable/auth, alt marks healthy & sorts first!
+  const claudeProbeRes = await fetch(`${srv.url}/api/profile/probe`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ provider: "claude" }),
+  });
+  assert.equal(claudeProbeRes.status, 200);
+  const claudeProbeJson = await claudeProbeRes.json();
+  const claudeProfiles = claudeProbeJson.profiles.filter((p) => p.provider === "claude");
+  assert.deepEqual(claudeProfiles.map((p) => p.id), ["alt", "default"]);
+  assert.equal(claudeProfiles[0].health.status, "healthy");
+  assert.equal(claudeProfiles[1].health.status, "unavailable");
+  assert.equal(claudeProfiles[1].health.shortReason, "鉴权失效");
+
+  // Disable claude:alt manually -> sorted after cooldown/unavailable until re-enabled.
+  const disableRes = await fetch(`${srv.url}/api/profile/meta`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ provider: "claude", profileId: "alt", disabled: true, alias: "工作号" }),
+  });
+  assert.equal(disableRes.status, 200);
+  const disabledJson = await disableRes.json();
+  const disabledAlt = disabledJson.profiles.find((p) => p.key === "claude:alt");
+  assert.equal(disabledAlt?.health?.disabled, true);
+  assert.equal(disabledAlt?.health?.alias, "工作号");
+
+  // Probe ping sessions must never pollute /api/threads list.
+  const threadsRes = await fetch(`${srv.url}/api/threads`);
+  const threadsJson = await threadsRes.json();
+  assert.equal(
+    (threadsJson.threads || []).some((th) => String(th.preview || th.title || "").includes("AGENT_CONTROL_PING")),
+    false,
+  );
+});
+
+test("Mac multimodal Hydrogen voice call and hot-extension proxy work end-to-end with zero tokens", async (t) => {
+  const root = await mkdtemp(resolve(os.tmpdir(), "ac-voice-e2e-"));
+  const dataDir = resolve(root, "data");
+  const appsDir = resolve(root, "apps");
+  const agyCli = resolve(root, "agy-cli");
+  const codexHome = resolve(root, "codex-default");
+  const claudeHome = resolve(root, "claude-default");
+  await Promise.all([
+    mkdir(dataDir, { recursive: true }),
+    mkdir(appsDir, { recursive: true }),
+    mkdir(agyCli, { recursive: true }),
+    mkdir(codexHome, { recursive: true }),
+    mkdir(claudeHome, { recursive: true }),
+  ]);
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const env = {
+    ...process.env,
+    CODEX_BIN: MOCK_CODEX_BIN,
+    CLAUDE_BIN: MOCK_CLAUDE_BIN,
+    AGY_BIN: MOCK_AGY_BIN,
+    EDGE_TTS_BIN: MOCK_EDGE_TTS_BIN,
+    AGENT_CONTROL_CODEX_HOMES: JSON.stringify([
+      { id: "default", label: "Codex 默认", home: codexHome },
+    ]),
+    AGENT_CONTROL_CLAUDE_CONFIG_DIRS: JSON.stringify([
+      { id: "default", label: "Claude 默认", home: claudeHome },
+    ]),
+    AGENT_CONTROL_AGY_APP_DATA_DIRS: JSON.stringify([
+      { id: "cli", label: "Antigravity CLI", home: agyCli, profileType: "cli" },
+    ]),
+  };
+
+  const srv = await createAgentControlServer({
+    port: 0,
+    disableRelay: true,
+    dataDir,
+    appsDir,
+    env,
+  });
+  await srv.start();
+  t.after(() => srv.close());
+
+  const hot = await createHotExtensionServer({
+    port: 0,
+    upstreamOrigin: srv.url,
+    dataDir,
+    env,
+  });
+  t.after(() => hot.close());
+
+  await writeFile(
+    resolve(appsDir, "ac-hot.json"),
+    JSON.stringify({
+      id: "ac-hot",
+      name: "Agent Control Hot API",
+      origin: hot.url,
+    }),
+  );
+
+  // 1. Create an active Antigravity thread so VoiceCallService can dispatch to it.
+  const createdRes = await fetch(`${srv.url}/api/thread/new`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      provider: "antigravity",
+      profileId: "cli",
+      cwd: "/tmp/mock-agy-project",
+      text: "初始化语音被控会话 [COMPLETE_NOW]",
+      permissionMode: "turbo",
+    }),
+  });
+  assert.equal(createdRes.status, 200);
+
+  // 2. Start & warm up Mac Hydrogen voice call channel.
+  const startRes = await fetch(`${srv.url}/api/voice/call/start`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ callId: "call-test-1" }),
+  });
+  assert.equal(startRes.status, 200);
+  const startJson = await startRes.json();
+  assert.equal(startJson.warmed, true);
+  assert.equal(startJson.model, "gemini-4-hydrogen-low");
+  assert.equal(startJson.ttsEngine, "edge-tts");
+
+  // 3. Upload real WAV audio through hot-extension proxy (/apps/ac-hot/api/voice/call), verify dispatch & Edge TTS MP3.
+  const wavBase64 = uint8ArrayToBase64(encodePcm16SamplesToWav(new Int16Array(1600), 16000));
+  const callRes = await fetch(`${srv.url}/apps/ac-hot/api/voice/call`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      callId: "call-test-1",
+      audioBase64: wavBase64,
+      audioMimeType: "audio/wav",
+      autoExecute: true,
+      tts: true,
+    }),
+  });
+  assert.equal(callRes.status, 200);
+  const callJson = await callRes.json();
+  assert.equal(callJson.usedFallback, false);
+  assert.equal(callJson.executed?.action, "send_turn");
+  assert.equal(callJson.tts?.provider, "edge-tts");
+  const mp3Header = Buffer.from(callJson.tts.audioBase64, "base64").subarray(0, 3).toString("ascii");
+  assert.equal(mp3Header, "ID3");
+
+  // 4. Probe profiles through /apps/ac-hot/api/profile/probe and confirm health persistence.
+  const hotProbeRes = await fetch(`${srv.url}/apps/ac-hot/api/profile/probe`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ provider: "antigravity" }),
+  });
+  assert.equal(hotProbeRes.status, 200);
+  const hotProbeJson = await hotProbeRes.json();
+  assert.equal(hotProbeJson.defaultProvider, "antigravity");
+  assert.equal(hotProbeJson.profiles.find((p) => p.key === "antigravity:cli")?.health?.status, "healthy");
+
+  // 5. Internal [AC_VOICE_CALL] session must remain filtered out of /api/threads.
+  const listRes = await fetch(`${srv.url}/api/threads`);
+  const listJson = await listRes.json();
+  assert.equal(
+    (listJson.threads || []).some((th) => String(th.title || th.preview || th.cwd || "").includes("[AC_VOICE_CALL]") || String(th.cwd || "").includes("/voice-call")),
+    false,
+  );
+
+  // 6. Hot-extension GET /apps/ac-hot/api/thread repairs Antigravity history with compiler.py step error.
+  const convErrId = "conv-hot-err-1";
+  const errLogsDir = resolve(agyCli, "brain", convErrId, ".system_generated", "logs");
+  await mkdir(errLogsDir, { recursive: true });
+  await writeFile(
+    resolve(errLogsDir, "transcript.jsonl"),
+    [
+      JSON.stringify({
+        step_index: 0,
+        type: "USER_INPUT",
+        source: "USER_EXPLICIT",
+        created_at: "2026-11-14T11:17:00Z",
+        content: "排查编译文件",
+      }),
+      JSON.stringify({
+        step_index: 1,
+        type: "PLANNER_RESPONSE",
+        status: "DONE",
+        created_at: "2026-11-14T11:17:01Z",
+        tool_calls: [
+          { name: "read_file", args: { Path: "\"/workspace/demo/studio/tools/demo_studio/server.py\"" } },
+          { name: "read_file", args: { Path: "\"/workspace/demo/studio/tools/demo_studio/backend/compiler.py\"" } },
+        ],
+      }),
+      JSON.stringify({
+        step_index: 2,
+        type: "GENERIC",
+        status: "DONE",
+        content: "Created At: 2026-11-14T19:17:01+08:00\nCompleted At: 2026-11-14T19:17:01+08:00\nShowing lines 1-400 of 600",
+      }),
+      JSON.stringify({
+        step_index: 3,
+        type: "GENERIC",
+        status: "ERROR",
+        content: "Created At: 2026-11-14T19:17:01+08:00\nCompleted At: 2026-11-14T19:17:01+08:00\nEncountered error in step execution: file does not exist",
+      }),
+      JSON.stringify({
+        step_index: 4,
+        type: "PLANNER_RESPONSE",
+        status: "DONE",
+        content: "已改读 validators.py 继续完成。",
+      }),
+    ].join("\n") + "\n",
+  );
+  const hotThreadRes = await fetch(`${srv.url}/apps/ac-hot/api/thread?id=${encodeURIComponent(`antigravity:cli:${convErrId}`)}&limit=12`);
+  assert.equal(hotThreadRes.status, 200);
+  const hotThreadJson = await hotThreadRes.json();
+  assert.equal(hotThreadJson.thread?.turns?.length, 1);
+  assert.equal(hotThreadJson.thread.turns[0].status, "completed");
+  assert.equal(hotThreadJson.thread.turns[0].error, null);
+  const hotFailedRead = hotThreadJson.thread.turns[0].items.find((it) => it.arguments?.Path?.endsWith("compiler.py"));
+  assert.equal(hotFailedRead?.error?.message, "文件不存在：compiler.py");
+
+  // 7. Hot-extension /apps/ac-hot/api/models returns 200 model list, and transcript cache + indexed point-lookup stay consistent.
+  const hotModelsRes = await fetch(`${srv.url}/apps/ac-hot/api/models`);
+  assert.equal(hotModelsRes.status, 200);
+  const hotModelsJson = await hotModelsRes.json();
+  assert.ok(Array.isArray(hotModelsJson.data) && hotModelsJson.data.length > 0);
+  assert.ok(Array.isArray(hotModelsJson.byProvider?.antigravity) && hotModelsJson.byProvider.antigravity.length > 0);
+
+  const summaryDb = new DatabaseSync(resolve(agyCli, "conversation_summaries.db"));
+  summaryDb.exec(`
+    CREATE TABLE IF NOT EXISTS conversation_summaries (
+      conversation_id TEXT PRIMARY KEY,
+      title TEXT,
+      preview TEXT,
+      step_count INTEGER,
+      last_modified_time TEXT,
+      workspace_uris TEXT,
+      status TEXT,
+      source TEXT,
+      parent_conversation_id TEXT,
+      not_fully_idle INTEGER,
+      killed INTEGER,
+      app_data_dir TEXT
+    );
+  `);
+  summaryDb.prepare(`
+    INSERT INTO conversation_summaries (
+      conversation_id, title, preview, step_count, last_modified_time,
+      workspace_uris, status, source, parent_conversation_id, not_fully_idle, killed, app_data_dir
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    convErrId,
+    "排查编译文件",
+    "排查编译文件",
+    5,
+    "2026-11-14T19:17:02Z",
+    JSON.stringify(["file:///tmp/mock-agy-project"]),
+    "IDLE",
+    "CORTEX_TRAJECTORY_SOURCE_CLI",
+    "",
+    0,
+    0,
+    agyCli,
+  );
+  summaryDb.close();
+
+  const indexedById = readAntigravityIndexedThreadById(agyCli, convErrId, { profileType: "cli" });
+  assert.equal(indexedById?.id, convErrId);
+  assert.equal(indexedById?.title, "排查编译文件");
+  assert.equal(indexedById?.cwd, "/tmp/mock-agy-project");
+
+  const hotThreadCachedRes = await fetch(`${srv.url}/apps/ac-hot/api/thread?id=${encodeURIComponent(`antigravity:cli:${convErrId}`)}&limit=12`);
+  assert.equal(hotThreadCachedRes.status, 200);
+  const hotThreadCachedJson = await hotThreadCachedRes.json();
+  assert.deepEqual(hotThreadCachedJson.thread.turns, hotThreadJson.thread.turns);
+});
+
+test("single-step tool failures never trigger turn-error red banner or stop /goal", async (t) => {
+  assert.equal(isRecoverableToolErrorText("Encountered error in step execution: file does not exist"), true);
+  assert.equal(
+    formatToolExecutionError(
+      "Created At: 2026-11-14T19:17:01+08:00\nCompleted At: 2026-11-14T19:17:01+08:00\nEncountered error in step execution: file does not exist",
+      { filePath: "/repo/backend/compiler.py" },
+    ),
+    "文件不存在：compiler.py",
+  );
+
+  // Simulate legacy PID 20023 payload: failed status + raw Created At / Encountered error in step execution banner,
+  // with parallel [server.py, compiler.py], 1 successful agy-gen-* echo, and subsequent validators.py read.
+  const legacyTurn = {
+    id: "agy-step-0",
+    status: "failed",
+    error: {
+      message: "Created At: 2026-11-14T19:17:01+08:00\nCompleted At: 2026-11-14T19:17:01+08:00\nEncountered error in step execution: file does not exist",
+    },
+    items: [
+      { type: "userMessage", content: [{ type: "text", text: "续跑漫剧生产平台" }] },
+      { type: "mcpToolCall", id: "agy-2-tool-0", tool: "read_file", arguments: { Path: "/repo/server.py" }, status: "completed" },
+      { type: "mcpToolCall", id: "agy-2-tool-1", tool: "read_file", arguments: { Path: "/repo/backend/compiler.py" }, status: "completed" },
+      { type: "agentMessage", id: "agy-gen-3", text: "Created At: 2026-11-14T19:17:01+08:00\nShowing lines 1-400 of 620", phase: "commentary" },
+      { type: "mcpToolCall", id: "agy-5-tool-0", tool: "read_file", arguments: { Path: "/repo/backend/validators.py" }, status: "completed" },
+      { type: "agentMessage", id: "agy-gen-6", text: "Created At: 2026-11-14T19:17:02+08:00\nShowing lines 1-200 of 200", phase: "commentary" },
+      { type: "agentMessage", id: "agy-msg-7", phase: "final_answer", text: "已在 validators.py 找到编译逻辑。" },
+    ],
+  };
+
+  const normalized = normalizeTurnForRender(legacyTurn);
+  assert.equal(normalized.status, "completed");
+  assert.equal(normalized.error, null);
+  const matchedCompiler = normalized.items.find((it) => it.id === "agy-2-tool-1");
+  assert.equal(matchedCompiler?.status, "failed");
+  assert.equal(matchedCompiler?.error?.message, "文件不存在：compiler.py");
+
+  const renderedMissing = renderTurnHtml(legacyTurn, { agentLabel: "Antigravity" });
+  assert.doesNotMatch(renderedMissing, /class="turn-error"/);
+  assert.doesNotMatch(renderedMissing, /Created At:/);
+  assert.doesNotMatch(renderedMissing, /Encountered error in step execution/);
+  assert.match(renderedMissing, /文件不存在：compiler\.py/);
+
+  const rangeAndPatchHtml = renderTurnHtml({
+    id: "turn-range-patch",
+    status: "completed",
+    error: null,
+    items: [
+      { type: "userMessage", content: [{ type: "text", text: "修复行号和补丁" }] },
+      {
+        type: "mcpToolCall",
+        id: "t-range",
+        tool: "read_file",
+        arguments: { Path: "/repo/validators.py" },
+        status: "failed",
+        error: { message: "Created At: 2026-11-14T18:00:00+08:00\nEncountered error in step execution: invalid line range: StartLine 101 is greater than EndLine 100" },
+      },
+      {
+        type: "fileChange",
+        id: "t-patch",
+        status: "failed",
+        changes: [{ path: "/repo/storage.py", kind: "modify", diff: "" }],
+        error: { message: "Encountered error in step execution: target content not found in the file; the Target must exactly match existing file text" },
+      },
+      { type: "agentMessage", phase: "final_answer", text: "已重新定位行号并更新 storage.py。" },
+    ],
+  });
+  assert.doesNotMatch(rangeAndPatchHtml, /class="turn-error"/);
+  assert.doesNotMatch(rangeAndPatchHtml, /Encountered error in step execution/);
+  assert.match(rangeAndPatchHtml, /行号范围无效（第 101–100 行）：validators\.py/);
+  assert.match(rangeAndPatchHtml, /补丁内容未匹配：storage\.py/);
+
+  // GoalController must NOT stop /goal on recoverable single-step tool errors.
+  const goalDir = await mkdtemp(resolve(os.tmpdir(), "ac-goal-toolerr-"));
+  t.after(() => rm(goalDir, { recursive: true, force: true }));
+  const goalCtrl = createGoalController({ filePath: resolve(goalDir, "goal-states.json") });
+  const tid = "antigravity:cli:conv-goal-test";
+  await goalCtrl.arm(tid, { maxTurns: 5 });
+
+  for (const errMsg of [
+    "Created At: 2026-11-14T19:17:01+08:00\nEncountered error in step execution: file does not exist",
+    "Encountered error in step execution: invalid line range: StartLine 101 is greater than EndLine 100",
+    "target content not found in the file; the Target must exactly match existing file text",
+  ]) {
+    const evalRes = await goalCtrl.evaluateAfterTurn(tid, {
+      lastAgentMessage: "继续推进中",
+      error: { message: errMsg },
+    });
+    assert.equal(evalRes.action, "continue");
+    assert.equal(evalRes.state.active, true);
+  }
+});
+
+test("pending badge zeroing, live-progress feed rendering, ASCII detail banner, and Turbo persistence work together", async (t) => {
+  // 1. pendingRequestsSynced zeroes out stale thread.pendingCount when pendingRequests is empty.
+  const staleThreads = [{
+    id: "antigravity:cli:stale-1",
+    provider: "antigravity",
+    profileId: "cli",
+    profileLabel: "CLI",
+    title: "修复 QQ 助手私信丢弃问题",
+    cwd: "/Users/demo",
+    updatedAt: 500,
+    pendingCount: 1,
+    live: true,
+  }];
+  const syncedGroups = buildProjectGroups(staleThreads, {
+    pendingRequests: [],
+    pendingRequestsSynced: true,
+  });
+  assert.equal(syncedGroups[0].pendingCount, 0);
+  assert.equal(syncedGroups[0].threads[0].pendingCount, 0);
+  const stripNoPending = renderProjectTaskStripHtml({
+    projectGroup: syncedGroups[0],
+    activeThreadId: "antigravity:cli:stale-1",
+  });
+  assert.doesNotMatch(stripNoPending, /is-pending/);
+  assert.doesNotMatch(stripNoPending, /strip-pending-badge/);
+
+  // 2. humanizeLiveActivity preserves real ASCII command/file details while filtering raw noise tokens.
+  const cmdLive = humanizeLiveActivity({
+    status: "running",
+    phase: "正在执行命令…",
+    text: "pytest tests/test_dm.py -q",
+  });
+  assert.equal(cmdLive.phase, "正在执行命令…");
+  assert.equal(cmdLive.detail, "pytest tests/test_dm.py -q");
+
+  const noiseLive = humanizeLiveActivity({
+    status: "running",
+    phase: "正在执行命令…",
+    text: "in_progress",
+  });
+  assert.equal(noiseLive.detail, "");
+
+  // 3. renderTurnHtml hides .live-progress-feed when completed, and renders visible steps + cmd snippet + thought when running.
+  const sampleItems = [
+    { type: "userMessage", content: [{ type: "text", text: "跑单测" }] },
+    { type: "reasoning", summary: ["先查看 tenant_scope.py 再跑 pytest 验证修复"] },
+    { type: "mcpToolCall", tool: "read_file", arguments: { Path: "/repo/tenant_scope.py" }, status: "completed" },
+    { type: "commandExecution", command: "pytest tests/test_dm.py -q", status: "inProgress", aggregatedOutput: "line1\nline2\nline3\n2 passed in 0.41s" },
+  ];
+  const completedHtml = renderTurnHtml({ id: "t-done", status: "completed", items: sampleItems });
+  assert.doesNotMatch(completedHtml, /class="live-progress-feed"/);
+
+  const runningHtml = renderTurnHtml({ id: "t-live", status: "inProgress", items: sampleItems });
+  assert.match(runningHtml, /<details class="process-summary-box is-live">/);
+  assert.doesNotMatch(runningHtml, /<details[^>]*\bopen\b/);
+  assert.match(runningHtml, /class="live-progress-feed"/);
+  assert.match(runningHtml, /tenant_scope\.py/);
+  assert.match(runningHtml, /pytest tests\/test_dm\.py -q/);
+  assert.match(runningHtml, /class="live-cmd-snippet">line2\nline3\n2 passed in 0\.41s<\/pre>/);
+  assert.match(runningHtml, /class="live-thought-preview"/);
+
+  // Force-running also renders live feed even if serialized turn.status was not updated yet.
+  const forcedHtml = renderTurnHtml({ id: "t-force", status: "completed", items: sampleItems }, { forceRunning: true });
+  assert.match(forcedHtml, /class="live-progress-feed"/);
+
+  // Unified process-card container + chronological order + bottom live frontier assertions.
+  assert.match(runningHtml, /<div class="process-card is-live">\s*<details class="process-summary-box is-live">/);
+  assert.match(completedHtml, /<div class="process-card">\s*<details class="process-summary-box">/);
+  const runningFeed = runningHtml.slice(runningHtml.indexOf('<div class="live-progress-feed"'));
+  assert.ok(
+    runningFeed.indexOf('class="live-thought-preview"') < runningFeed.indexOf("pytest tests/test_dm.py -q"),
+    "earlier reasoning must appear chronologically above subsequent running command",
+  );
+  assert.match(runningFeed, /class="live-progress-row is-active-frontier">[\s\S]*class="live-frontier-dot"[\s\S]*pytest tests\/test_dm\.py -q/);
+  assert.doesNotMatch(runningFeed, /data-live-frontier="1"[^>]*>\s*<span class="live-frontier-dot"[^>]*><\/span>\s*<span class="tool-kind">思考中/);
+
+  // Streaming liveThought overrides stale reasoning and pins a single live frontier at the bottom after completed commands.
+  const completedCmdItems = [
+    { type: "userMessage", content: [{ type: "text", text: "继续提交" }] },
+    { type: "reasoning", summary: ["旧思考片段"] },
+    { type: "commandExecution", command: "bsk cooperate sync --session eppu", status: "completed", aggregatedOutput: "CHECK: done" },
+  ];
+  const withLiveThoughtHtml = renderTurnHtml(
+    { id: "t-live-thought", status: "inProgress", items: completedCmdItems },
+    { forceRunning: true, liveThought: "正在校验标题、非儿童向勾选与展示所有字段..." },
+  );
+  assert.equal((withLiveThoughtHtml.match(/class="process-card is-live"/g) || []).length, 1);
+  assert.equal((withLiveThoughtHtml.match(/class="live-thought-preview"/g) || []).length, 1);
+  const liveThoughtFeed = withLiveThoughtHtml.slice(withLiveThoughtHtml.indexOf('<div class="live-progress-feed"'));
+  assert.doesNotMatch(liveThoughtFeed, /旧思考片段/);
+  assert.match(withLiveThoughtHtml, /内部推理记录（共 2 段，按需展开）/);
+  assert.ok(
+    liveThoughtFeed.indexOf("bsk cooperate sync --session eppu") < liveThoughtFeed.indexOf('data-live-frontier="1"'),
+    "completed commands must appear above bottom streaming thought frontier",
+  );
+  assert.match(liveThoughtFeed, /<div class="live-thought-preview" data-live-frontier="1">[\s\S]*class="live-frontier-dot"[\s\S]*思考中[\s\S]*正在校验标题/);
+
+  // Fresh running turn with only userMessage + liveThought renders unified process-card directly inside turn.
+  const freshLiveHtml = renderTurnHtml(
+    { id: "t-fresh", status: "inProgress", items: [{ type: "userMessage", content: [{ type: "text", text: "hi" }] }] },
+    { forceRunning: true, liveThought: "先定位关键模块" },
+  );
+  assert.match(freshLiveHtml, /<div class="process-card is-live">[\s\S]*<div class="live-thought-preview" data-live-frontier="1">[\s\S]*先定位关键模块/);
+
+  // Fresh running turn with only userMessage + livePhase (no tools, no thought) renders phase once without duplicate empty summary box.
+  const phaseOnlyHtml = renderTurnHtml(
+    { id: "t-phase-only", status: "inProgress", items: [{ type: "userMessage", content: [{ type: "text", text: "改好了吗" }] }] },
+    { forceRunning: true, livePhase: "正在理解指令… · 第 1051 步" },
+  );
+  assert.equal((phaseOnlyHtml.match(/正在理解指令… · 第 1051 步/g) || []).length, 1);
+  assert.doesNotMatch(phaseOnlyHtml, /class="process-summary-box/);
+  assert.match(phaseOnlyHtml, /<div class="process-card is-live">[\s\S]*<div class="live-frontier-status" data-live-frontier="1">[\s\S]*正在理解指令… · 第 1051 步/);
+
+  // suppressRunning demotes an inProgress turn to static completed card once streaming reply takes over.
+  const suppressedHtml = renderTurnHtml(
+    { id: "t-suppressed", status: "inProgress", items: completedCmdItems },
+    { suppressRunning: true },
+  );
+  assert.doesNotMatch(suppressedHtml, /is-live/);
+  assert.doesNotMatch(suppressedHtml, /live-progress-feed/);
+
+  assert.equal(turnEndsWithProcessGroup({ items: completedCmdItems }), true);
+  assert.equal(turnEndsWithProcessGroup({
+    items: [
+      ...completedCmdItems,
+      { type: "agentMessage", phase: "final_answer", text: "已经处理完成" },
+    ],
+  }), false);
+
+  // 4. End-to-end Turbo persistence: initial turbo setting auto-approves follow-up turns even when permissionMode is omitted.
+  const root = await mkdtemp(resolve(os.tmpdir(), "ac-turbo-persist-"));
+  const dataDir = resolve(root, "data");
+  const appsDir = resolve(root, "apps");
+  const agyCli = resolve(root, "agy-cli");
+  const codexHome = resolve(root, "codex-default");
+  const claudeHome = resolve(root, "claude-default");
+  await Promise.all([
+    mkdir(dataDir, { recursive: true }),
+    mkdir(appsDir, { recursive: true }),
+    mkdir(agyCli, { recursive: true }),
+    mkdir(codexHome, { recursive: true }),
+    mkdir(claudeHome, { recursive: true }),
+  ]);
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const srv = await createAgentControlServer({
+    port: 0,
+    disableRelay: true,
+    dataDir,
+    appsDir,
+    env: {
+      ...process.env,
+      CODEX_BIN: MOCK_CODEX_BIN,
+      CLAUDE_BIN: MOCK_CLAUDE_BIN,
+      AGY_BIN: MOCK_AGY_BIN,
+      AGENT_CONTROL_CODEX_HOMES: JSON.stringify([{ id: "default", label: "Codex 默认", home: codexHome }]),
+      AGENT_CONTROL_CLAUDE_CONFIG_DIRS: JSON.stringify([{ id: "default", label: "Claude 默认", home: claudeHome }]),
+      AGENT_CONTROL_AGY_APP_DATA_DIRS: JSON.stringify([{ id: "cli", label: "Antigravity CLI", home: agyCli, profileType: "cli" }]),
+    },
+  });
+  await srv.start();
+  t.after(() => srv.close());
+
+  const sseCtrl = new AbortController();
+  const eventsRes = await fetch(`${srv.url}/api/events`, { signal: sseCtrl.signal });
+  assert.equal(eventsRes.status, 200);
+  const reader = eventsRes.body.getReader();
+  const decoder = new TextDecoder();
+  let sseBuf = "";
+  const seenServerRequests = [];
+  const seenCompletions = [];
+  const pumpEvents = (async () => {
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        sseBuf += decoder.decode(value, { stream: true });
+        let sep;
+        while ((sep = sseBuf.indexOf("\n\n")) !== -1) {
+          const rawEvt = sseBuf.slice(0, sep);
+          sseBuf = sseBuf.slice(sep + 2);
+          let evtName = "message";
+          const dataLines = [];
+          for (const line of rawEvt.split("\n")) {
+            if (line.startsWith("event:")) evtName = line.slice(6).trim();
+            else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
+          }
+          if (!dataLines.length) continue;
+          const payload = JSON.parse(dataLines.join("\n"));
+          if (evtName === "server_request") seenServerRequests.push(payload);
+          if (evtName === "provider_event" && payload.type === "turn_completed") {
+            seenCompletions.push(payload);
+          }
+        }
+      }
+    } catch {
+      // Aborted during teardown.
+    }
+  })();
+  t.after(async () => {
+    sseCtrl.abort();
+    await reader.cancel().catch(() => {});
+    await pumpEvents;
+  });
+
+  const startRes = await fetch(`${srv.url}/api/thread/new`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      provider: "antigravity",
+      profileId: "cli",
+      cwd: "/tmp/mock-agy-project",
+      text: "初始化 Turbo 会话",
+      permissionMode: "turbo",
+    }),
+  });
+  assert.equal(startRes.status, 200);
+  const startJson = await startRes.json();
+  const tid = startJson.thread.id;
+  assert.equal(startJson.thread.permissionMode, "turbo");
+
+  // Wait for Turn 1 to finish before starting Turn 2.
+  const t1Deadline = Date.now() + 4000;
+  while (Date.now() < t1Deadline && !seenCompletions.some((c) => c.threadId === tid)) {
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  assert.ok(seenCompletions.some((c) => c.threadId === tid), "expected Turn 1 completion");
+
+  // Follow-up turn omits permissionMode (like queue/goal/voice continuations); mock requests permission via [AGY_PERMISSION].
+  const followRes = await fetch(`${srv.url}/api/turn`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      threadId: tid,
+      text: "执行敏感步骤 [AGY_PERMISSION]",
+    }),
+  });
+  assert.equal(followRes.status, 200);
+
+  // Wait for Turn 2 completion event and verify backend auto-approved with allow_always and zero server_request cards.
+  const t2Deadline = Date.now() + 5000;
+  let permCompletion = null;
+  while (Date.now() < t2Deadline) {
+    permCompletion = seenCompletions.find((c) => c.threadId === tid && String(c.lastAgentMessage || "").includes("Antigravity 授权结果:"));
+    if (permCompletion) break;
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  assert.ok(permCompletion, "expected follow-up [AGY_PERMISSION] turn to auto-approve and finish");
+  assert.match(permCompletion.lastAgentMessage, /allow_always|allow_once/);
+  assert.equal(seenServerRequests.length, 0);
+
+  const finalThreadRes = await fetch(`${srv.url}/api/thread?id=${encodeURIComponent(tid)}&limit=10`);
+  assert.equal(finalThreadRes.status, 200);
+  const finalThreadJson = await finalThreadRes.json();
+  assert.deepEqual(finalThreadJson.pendingRequests, []);
+  assert.equal(finalThreadJson.thread.pendingCount, 0);
+});
+
+test("sidebar hierarchy, preview deduplication, completed blue dots, and minimal micro-tags", () => {
+  // 1. dedupeThreadPreview removes exact & truncated ellipsis duplicates while keeping meaningful continuations.
+  assert.equal(
+    dedupeThreadPreview("Remote Control Codex Project Design", "Remote Control Codex Project Design"),
+    "",
+  );
+  assert.equal(
+    dedupeThreadPreview("任务：继续推进「漫剧生产平台」 ...", "任务：继续推进「漫剧生产平台」这个项目，不要停"),
+    "这个项目，不要停",
+  );
+  assert.equal(
+    dedupeThreadPreview("任务：继续推进「漫剧生产平台」 ...", "任务：继续推进「漫剧生产平台」"),
+    "",
+  );
+  assert.equal(
+    dedupeThreadPreview("修复 QQ 助手私信", "已定位 tenant_scope.py 根因"),
+    "已定位 tenant_scope.py 根因",
+  );
+  assert.equal(
+    dedupeThreadPreview("AgentCtrl·优化会话标题生成与更新逻辑", "优化会话标题生成与更新逻辑"),
+    "",
+  );
+  assert.equal(
+    dedupeThreadPreview("语音对话功能优化失效反馈", "好了吗"),
+    "",
+  );
+  assert.equal(
+    dedupeThreadPreview("弄一个PC的简单包装", "Bug Report And Screenshot"),
+    "",
+  );
+
+  // 2. compactThreadSourceChip outputs at most one compact chip on 'all', drops provider prefix under tab, and hides under profileFilter.
+  const profiles = [
+    { provider: "antigravity", id: "desktop", label: "Antigravity 桌面", installed: true },
+    { provider: "antigravity", id: "cli", label: "Antigravity CLI", installed: true },
+    { provider: "codex", id: "codex", label: "Codex · codex", installed: true },
+  ];
+  const agyDesktopAllChip = compactThreadSourceChip(
+    { provider: "antigravity", profileId: "desktop", profileLabel: "Antigravity 桌面" },
+    { providerFilter: "all", profiles },
+  );
+  assert.equal(agyDesktopAllChip?.glyph, "");
+  assert.match(agyDesktopAllChip?.iconSvg || "", /<svg[^>]*is-antigravity/);
+  assert.equal(agyDesktopAllChip?.text, "桌面");
+  assert.equal(agyDesktopAllChip?.tone, "antigravity");
+  assert.equal(agyDesktopAllChip?.title, "Antigravity · Antigravity 桌面");
+
+  const codexAllChip = compactThreadSourceChip(
+    { provider: "codex", profileId: "codex", profileLabel: "Codex · codex" },
+    { providerFilter: "all", profiles },
+  );
+  assert.equal(codexAllChip?.glyph, "");
+  assert.match(codexAllChip?.iconSvg || "", /<svg[^>]*is-codex/);
+  assert.equal(codexAllChip?.text, "Codex");
+  assert.equal(codexAllChip?.tone, "codex");
+  assert.equal(codexAllChip?.title, "Codex · Codex · codex");
+
+  assert.deepEqual(
+    compactThreadSourceChip({ provider: "antigravity", profileId: "desktop", profileLabel: "Antigravity 桌面" }, { providerFilter: "antigravity", profiles }),
+    { glyph: "", text: "桌面", tone: "antigravity", title: "Antigravity · Antigravity 桌面" },
+  );
+  assert.equal(
+    compactThreadSourceChip({ provider: "codex", profileId: "codex", profileLabel: "Codex · codex" }, { providerFilter: "codex", profiles }),
+    null,
+  );
+  assert.equal(
+    compactThreadSourceChip({ provider: "antigravity", profileId: "desktop", profileLabel: "Antigravity 桌面" }, { providerFilter: "antigravity", profileFilter: "antigravity:desktop", profiles }),
+    null,
+  );
+
+  // 3. renderSidebarThreadListHtml distinguishes project headers & child tree rail, hides duplicate preview,
+  //    renders live radar dot + completed blue dot, and folds groups > 8 items.
+  const nowSec = Math.floor(Date.now() / 1000);
+  const sampleThreads = [
+    {
+      id: "antigravity:desktop:live-1",
+      provider: "antigravity",
+      profileId: "desktop",
+      profileLabel: "Antigravity 桌面",
+      cwd: "/workspace/demo/studio",
+      title: "Remote Control Codex Project Design",
+      preview: "Remote Control Codex Project Design",
+      live: true,
+      updatedAt: nowSec - 10,
+    },
+    {
+      id: "antigravity:desktop:done-1",
+      provider: "antigravity",
+      profileId: "desktop",
+      profileLabel: "Antigravity 桌面",
+      cwd: "/workspace/demo/studio",
+      title: "故事设定与数据整理",
+      preview: "故事设定与数据整理",
+      live: false,
+      updatedAt: nowSec - 180,
+    },
+  ];
+  for (let i = 2; i <= 11; i += 1) {
+    sampleThreads.push({
+      id: `codex:codex:done-${i}`,
+      provider: "codex",
+      profileId: "codex",
+      profileLabel: "Codex · codex",
+      cwd: "/workspace/demo/studio",
+      title: `历史任务 ${i}`,
+      preview: `历史任务 ${i}`,
+      live: false,
+      updatedAt: nowSec - 600 - i * 60,
+    });
+  }
+  const groups = buildProjectGroups(sampleThreads, {
+    projectsMeta: { "/workspace/demo/studio": { pinned: true } },
+  });
+  const liveMap = new Map([["antigravity:desktop:live-1", { phase: "正在执行命令", detail: "npm test" }]]);
+  const sidebarHtml = renderSidebarThreadListHtml(groups, {
+    activeThreadId: "antigravity:desktop:done-1",
+    profiles,
+    liveActivityByThread: liveMap,
+  });
+
+  assert.match(sidebarHtml, /class="project-group-head"/);
+  assert.match(sidebarHtml, /class="project-group-items"/);
+  assert.match(sidebarHtml, /class="thread-status-dot is-live"/);
+  assert.match(sidebarHtml, /class="thread-status-dot is-done"/);
+  assert.match(sidebarHtml, /class="thread-item-sub is-live-sub">正在执行命令 · npm test</);
+  // Duplicate title "故事设定与数据整理" must appear once (only as title, not duplicated in .thread-item-sub).
+  assert.equal((sidebarHtml.match(/故事设定与数据整理/g) || []).length, 1);
+  // Massive group > 8 folds cleanly with an expand button for the remaining 4 items.
+  assert.match(sidebarHtml, /data-sidebar-expand-cwd="\/workspace\/demo\/studio"/);
+  assert.match(sidebarHtml, /展开其余 4 条会话/);
+
+  // Compact sidebar hides static gray preview lines when idle, keeps live phase, and restores matching preview during search.
+  const idleWithPreviewThreads = [
+    {
+      id: "antigravity:desktop:idle-clean",
+      provider: "antigravity",
+      profileId: "desktop",
+      profileLabel: "Antigravity 桌面",
+      cwd: "/workspace/demo/agent-control",
+      title: "语音对话功能优化失效反馈",
+      preview: "额外旧副标题关键词",
+      live: false,
+      updatedAt: nowSec - 60,
+    },
+  ];
+  const idleGroups = buildProjectGroups(idleWithPreviewThreads);
+  const idleSidebarHtml = renderSidebarThreadListHtml(idleGroups, { profiles, nowMs: nowSec * 1000 });
+  assert.doesNotMatch(idleSidebarHtml, /额外旧副标题关键词/);
+  assert.doesNotMatch(idleSidebarHtml, /class="thread-item-sub"/);
+
+  const searchGroups = buildProjectGroups(idleWithPreviewThreads, { searchText: "旧副标题" });
+  const searchSidebarHtml = renderSidebarThreadListHtml(searchGroups, {
+    profiles,
+    nowMs: nowSec * 1000,
+    searchText: "旧副标题",
+  });
+  assert.match(searchSidebarHtml, /class="thread-item-sub ">额外旧副标题关键词</);
+});
+
+test("markdown renders GFM tables, headerless pipe tables, alerts, task lists, nested lists, math, details, copyable code, and blocks XSS", () => {
+  const input = [
+    "# 一级标题",
+    "##### 五级标题",
+    "###### 六级标题",
+    "",
+    "| 集数 | 类型 | 时长 |",
+    "| :--- | :---: | ---: |",
+    "| `ep34` | **免费** | 58s |",
+    "| ep35 | [链接](https://example.com/a) | ~~62s~~ |",
+    "",
+    "| ep34 | 充电专属 X1 | 蚊子咬的 / 晚上对账 |",
+    "| ep37 | 免费 F3 | 回流小红盒 |",
+    "",
+    "---",
+    "",
+    "3. 从三开始",
+    "4. 第四项",
+    "   - 子项 tenant_scope.py 下划线不斜体",
+    "   - *真斜体* 与 ~~删除线~~",
+    "",
+    "- [x] 已完成任务 <kbd>Cmd+K</kbd>",
+    "- [ ] 待处理任务 [详情](<file:///workspace/demo/test dir/doc.md>)",
+    "",
+    "> 多行引用第一行",
+    "> 多行引用第二行",
+    "",
+    "> [!WARNING]",
+    "> 注意检查 `agent-control` 配置",
+    "",
+    "> [!NOTE]",
+    "> 参考 [坏链接](javascript:alert(1)) 与 <script>alert(2)</script>",
+    "",
+    "<details>",
+    "<summary>展开细节 <b>安全</b><script>xss()</script></summary>",
+    "",
+    "内部段落与 $x^2 + y^2$，以及价格 $100 到 $200 不变",
+    "",
+    "</details>",
+    "",
+    "$$",
+    "E = mc^2",
+    "$$",
+    "",
+    "````markdown",
+    "```js",
+    "console.log('<img src=x onerror=alert(1)>');",
+    "```",
+    "````",
+    "",
+    "<truncated 12598 bytes>",
+    "",
+    "<img src=x onerror=alert(3)>",
+  ].join("\n");
+
+  const html = renderMarkdown(input);
+
+  // Headings & HR
+  assert.match(html, /<h1>一级标题<\/h1>/);
+  assert.match(html, /<h5>五级标题<\/h5>/);
+  assert.match(html, /<h6>六级标题<\/h6>/);
+  assert.match(html, /<hr class="md-hr"\s*\/?>/);
+
+  // GFM table with alignments + headerless pipe table fallback
+  assert.match(html, /<div class="md-table-wrap"><table class="md-table"><thead><tr><th[^>]*text-align:\s*left[^>]*>集数<\/th><th[^>]*text-align:\s*center[^>]*>类型<\/th><th[^>]*text-align:\s*right[^>]*>时长<\/th><\/tr><\/thead>/);
+  assert.match(html, /<td style="text-align:left"><code>ep34<\/code><\/td><td style="text-align:center"><strong>免费<\/strong><\/td>/);
+  assert.match(html, /<del>62s<\/del>/);
+  assert.match(html, /<table class="md-table is-headless"><tbody>/);
+  assert.match(html, /<td>ep34<\/td><td>充电专属 X1<\/td>/);
+
+  // Ordered start=3, nested ul, underscore identifier preservation
+  assert.match(html, /<ol start="3">/);
+  assert.match(html, /tenant_scope\.py/);
+  assert.doesNotMatch(html, /tenant<em>scope/);
+  assert.match(html, /<em>真斜体<\/em>/);
+
+  // Task lists & kbd & file link with spaces
+  assert.match(html, /class="md-task-item is-checked"/);
+  assert.match(html, /class="md-checkbox is-checked"/);
+  assert.match(html, /<kbd class="md-kbd">Cmd\+K<\/kbd>/);
+  assert.match(html, /class="md-file-link"/);
+  assert.match(html, /href="file:\/\/\/workspace\/demo\/test(?:%20| )dir\/doc\.md"/);
+
+  // Multi-line blockquote & GFM alerts
+  assert.match(html, /<blockquote>[\s\S]*多行引用第一行[\s\S]*多行引用第二行[\s\S]*<\/blockquote>/);
+  assert.match(html, /class="md-alert is-warning"/);
+  assert.match(html, /class="md-alert is-note"/);
+
+  // Details, math vs currency, 4-backtick fenced code block with copy button, truncated note
+  assert.match(html, /<details class="md-details"><summary>/);
+  assert.match(html, /class="md-math-inline"[^>]*>x\^2 \+ y\^2</);
+  assert.match(html, /价格 \$100 到 \$200 不变/);
+  assert.match(html, /<div class="md-math-block">[\s\S]*E = mc\^2[\s\S]*<\/div>/);
+  assert.match(html, /class="md-code-block"[\s\S]*class="md-code-head"[\s\S]*class="md-code-lang"[^>]*>markdown<[\s\S]*data-copy-code/);
+  assert.match(html, /console\.log\(&#39;&lt;img src=x onerror=alert\(1\)&gt;&#39;\);/);
+  assert.match(html, /class="md-truncated-note"/);
+
+  // Strict XSS prevention
+  assert.doesNotMatch(html, /<script>/i);
+  assert.doesNotMatch(html, /javascript:/i);
+  assert.doesNotMatch(html, /<img[^>]*onerror=/i);
+  assert.match(html, /&lt;img src=x onerror=alert\(3\)&gt;/);
+});
+
+test("projects and threads stay sorted strictly by updatedAt without live, goal, or pending jumping", () => {
+  const baseThreads = [
+    { id: "codex:default:p1-new", provider: "codex", profileId: "default", cwd: "/tmp/proj-a", title: "A 新", updatedAt: 500, live: false },
+    { id: "codex:default:p1-old", provider: "codex", profileId: "default", cwd: "/tmp/proj-a", title: "A 旧", updatedAt: 100, live: false },
+    { id: "claude:default:p2-mid", provider: "claude", profileId: "default", cwd: "/tmp/proj-b", title: "B 中", updatedAt: 400, live: false },
+    { id: "antigravity:cli:p3-pin", provider: "antigravity", profileId: "cli", cwd: "/tmp/proj-pin", title: "置顶旧", updatedAt: 50, live: false },
+    { id: "codex:default:home-latest", provider: "codex", profileId: "default", cwd: "/Users/demo", title: "主目录最新", updatedAt: 600, live: false },
+  ];
+  const projectsMeta = { "/tmp/proj-pin": { pinned: true } };
+
+  const idleGroups = buildProjectGroups(baseThreads, { projectsMeta });
+  const expectedProjectOrder = ["/tmp/proj-pin", "/Users/demo", "/tmp/proj-a", "/tmp/proj-b"];
+  assert.deepEqual(idleGroups.map((g) => g.cwd), expectedProjectOrder);
+  assert.deepEqual(idleGroups[2].threads.map((t) => t.id), ["codex:default:p1-new", "codex:default:p1-old"]);
+
+  // Flipping live, goalState, and pendingRequests on older items must not reorder groups or threads.
+  const activeThreads = baseThreads.map((t) => {
+    if (t.id === "codex:default:p1-old") return { ...t, live: true, goalState: { active: true } };
+    if (t.id === "claude:default:p2-mid") return { ...t, live: true, goalState: { active: true } };
+    return t;
+  });
+  const activeGroups = buildProjectGroups(activeThreads, {
+    projectsMeta,
+    pendingRequests: [{ id: "req-old", threadId: "codex:default:p1-old", title: "确认操作" }],
+  });
+  assert.deepEqual(activeGroups.map((g) => g.cwd), expectedProjectOrder);
+  assert.deepEqual(activeGroups[2].threads.map((t) => t.id), ["codex:default:p1-new", "codex:default:p1-old"]);
+
+  // Project Board uses one unified recent section without jumping projects into "进行中".
+  const boardHtml = renderProjectBoardHtml({ groups: activeGroups, allGroups: activeGroups });
+  assert.match(boardHtml, /ac-icon-folder/);
+  assert.match(boardHtml, /最近项目/);
+  assert.doesNotMatch(boardHtml, /进行中/);
+});
+
+test("sidebar auto-expands busy projects, collapses idle ones with manual-expand hold TTL, and hides stale projects and threads until clicked", () => {
+  const nowSec = 1_794_700_000;
+  const nowMs = nowSec * 1000;
+  const H = 3600;
+  const profiles = [{ key: "codex:default", provider: "codex", id: "default", label: "Codex" }];
+
+  const threads = [
+    // 1. Pinned stale project (30h old) must remain visible in primary list and not hidden in stale bucket
+    { id: "codex:default:pin-1", provider: "codex", profileId: "default", cwd: "/tmp/pinned-old", title: "置顶历史项目", updatedAt: nowSec - 30 * H, live: false },
+    // 2. Busy project (>= 2 recent live threads) -> auto-expanded, keeps recent threads & folds > 12h threads
+    { id: "codex:default:busy-live-1", provider: "codex", profileId: "default", cwd: "/tmp/busy-proj", title: "进行中一号", updatedAt: nowSec - 30, live: true },
+    { id: "codex:default:busy-live-2", provider: "codex", profileId: "default", cwd: "/tmp/busy-proj", title: "进行中二号", updatedAt: nowSec - 120, live: true },
+    { id: "codex:default:busy-recent-done", provider: "codex", profileId: "default", cwd: "/tmp/busy-proj", title: "近期已完成", updatedAt: nowSec - 2 * H, live: false },
+    { id: "codex:default:busy-stale-1", provider: "codex", profileId: "default", cwd: "/tmp/busy-proj", title: "较早会话甲", updatedAt: nowSec - 20 * H, live: false },
+    { id: "codex:default:busy-stale-2", provider: "codex", profileId: "default", cwd: "/tmp/busy-proj", title: "较早会话乙", updatedAt: nowSec - 24 * H, live: false },
+    // 3. Single-live background project (1 live thread) -> stays collapsed by default
+    { id: "codex:default:one-live", provider: "codex", profileId: "default", cwd: "/tmp/one-live-proj", title: "单挂起任务", updatedAt: nowSec - 600, live: true },
+    // 4. Recent idle project (3h old) -> visible in primary list, collapsed by default
+    { id: "codex:default:idle-recent", provider: "codex", profileId: "default", cwd: "/tmp/idle-recent-proj", title: "最近空闲会话", updatedAt: nowSec - 3 * H, live: false },
+    // 5. Stale idle projects (25h & 40h old) -> hidden under "较早未进行的项目" by default
+    { id: "codex:default:stale-a-1", provider: "codex", profileId: "default", cwd: "/tmp/stale-proj-a", title: "旧项目甲一", updatedAt: nowSec - 25 * H, live: false },
+    { id: "codex:default:stale-a-2", provider: "codex", profileId: "default", cwd: "/tmp/stale-proj-a", title: "旧项目甲二", updatedAt: nowSec - 26 * H, live: false },
+    { id: "codex:default:stale-a-3", provider: "codex", profileId: "default", cwd: "/tmp/stale-proj-a", title: "旧项目甲三", updatedAt: nowSec - 28 * H, live: false },
+    { id: "codex:default:stale-b-1", provider: "codex", profileId: "default", cwd: "/tmp/stale-proj-b", title: "旧项目乙一", updatedAt: nowSec - 40 * H, live: false },
+  ];
+
+  const groups = buildProjectGroups(threads, {
+    projectsMeta: { "/tmp/pinned-old": { pinned: true } },
+  });
+
+  // Strict updatedAt ordering preserved (busy-proj -> one-live-proj -> idle-recent-proj -> stale-proj-a -> stale-proj-b after pinned)
+  assert.deepEqual(
+    groups.map((g) => g.cwd),
+    ["/tmp/pinned-old", "/tmp/busy-proj", "/tmp/one-live-proj", "/tmp/idle-recent-proj", "/tmp/stale-proj-a", "/tmp/stale-proj-b"],
+  );
+
+  // Default sidebar rendering
+  const defaultHtml = renderSidebarThreadListHtml(groups, { profiles, nowMs });
+  assert.match(defaultHtml, /class="project-group has-live" data-cwd="\/tmp\/busy-proj"/);
+  assert.doesNotMatch(defaultHtml, /class="project-group[^"]*is-collapsed" data-cwd="\/tmp\/busy-proj"/);
+  assert.match(defaultHtml, /class="project-group has-live is-collapsed" data-cwd="\/tmp\/one-live-proj"/);
+  assert.match(defaultHtml, /class="project-group is-collapsed" data-cwd="\/tmp\/idle-recent-proj"/);
+  // Busy group hides >12h threads and labels them as stale
+  assert.match(defaultHtml, /近期已完成/);
+  assert.doesNotMatch(defaultHtml, /较早会话甲/);
+  assert.match(defaultHtml, /data-sidebar-expand-cwd="\/tmp\/busy-proj"[\s\S]*?展开其余 2 条较早会话/);
+  // Stale projects (>18h) are tucked behind "较早未进行的项目" button
+  assert.match(defaultHtml, /data-sidebar-stale-projects="expand"[\s\S]*?较早未进行的项目[\s\S]*?>2</);
+  assert.doesNotMatch(defaultHtml, /data-cwd="\/tmp\/stale-proj-a"/);
+
+  // Expanding stale threads inside busy-proj shows all threads and collapse button even when total <= 8
+  const expandedThreadsHtml = renderSidebarThreadListHtml(groups, {
+    profiles,
+    nowMs,
+    expandedSidebarGroups: new Set(["/tmp/busy-proj"]),
+  });
+  assert.match(expandedThreadsHtml, /较早会话甲/);
+  assert.match(expandedThreadsHtml, /data-sidebar-collapse-cwd="\/tmp\/busy-proj"[\s\S]*?收起较早会话/);
+
+  // Manual-expand TTL: held open within 30 minutes, auto-collapsed after 30 minutes
+  const idleGroup = groups.find((g) => g.cwd === "/tmp/idle-recent-proj");
+  const withinTtlPrefs = { "/tmp/idle-recent-proj": { action: "expand", updatedAt: nowMs - 10 * 60 * 1000 } };
+  const expiredTtlPrefs = { "/tmp/idle-recent-proj": { action: "expand", updatedAt: nowMs - 31 * 60 * 1000 } };
+  assert.equal(resolveProjectGroupCollapsed(idleGroup, { sidebarFoldPrefs: withinTtlPrefs, nowMs }), false);
+  assert.equal(resolveProjectGroupCollapsed(idleGroup, { sidebarFoldPrefs: expiredTtlPrefs, nowMs }), true);
+
+  // Expanding stale projects + manually clicking into an all-stale project guarantees min 2 fallback threads
+  const openedStaleHtml = renderSidebarThreadListHtml(groups, {
+    profiles,
+    nowMs,
+    showStaleProjects: true,
+    sidebarFoldPrefs: { "/tmp/stale-proj-a": { action: "expand", updatedAt: nowMs - 60_000 } },
+  });
+  assert.match(openedStaleHtml, /data-sidebar-stale-projects="collapse"[\s\S]*?收起较早未进行的项目/);
+  assert.match(openedStaleHtml, /data-cwd="\/tmp\/stale-proj-a"/);
+  assert.match(openedStaleHtml, /旧项目甲一/);
+  assert.match(openedStaleHtml, /旧项目甲二/);
+  assert.doesNotMatch(openedStaleHtml, /旧项目甲三/);
+  assert.match(openedStaleHtml, /data-sidebar-expand-cwd="\/tmp\/stale-proj-a"[\s\S]*?展开其余 1 条较早会话/);
+
+  // Clicking a pending group stays auto-expanded; partition fallback keeps at least minVisibleProjects when all groups are stale
+  const onlyStale = groups.filter((g) => g.cwd.startsWith("/tmp/stale-proj"));
+  const partitioned = partitionSidebarProjectGroups(onlyStale, { nowMs, minVisibleProjects: 2 });
+  assert.equal(partitioned.primaryGroups.length, 2);
+  assert.equal(partitioned.staleGroups.length, 0);
+});
+
+test("image-attachment calculates bytes, scales oversized images cleanly, keeps small PNGs, and enforces batch budgets", () => {
+  const rawBuf = Buffer.alloc(1024, 0x42);
+  const dataUrl1k = `data:image/png;base64,${rawBuf.toString("base64")}`;
+  assert.equal(estimateDataUrlBytes(dataUrl1k), 1024);
+  assert.equal(estimateDataUrlBytes(`data:image/jpeg;base64,${Buffer.alloc(1025, 0x41).toString("base64")}`), 1025);
+
+  assert.equal(formatByteSize(512), "512 B");
+  assert.equal(formatByteSize(180 * 1024), "180 KB");
+  assert.equal(formatByteSize(1.5 * 1024 * 1024), "1.5 MB");
+
+  assert.deepEqual(computeScaledDimensions(1200, 900, 1600), { width: 1200, height: 900, scaled: false });
+  assert.deepEqual(computeScaledDimensions(4000, 3000, 1600), { width: 1600, height: 1200, scaled: true });
+  assert.deepEqual(computeScaledDimensions(1080, 3200, 1600), { width: 540, height: 1600, scaled: true });
+
+  // Small sharp PNG / SVG passes through untouched; HEIC or large PNG forces canvas JPEG transcoding.
+  assert.equal(shouldKeepOriginalImageDataUrl({ mimeType: "image/png", byteLength: 180 * 1024, scaled: false }), true);
+  assert.equal(shouldKeepOriginalImageDataUrl({ mimeType: "image/svg+xml", byteLength: 300 * 1024, scaled: false }), true);
+  assert.equal(shouldKeepOriginalImageDataUrl({ mimeType: "image/png", byteLength: 180 * 1024, scaled: true }), false);
+  assert.equal(shouldKeepOriginalImageDataUrl({ mimeType: "image/png", byteLength: 900 * 1024, scaled: false }), false);
+  assert.equal(shouldKeepOriginalImageDataUrl({ mimeType: "image/heic", byteLength: 120 * 1024, scaled: false }), false);
+
+  const okBudget = validateImageBatchBudget(
+    [{ byteLength: 400 * 1024 }, { byteLength: 450 * 1024 }],
+    400 * 1024,
+  );
+  assert.equal(okBudget.ok, true);
+
+  const singleTooBig = validateImageBatchBudget([], 1800 * 1024);
+  assert.equal(singleTooBig.ok, false);
+  assert.match(singleTooBig.message, /单张图片/);
+
+  const totalTooBig = validateImageBatchBudget(
+    [{ byteLength: 1200 * 1024 }, { byteLength: 1200 * 1024 }],
+    400 * 1024,
+  );
+  assert.equal(totalTooBig.ok, false);
+  assert.match(totalTooBig.message, /总大小超出/);
+
+  const tooMany = validateImageBatchBudget(Array.from({ length: 6 }, () => ({ byteLength: 100 * 1024 })), 100 * 1024);
+  assert.equal(tooMany.ok, false);
+  assert.match(tooMany.message, /最多附加 6 张/);
+});
+
+test("provider-hub summarizes queued images, strips huge base64 from SSE broadcasts, and caps oversized legacy history", () => {
+  const bigBase64 = "A".repeat(400_000);
+  const bigDataUrl = `data:image/jpeg;base64,${bigBase64}`;
+
+  // summarizeQueuedTurnEntry strips dataUrl without mutating original entry.
+  const queueEntry = {
+    id: "q-1",
+    threadId: "claude:default:t-1",
+    createdAt: 1700000000,
+    text: "请分析截图",
+    images: [{ name: "shot.jpg", dataUrl: bigDataUrl }],
+    model: "claude-opus-4-6",
+    effort: "medium",
+    permissionMode: "turbo",
+    goalMode: false,
+    position: 1,
+  };
+  const queueSummary = summarizeQueuedTurnEntry(queueEntry);
+  assert.equal(queueSummary.imageCount, 1);
+  assert.deepEqual(queueSummary.images, [{ name: "shot.jpg", omitted: true }]);
+  assert.equal(queueEntry.images[0].dataUrl, bigDataUrl);
+
+  // sanitizeEventForSse removes large inline base64 across Claude turn_started, Codex notifications, and queued_turn_event.
+  const claudeEvt = sanitizeEventForSse("provider_event", {
+    type: "turn_started",
+    threadId: "claude:default:t-1",
+    turn: {
+      id: "turn-1",
+      items: [{
+        type: "userMessage",
+        content: [
+          { type: "image", source: { type: "base64", media_type: "image/jpeg", data: bigBase64 } },
+          { type: "text", text: "看图" },
+        ],
+      }],
+    },
+  });
+  assert.equal(claudeEvt.turn.items[0].content[0].path, "[图片] 附件图片");
+  assert.equal(claudeEvt.turn.items[0].content[1].text, "看图");
+
+  const codexEvt = sanitizeEventForSse("provider_event", {
+    type: "codex_notification",
+    threadId: "codex:default:t-2",
+    method: "turn/started",
+    params: {
+      turn: {
+        id: "turn-2",
+        items: [{
+          type: "userMessage",
+          content: [{ type: "image", url: bigDataUrl }, { type: "text", text: "修图" }],
+        }],
+      },
+    },
+  });
+  assert.equal(codexEvt.params.turn.items[0].content[0].path, "[图片] 附件图片");
+  assert.equal(codexEvt.params.turn.items[0].content[1].text, "修图");
+
+  const smallEvt = sanitizeEventForSse("provider_event", {
+    type: "stream_delta",
+    threadId: "claude:default:t-1",
+    kind: "text",
+    delta: "hello",
+  });
+  assert.equal(smallEvt.delta, "hello");
+
+  // capOversizedThreadInlineImages preserves newest compact images and omits older/oversized ones.
+  const compactDataUrl = `data:image/jpeg;base64,${"B".repeat(300_000)}`;
+  const hugeLegacyUrl = `data:image/png;base64,${"C".repeat(2_500_000)}`;
+  const rawThread = {
+    id: "claude:default:t-hist",
+    turns: [
+      {
+        id: "t-old",
+        items: [{ type: "userMessage", content: [{ type: "image", url: compactDataUrl }] }],
+      },
+      {
+        id: "t-huge",
+        items: [{ type: "userMessage", content: [{ type: "image", url: hugeLegacyUrl }] }],
+      },
+      {
+        id: "t-new",
+        items: [{ type: "userMessage", content: [{ type: "image", url: compactDataUrl }] }],
+      },
+    ],
+  };
+  const capped = capOversizedThreadInlineImages(rawThread, {
+    maxSingleDataUrlChars: 1_000_000,
+    maxTotalDataUrlChars: 450_000,
+  });
+  // Newest compact image stays intact; oversized single image and over-budget older image are omitted.
+  assert.equal(capped.turns[2].items[0].content[0].url, compactDataUrl);
+  assert.match(capped.turns[1].items[0].content[0].path, /已省略原图/);
+  assert.match(capped.turns[0].items[0].content[0].path, /已省略原图/);
+  // Original thread object was not mutated.
+  assert.equal(rawThread.turns[1].items[0].content[0].url, hugeLegacyUrl);
+});
+
+test("renderQueuedTurnsPanelHtml renders multi-line items, source tags, media badges, readonly native hints, and collapsible header", () => {
+  assert.equal(renderQueuedTurnsPanelHtml([]), "");
+
+  const items = [
+    {
+      id: "native-1",
+      position: 1,
+      text: "第一行桌面端指令\n第二行详细补充说明",
+      source: "antigravity-desktop",
+      sourceLabel: "桌面端队列",
+      imageCount: 2,
+      goalMode: false,
+      canCancel: false,
+    },
+    {
+      id: "ctrl-2",
+      position: 2,
+      text: "等待前一条完成再自动执行",
+      source: "control",
+      sourceLabel: "控制端队列",
+      imageCount: 0,
+      goalMode: true,
+      canCancel: true,
+    },
+  ];
+
+  const expandedHtml = renderQueuedTurnsPanelHtml(items, { collapsed: false });
+  assert.match(expandedHtml, /排队消息/);
+  assert.match(expandedHtml, /queued-panel-count">2</);
+  assert.match(expandedHtml, /当前轮次完成后自动发送/);
+  assert.match(expandedHtml, /data-queue-toggle="1"/);
+  assert.match(expandedHtml, /桌面端队列/);
+  assert.match(expandedHtml, /ac-icon-image[^>]*>[\s\S]*?<\/svg>\s*2/);
+  assert.match(expandedHtml, />只读</);
+  assert.doesNotMatch(expandedHtml, /data-queue-edit="native-1"/);
+  assert.doesNotMatch(expandedHtml, /data-queue-cancel="native-1"/);
+  assert.match(expandedHtml, /控制端队列/);
+  assert.match(expandedHtml, /ac-icon-target[^>]*>[\s\S]*?<\/svg>\s*Goal/);
+  assert.match(expandedHtml, /data-queue-edit="ctrl-2"/);
+  assert.match(expandedHtml, /data-queue-cancel="ctrl-2"/);
+
+  const collapsedHtml = renderQueuedTurnsPanelHtml(items, { collapsed: true });
+  assert.match(collapsedHtml, /▾ 展开/);
+  assert.doesNotMatch(collapsedHtml, /queued-panel-list/);
+});
+
+test("sidebar, project board, and task strip surface 排队 N micro-badges and retain stale queued threads", () => {
+  const nowSec = Math.floor(Date.now() / 1000);
+  const profiles = [{ id: "desktop", provider: "antigravity", label: "Antigravity 桌面" }];
+  const cwd = "/workspace/demo/agent-control";
+  const threads = [
+    {
+      id: "antigravity:desktop:recent-1",
+      provider: "antigravity",
+      profileId: "desktop",
+      profileLabel: "Antigravity 桌面",
+      cwd,
+      title: "活跃排查会话",
+      preview: "活跃排查会话",
+      live: true,
+      queuedCount: 0,
+      updatedAt: nowSec - 30,
+    },
+    {
+      id: "antigravity:desktop:stale-queued-2",
+      provider: "antigravity",
+      profileId: "desktop",
+      profileLabel: "Antigravity 桌面",
+      cwd,
+      title: "十天前但仍挂着排队的会话",
+      preview: "十天前但仍挂着排队的会话",
+      live: false,
+      queuedCount: 2,
+      updatedAt: nowSec - 86400 * 10,
+    },
+  ];
+
+  const groups = buildProjectGroups(threads, {
+    projectsMeta: { [cwd]: { pinned: true } },
+  });
+  const sidebarHtml = renderSidebarThreadListHtml(groups, {
+    activeThreadId: "antigravity:desktop:recent-1",
+    profiles,
+    nowMs: nowSec * 1000,
+    staleThreadAgeSec: 86400 * 2,
+  });
+  assert.match(sidebarHtml, /十天前但仍挂着排队的会话/);
+  assert.match(sidebarHtml, /thread-queued-pill"[^>]*>排队 2</);
+
+  const boardHtml = renderProjectBoardHtml({
+    groups,
+    activeThreadId: "antigravity:desktop:recent-1",
+  });
+  assert.match(boardHtml, /board-status-pill is-queued"[^>]*>排队 2</);
+
+  const stripHtml = renderProjectTaskStripHtml({
+    projectGroup: groups[0],
+    activeThreadId: "antigravity:desktop:recent-1",
+  });
+  assert.match(stripHtml, /thread-queued-pill"[^>]*>排队 2</);
+});
+
+test("Grok visual metadata, quota strip formatting, and profile ranking integrate cleanly", () => {
+  const grokMeta = providerVisualMeta("grok");
+  assert.equal(grokMeta.id, "grok");
+  assert.equal(grokMeta.glyph, "");
+  assert.match(grokMeta.iconSvg, /<svg[^>]*is-grok/);
+  assert.equal(grokMeta.tone, "grok");
+  assert.equal(providerDisplayName("grok"), "Grok");
+
+  assert.equal(compactModelBadgeLabel("grok-4.7-build-fast"), "Grok 4.7F");
+  assert.equal(compactModelBadgeLabel("grok-4.7"), "Grok 4.7");
+
+  const grokChip = compactThreadSourceChip({
+    provider: "grok",
+    profileId: "cockpit-0957",
+    profileLabel: "Grok · work",
+  });
+  assert.equal(grokChip?.tone, "grok");
+  assert.equal(grokChip?.text, "work");
+
+  const nowSec = 1_795_000_000;
+  assert.equal(formatQuotaResetRelative(nowSec + 1800, nowSec), "30分后重置");
+  assert.equal(formatQuotaResetRelative(nowSec + 7200, nowSec), "2小时后重置");
+  assert.equal(formatQuotaResetRelative(nowSec - 10, nowSec), "");
+
+  const profiles = [
+    {
+      id: "default",
+      key: "grok:default",
+      provider: "grok",
+      label: "Grok 默认",
+      installed: true,
+      authenticated: false,
+      quota: { statusTone: "unknown", summaryText: "仅历史" },
+    },
+    {
+      id: "cockpit-1",
+      key: "grok:cockpit-1",
+      provider: "grok",
+      label: "Grok · work",
+      installed: true,
+      authenticated: true,
+      quota: {
+        planLabel: "SuperGrok",
+        accountLabel: "grok@example.com",
+        statusTone: "ok",
+        summaryText: "余 84%",
+        primary: { id: "grok-billing", label: "订阅额度", remainingPercent: 84, resetsAt: nowSec + 5400 },
+        buckets: [
+          { id: "grok-billing", label: "订阅额度", remainingPercent: 84, resetsAt: nowSec + 5400 },
+          { id: "product-build", label: "Grok Build", remainingPercent: 87, resetsAt: null },
+        ],
+      },
+    },
+    {
+      id: "default",
+      key: "claude:default",
+      provider: "claude",
+      label: "Claude 默认",
+      installed: true,
+      quota: {
+        planLabel: "Pro",
+        statusTone: "exhausted",
+        summaryText: "5h 耗尽",
+        primary: { id: "five_hour", label: "5h 窗口", remainingPercent: 0, resetsAt: nowSec + 2400 },
+        buckets: [{ id: "five_hour", label: "5h 窗口", remainingPercent: 0, resetsAt: nowSec + 2400 }],
+      },
+    },
+  ];
+
+  const sortedGrok = sortProfilesByAvailability(profiles.filter((p) => p.provider === "grok"));
+  assert.equal(sortedGrok[0].id, "cockpit-1");
+  assert.match(profileOptionLabel(profiles[1]), /余 84%/);
+
+  const compactHtml = renderQuotaOverviewHtml(profiles, { expanded: false, nowSec });
+  assert.match(compactHtml, /余 84%/);
+  assert.match(compactHtml, /5h 耗尽/);
+  // Unauthenticated secondary Grok history profile hidden in compact strip when authenticated profile exists
+  assert.doesNotMatch(compactHtml, /Grok 默认/);
+
+  const expandedHtml = renderQuotaOverviewHtml(profiles, { expanded: true, nowSec });
+  assert.match(expandedHtml, /SuperGrok/);
+  assert.match(expandedHtml, /Grok Build/);
+  assert.match(expandedHtml, /40分后重置/);
+});
+
+test("zero pictographic UI emojis, hidden redundant topbar chrome, and overflow telemetry capsule", async () => {
+  const indexHtml = await readFile(fileURLToPath(new URL("../public/index.html", import.meta.url)), "utf8");
+  const strippedHtml = indexHtml.replace(/<script[\s\S]*?<\/script>/g, "");
+  assert.equal(/\p{Extended_Pictographic}/u.test(strippedHtml), false, "index.html should not contain UI emojis");
+  assert.match(indexHtml, /id="activeProjectCrumb"[^>]*hidden/);
+  assert.match(indexHtml, /id="telemetryTopbarBtn"[^>]*hidden/);
+  assert.match(indexHtml, /id="composerVoiceBtn"/);
+
+  const profiles = [
+    {
+      id: "default",
+      key: "claude:default",
+      provider: "claude",
+      label: "Claude 默认",
+      installed: true,
+      authenticated: true,
+      quota: {
+        statusTone: "ok",
+        summaryText: "余 90%",
+        primary: { id: "five_hour", label: "5h", remainingPercent: 90 },
+        buckets: [{ id: "five_hour", label: "5h", remainingPercent: 90 }],
+      },
+    },
+    {
+      id: "codex",
+      key: "codex:codex",
+      provider: "codex",
+      label: "Codex 备用",
+      installed: true,
+      authenticated: true,
+      quota: {
+        statusTone: "ok",
+        summaryText: "余 80%",
+        primary: { id: "five_hour", label: "5h", remainingPercent: 80 },
+        buckets: [{ id: "five_hour", label: "5h", remainingPercent: 80 }],
+      },
+    },
+  ];
+  const nowSec = Math.floor(Date.now() / 1000);
+  const telemetry = {
+    updatedAt: nowSec,
+    byProvider: {
+      claude: { provider: "claude", runningCount: 0, queuedCount: 0, tokensPerSec: 0 },
+      codex: { provider: "codex", runningCount: 2, queuedCount: 1, tokensPerSec: 12 },
+    },
+    byProfile: {
+      "claude:default": { key: "claude:default", runningCount: 0, queuedCount: 0, tokensPerSec: 0 },
+      "codex:codex": { key: "codex:codex", runningCount: 2, queuedCount: 1, tokensPerSec: 12 },
+    },
+  };
+  const compactBarHtml = renderAgentTelemetryBarHtml(profiles, telemetry, {
+    visibleKeys: ["claude:default"],
+    activeProvider: "claude",
+    activeProfileId: "default",
+    nowSec,
+  });
+  assert.match(compactBarHtml, /telemetry-overflow-pill[\s\S]*?\+2 运行 · \+1 排队</);
+
+  const renderedChunks = [
+    compactBarHtml,
+    renderQuotaOverviewHtml(profiles, { expanded: true, nowSec }),
+    renderQueuedTurnsPanelHtml([{ id: "q1", position: 1, text: "跑单测", source: "control", imageCount: 1, goalMode: true }]),
+    renderVoiceLiveProgressHtml([{
+      threadId: "antigravity:desktop:t1",
+      projectCwd: "/tmp/p1",
+      projectName: "测试项目",
+      title: "修复音频",
+      provider: "antigravity",
+      status: "pending",
+      phaseText: "等待确认",
+      goalBadge: "2/20",
+      pendingRequest: { id: "req-1" },
+    }]),
+    renderVoiceCallTranscriptHtml([{ heardText: "粉丝站什么进度", spokenReply: "当前有 1 项待确认", actionTag: "已派发" }]),
+  ];
+  for (const chunk of renderedChunks) {
+    assert.equal(/\p{Extended_Pictographic}/u.test(chunk), false, `rendered UI contains emoji: ${chunk.slice(0, 120)}`);
+    assert.match(chunk, /<svg class="ac-icon/);
+  }
+});
+
+test("adaptive VAD adapts threshold in quiet environment and buildDeterministicVoicePlan routes intents", () => {
+  const vad = createVadTurnDetector({
+    sampleRate: 16000,
+    preRollMs: 120,
+    silenceMs: 300,
+    minSpeechMs: 150,
+    rmsThreshold: 0.024,
+    adaptive: true,
+  });
+  const baseThreshold = vad.threshold;
+  const quiet = new Int16Array(1600);
+  for (let i = 0; i < 12; i += 1) {
+    assert.equal(vad.pushSamples(quiet, 0.002).type, "listening");
+  }
+  assert.ok(vad.noiseFloor < 0.004);
+  assert.ok(vad.threshold <= baseThreshold);
+
+  const softSpeech = new Int16Array(1600).fill(2200);
+  assert.equal(vad.pushSamples(softSpeech, 0.025).type, "speech_start");
+  assert.equal(vad.pushSamples(softSpeech, 0.025).type, "recording");
+  assert.equal(vad.pushSamples(quiet, 0.001).type, "recording");
+  assert.equal(vad.pushSamples(quiet, 0.001).type, "recording");
+  assert.equal(vad.pushSamples(quiet, 0.001).type, "utterance");
+
+  const snapshot = {
+    activeThreadId: "antigravity:desktop:t-active",
+    pendingRequests: [
+      {
+        requestId: "req-fans",
+        threadId: "claude:default:t-fans",
+        projectCwd: "/tmp/fans-home",
+        projectName: "粉丝站小屋",
+        title: "允许写入 furniture.json",
+      },
+    ],
+    projects: [
+      {
+        cwd: "/tmp/fans-home",
+        name: "粉丝站小屋",
+        pinned: true,
+        liveCount: 1,
+        pendingCount: 1,
+        threads: [
+          { id: "claude:default:t-fans", title: "家具重构", live: true, phase: "等待确认" },
+        ],
+      },
+      {
+        cwd: "/tmp/agent-ctrl",
+        name: "Agent Control",
+        alias: "控制台",
+        pinned: true,
+        liveCount: 0,
+        pendingCount: 0,
+        threads: [
+          { id: "antigravity:desktop:t-active", title: "语音修补", live: false, preview: "已更新脚本" },
+        ],
+      },
+    ],
+  };
+
+  assert.equal(buildDeterministicVoicePlan({ mode: "briefing", snapshot }).intent, "summarize_progress");
+
+  const approvePlan = buildDeterministicVoicePlan({ transcript: "批准粉丝站小屋的请求", snapshot });
+  assert.equal(approvePlan.intent, "approve_request");
+  assert.equal(approvePlan.decision, "accept");
+  assert.equal(approvePlan.requestId, "req-fans");
+
+  const rejectPlan = buildDeterministicVoicePlan({ transcript: "拒绝刚才这个权限请求", snapshot });
+  assert.equal(rejectPlan.intent, "approve_request");
+  assert.equal(rejectPlan.decision, "decline");
+
+  const openPlan = buildDeterministicVoicePlan({ transcript: "打开控制台", snapshot });
+  assert.equal(openPlan.intent, "open_project");
+  assert.equal(openPlan.targetProjectCwd, "/tmp/agent-ctrl");
+
+  const statusPlan = buildDeterministicVoicePlan({ transcript: "粉丝站小屋现在什么进度", snapshot });
+  assert.equal(statusPlan.intent, "summarize_progress");
+  assert.match(statusPlan.spokenReply, /粉丝站小屋/);
+
+  const sendPlan = buildDeterministicVoicePlan({ transcript: "让 粉丝站小屋 跑一下单元测试", snapshot });
+  assert.equal(sendPlan.intent, "send_turn");
+  assert.equal(sendPlan.targetThreadId, "claude:default:t-fans");
+  assert.match(sendPlan.instruction, /跑一下单元测试/);
+
+  const interruptPlan = buildDeterministicVoicePlan({ transcript: "停止运行粉丝站小屋的任务", snapshot });
+  assert.equal(interruptPlan.intent, "interrupt_thread");
+  assert.equal(interruptPlan.targetThreadId, "claude:default:t-fans");
+});
+
+test("local Whisper ASR worker endpoint /api/voice/transcribe and fast voice/call dispatch execute without tokens", async (t) => {
+  const root = await mkdtemp(resolve(os.tmpdir(), "ac-local-voice-"));
+  let srv = null;
+  t.after(async () => {
+    await srv?.close().catch(() => {});
+    await rm(root, { recursive: true, force: true }).catch(() => {});
+  });
+  const dataDir = resolve(root, "data");
+  const agyCli = resolve(root, "agy-cli");
+  const codexHome = resolve(root, "codex");
+  const claudeHome = resolve(root, "claude");
+  await Promise.all([
+    mkdir(dataDir, { recursive: true }),
+    mkdir(agyCli, { recursive: true }),
+    mkdir(codexHome, { recursive: true }),
+    mkdir(claudeHome, { recursive: true }),
+  ]);
+
+  const env = {
+    ...process.env,
+    CODEX_BIN: MOCK_CODEX_BIN,
+    CLAUDE_BIN: MOCK_CLAUDE_BIN,
+    AGY_BIN: MOCK_AGY_BIN,
+    EDGE_TTS_BIN: MOCK_EDGE_TTS_BIN,
+    VOICE_ASR_BIN: MOCK_VOICE_ASR_BIN,
+    MOCK_VOICE_ASR_TEXT: "让 粉丝站小屋 跑一下检查",
+    AGENT_CONTROL_CODEX_HOMES: JSON.stringify([{ id: "default", label: "Codex 默认", home: codexHome }]),
+    AGENT_CONTROL_CLAUDE_CONFIG_DIRS: JSON.stringify([{ id: "default", label: "Claude 默认", home: claudeHome }]),
+    AGENT_CONTROL_AGY_APP_DATA_DIRS: JSON.stringify([{ id: "cli", label: "Antigravity CLI", home: agyCli, profileType: "cli" }]),
+  };
+
+  srv = await createAgentControlServer({
+    port: 0,
+    disableRelay: true,
+    dataDir,
+    env,
+  });
+  await srv.start();
+
+  const projCwd = resolve(root, "fans-home");
+  await mkdir(projCwd, { recursive: true });
+  await fetch(`${srv.url}/api/project/meta`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ cwd: projCwd, alias: "粉丝站小屋", pinned: true }),
+  });
+
+  const createdRes = await fetch(`${srv.url}/api/thread/new`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      provider: "antigravity",
+      profileId: "cli",
+      cwd: projCwd,
+      text: "初始化会话 [COMPLETE_NOW]",
+      permissionMode: "turbo",
+    }),
+  });
+  assert.equal(createdRes.status, 200);
+  const createdJson = await createdRes.json();
+  const threadId = createdJson.thread?.id;
+  assert.ok(threadId);
+
+  const wavBase64 = uint8ArrayToBase64(encodePcm16SamplesToWav(new Int16Array(1600), 16000));
+
+  // Missing audio returns 400.
+  const emptyAsrRes = await fetch(`${srv.url}/api/voice/transcribe`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  assert.equal(emptyAsrRes.status, 400);
+
+  // /api/voice/transcribe returns local ASR text.
+  const asrRes = await fetch(`${srv.url}/api/voice/transcribe`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ audioBase64: wavBase64, audioMimeType: "audio/wav" }),
+  });
+  assert.equal(asrRes.status, 200);
+  const asrJson = await asrRes.json();
+  assert.equal(asrJson.ok, true);
+  assert.equal(asrJson.text, "让 粉丝站小屋 跑一下检查");
+  assert.equal(asrJson.engine, "mock-whisper");
+
+  // /api/voice/call/start warms mock-whisper instead of ACP.
+  const startRes = await fetch(`${srv.url}/api/voice/call/start`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ callId: "call-local-1" }),
+  });
+  assert.equal(startRes.status, 200);
+  const startJson = await startRes.json();
+  assert.equal(startJson.warmed, true);
+  assert.equal(startJson.model, "mock-whisper");
+
+  // /api/voice/call with audioBase64 + tts:false transcribes and dispatches send_turn cleanly.
+  const callRes = await fetch(`${srv.url}/api/voice/call`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      callId: "call-local-1",
+      audioBase64: wavBase64,
+      audioMimeType: "audio/wav",
+      autoExecute: true,
+      tts: false,
+    }),
+  });
+  assert.equal(callRes.status, 200);
+  const callJson = await callRes.json();
+  assert.equal(callJson.ok, true);
+  assert.equal(callJson.usedFallback, false);
+  assert.equal(callJson.model, "mock-whisper");
+  assert.equal(callJson.heardText, "让 粉丝站小屋 跑一下检查");
+  assert.equal(callJson.plan?.intent, "send_turn");
+  assert.equal(callJson.executed?.ok, true);
+  assert.equal(callJson.executed?.action, "send_turn");
+  assert.equal(callJson.executed?.focusThreadId, threadId);
+  assert.equal(callJson.tts?.provider, "none");
+  assert.equal(callJson.tts?.audioBase64, "");
+});
+
+test("telemetry toggle stops propagation across re-render and places desktop compact slot inside topbar-actions", async () => {
+  const [appJs, indexHtml, appCss] = await Promise.all([
+    readFile(fileURLToPath(new URL("../public/app.js", import.meta.url)), "utf8"),
+    readFile(fileURLToPath(new URL("../public/index.html", import.meta.url)), "utf8"),
+    readFile(fileURLToPath(new URL("../public/app.css", import.meta.url)), "utf8"),
+  ]);
+
+  assert.match(
+    appJs,
+    /if\s*\(\s*e\.target\.closest\(\s*"\[data-telemetry-toggle\]"\s*\)\s*\)\s*\{\s*e\.stopPropagation\(\)/,
+    "telemetry toggle must stopPropagation before innerHTML re-render detaches clicked target",
+  );
+  assert.match(appJs, /\$\("topbarTelemetrySlot"\)\?\.addEventListener\("click",\s*handleTelemetryBarClick\)/);
+  assert.match(appJs, /\$\("agentTelemetryBar"\)\?\.addEventListener\("click",\s*handleTelemetryBarClick\)/);
+
+  const actionsIdx = indexHtml.indexOf('class="topbar-actions"');
+  const slotIdx = indexHtml.indexOf('id="topbarTelemetrySlot"');
+  const boardBtnIdx = indexHtml.indexOf('id="boardToggleBtn"');
+  assert.ok(actionsIdx > 0 && slotIdx > actionsIdx && boardBtnIdx > slotIdx);
+
+  assert.match(appCss, /@media\s*\(min-width:\s*961px\)[\s\S]*?\.agent-telemetry-bar:not\(\.is-expanded\)\s*\{\s*display:\s*none\s*!important;/);
+  assert.match(appCss, /@media\s*\(max-width:\s*960px\)[\s\S]*?\.topbar-telemetry-slot\s*\{\s*display:\s*none\s*!important;/);
+});
+
+test("spawn ENOENT is never treated as recoverable and failed turn reload preserves status banner", async () => {
+  assert.equal(isRecoverableToolErrorText("spawn /opt/homebrew/bin/claude ENOENT"), false);
+  assert.equal(isRecoverableToolErrorText({ message: "spawn /usr/local/bin/claude ENOENT", syscall: "spawn /usr/local/bin/claude" }), false);
+  assert.equal(isRecoverableToolErrorText("ENOENT: no such file or directory, open '/tmp/foo.txt'"), true);
+
+  const appJs = await readFile(fileURLToPath(new URL("../public/app.js", import.meta.url)), "utf8");
+  assert.match(appJs, /async function selectThread\(compositeId,\s*\{\s*focusScroll = true,\s*preserveStatus = false\s*\}\s*=\s*\{\}\)/);
+  assert.match(appJs, /preserveStatus:\s*isFailed/);
+  assert.match(appJs, /reloadActiveThreadAfterTurnCompletion\(\{[\s\S]*?turnId:\s*evt\.turnId \|\| ""/);
+});
+
+test("image-only user turns strip Antigravity XML wrappers and single-profile chips avoid redundant desktop labels", async () => {
+  const html = renderTurnHtml({
+    id: "turn-img-only",
+    status: "completed",
+    items: [
+      {
+        type: "userMessage",
+        id: "user-img-1",
+        content: [
+          { type: "image", url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==" },
+          {
+            type: "text",
+            text: "/tmp/uploaded_media_1.jpg\n\n<USER_REQUEST>\n\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nuploaded 1 image\n</ADDITIONAL_METADATA>\n<USER_SETTINGS_CHANGE>\nModel Selection changed\n</USER_SETTINGS_CHANGE>",
+          },
+        ],
+      },
+      {
+        type: "agentMessage",
+        id: "agent-img-1",
+        text: "收到截图，已定位问题。",
+      },
+    ],
+  }, { threadKey: "antigravity:desktop:t1" });
+
+  assert.match(html, /class="msg-images"/);
+  assert.doesNotMatch(html, /USER_REQUEST|ADDITIONAL_METADATA|USER_SETTINGS_CHANGE/);
+  assert.match(html, /收到截图，已定位问题。/);
+
+  const singleAgyProfiles = [
+    { provider: "antigravity", id: "desktop", label: "Antigravity", installed: true },
+    { provider: "codex", id: "default", label: "Codex", installed: true },
+  ];
+  const chip = compactThreadSourceChip(
+    { provider: "antigravity", profileId: "desktop", profileLabel: "Antigravity" },
+    { providerFilter: "all", profiles: singleAgyProfiles },
+  );
+  assert.equal(chip?.text, "Agy");
+  assert.equal(compactProfileChipText({ provider: "antigravity", id: "desktop", label: "Antigravity" }), "桌面");
+
+  const appJs = await readFile(fileURLToPath(new URL("../public/app.js", import.meta.url)), "utf8");
+  assert.match(appJs, /function scheduleSseReconnect\(\)/);
+  assert.match(appJs, /let pendingReloadCompositeId = "";/);
+  assert.match(appJs, /const isBusyConflict = errStatus === 409/);
+  assert.match(appJs, /function activeThreadLastTurnHasFinalReply\(thread\)/);
+});
+
+test("apiGet ETag cache reuses 304 payloads safely and versioned static assets use private no-cache with 304", async (t) => {
+  const root = await mkdtemp(resolve(os.tmpdir(), "ac-ui-etag-"));
+  const dataDir = resolve(root, "data");
+  const codexHome = resolve(root, "codex");
+  await Promise.all([mkdir(dataDir, { recursive: true }), mkdir(codexHome, { recursive: true })]);
+  clearApiEtagCache();
+  t.after(async () => {
+    clearApiEtagCache();
+    await rm(root, { recursive: true, force: true }).catch(() => {});
+  });
+
+  const srv = await createAgentControlServer({
+    port: 0,
+    disableRelay: true,
+    dataDir,
+    env: {
+      ...process.env,
+      AGENT_CONTROL_CODEX_HOMES: JSON.stringify([{ id: "default", label: "Codex 默认", home: codexHome }]),
+      AGENT_CONTROL_CLAUDE_CONFIG_DIRS: "[]",
+      AGENT_CONTROL_AGY_APP_DATA_DIRS: "[]",
+      AGENT_CONTROL_GROK_HOMES: "[]",
+    },
+  });
+  await srv.start();
+  t.after(() => srv.close());
+
+  const first = await apiGet(`${srv.url}/api/projects/meta`);
+  assert.deepEqual(first.projectsMeta, {});
+  first.projectsMeta.mutated = true;
+
+  const second = await apiGet(`${srv.url}/api/projects/meta`);
+  assert.deepEqual(second.projectsMeta, {});
+
+  await fetch(`${srv.url}/api/project/meta`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ cwd: "/tmp/proj-etag", pinned: true, alias: "测试别名" }),
+  });
+
+  const third = await apiGet(`${srv.url}/api/projects/meta`);
+  assert.equal(third.projectsMeta?.["/tmp/proj-etag"]?.alias, "测试别名");
+
+  const unversionedRes = await fetch(`${srv.url}/app.js`);
+  assert.equal(unversionedRes.status, 200);
+  assert.equal(unversionedRes.headers.get("cache-control"), "no-store");
+
+  const versionedRes = await fetch(`${srv.url}/app.js?v=20261116a`);
+  assert.equal(versionedRes.status, 200);
+  assert.equal(versionedRes.headers.get("cache-control"), "private, no-cache");
+  const versionedEtag = versionedRes.headers.get("etag");
+  assert.ok(versionedEtag);
+
+  const versioned304 = await fetch(`${srv.url}/app.js?v=20261116a`, {
+    headers: { "If-None-Match": versionedEtag },
+  });
+  assert.equal(versioned304.status, 304);
+  assert.equal((await versioned304.text()).length, 0);
+});
+
+test("project and thread batch selection renders tristate controls, idle picker, and mounts cleanly in UI", async () => {
+  const nowSec = Math.floor(Date.now() / 1000);
+  const groups = buildProjectGroups([
+    { id: "codex:default:t1", provider: "codex", profileId: "default", cwd: "/tmp/proj-a", title: "子代理任务1", updatedAt: nowSec - 10, live: false },
+    { id: "codex:default:t2", provider: "codex", profileId: "default", cwd: "/tmp/proj-a", title: "运行中主任务", updatedAt: nowSec - 5, live: true },
+    { id: "claude:default:t3", provider: "claude", profileId: "default", cwd: "/tmp/proj-b", title: "已完结任务3", updatedAt: nowSec - 20, live: false },
+  ]);
+
+  assert.deepEqual(computeProjectGroupSelectionState(groups[0], new Set()), {
+    total: 2,
+    selectedCount: 0,
+    checked: false,
+    partial: false,
+  });
+  assert.deepEqual(computeProjectGroupSelectionState(groups[0], new Set(["codex:default:t1"])), {
+    total: 2,
+    selectedCount: 1,
+    checked: false,
+    partial: true,
+  });
+  assert.deepEqual(computeProjectGroupSelectionState(groups[1], new Set(["claude:default:t3"])), {
+    total: 1,
+    selectedCount: 1,
+    checked: true,
+    partial: false,
+  });
+
+  const normalSidebar = renderSidebarThreadListHtml(groups, { nowMs: nowSec * 1000, autoFoldProjects: false });
+  assert.doesNotMatch(normalSidebar, /class="batch-check/);
+
+  const selectedSet = new Set(["codex:default:t1", "claude:default:t3"]);
+  const batchSidebar = renderSidebarThreadListHtml(groups, {
+    nowMs: nowSec * 1000,
+    autoFoldProjects: false,
+    selectionMode: true,
+    selectedThreadIds: selectedSet,
+  });
+  assert.match(batchSidebar, /project-group[^"]*is-batch-mode is-batch-partial/);
+  assert.match(batchSidebar, /project-group[^"]*is-batch-mode is-batch-checked/);
+  assert.match(batchSidebar, /data-batch-fold-cwd="\/tmp\/proj-a"/);
+  assert.match(batchSidebar, /thread-item[^"]*is-batch-checked[^"]*" data-thread-id="codex:default:t1" aria-pressed="true"/);
+
+  const batchBoard = renderProjectBoardHtml({
+    groups,
+    allGroups: groups,
+    selectionMode: true,
+    selectedThreadIds: selectedSet,
+  });
+  assert.match(batchBoard, /data-board-action="toggle-batch-select">[\s\S]*?退出多选/);
+  assert.match(batchBoard, /data-batch-project-cwd="\/tmp\/proj-a"/);
+  assert.match(batchBoard, /board-batch-ratio">已选 1\/2</);
+  assert.match(batchBoard, /board-task-row[^"]*is-batch-checked[^"]*"[\s\S]*?data-board-open-thread="codex:default:t1"/);
+
+  const archiveBar = renderBatchActionBarHtml({
+    selectedCount: 2,
+    totalVisibleCount: 3,
+    idleVisibleCount: 2,
+    archivedView: false,
+  });
+  assert.equal(/\p{Extended_Pictographic}/u.test(archiveBar), false);
+  assert.match(archiveBar, /已选 <strong>2<\/strong> 项/);
+  assert.match(archiveBar, /data-batch-action="select-idle"[^>]*>选空闲 \(2\)</);
+  assert.match(archiveBar, /data-batch-action="submit-archive"[^>]*>[\s\S]*?归档 \(2\)/);
+
+  const restoreBar = renderBatchActionBarHtml({
+    selectedCount: 2,
+    totalVisibleCount: 2,
+    idleVisibleCount: 0,
+    archivedView: true,
+  });
+  assert.doesNotMatch(restoreBar, /data-batch-action="select-idle"/);
+  assert.match(restoreBar, /data-batch-action="submit-archive"[^>]*>[\s\S]*?恢复 \(2\)/);
+
+  const indexHtml = await readFile(fileURLToPath(new URL("../public/index.html", import.meta.url)), "utf8");
+  assert.match(indexHtml, /<div class="sidebar-filter-row">[\s\S]*?id="providerTabs"[\s\S]*?id="sidebarBatchSelectBtn"[\s\S]*?<\/div>/);
+  assert.doesNotMatch(indexHtml, /id="profileFilter"|id="threadSearch"|id="archivedToggle"|class="sidebar-filters"/);
+  assert.match(indexHtml, /id="sidebarBatchSelectBtn"/);
+  assert.match(indexHtml, /id="sidebarBatchBar"/);
+  assert.match(indexHtml, /id="boardBatchBar"/);
+  assert.match(indexHtml, /id="imagePreviewModal"/);
+  assert.match(indexHtml, /id="imagePreviewLoadRawBtn"/);
+  assert.match(indexHtml, /id="filePreviewModal"/);
+  const appJs = await readFile(fileURLToPath(new URL("../public/app.js", import.meta.url)), "utf8");
+  assert.doesNotMatch(appJs, /\$\(["'](?:profileFilter|threadSearch|archivedToggle)["']\)/);
+  assert.match(appJs, /function bindLongPressMultiSelect\(/);
+  assert.match(appJs, /api\/threads\/archive/);
+  assert.match(appJs, /function openImagePreviewModal\(/);
+  assert.match(appJs, /function openFilePreviewModal\(/);
+});
+
+test("renderTurnHtml and renderMarkdown format Codex image tags, Files mentioned headers, question replies, and local skill links cleanly", () => {
+  const imgTurnHtml = renderTurnHtml({
+    id: "turn-codex-img",
+    status: "completed",
+    items: [
+      {
+        type: "userMessage",
+        id: "u-img",
+        content: [
+          {
+            type: "text",
+            text: '<image name=[Image #1] path="demo-studio/assets/hero.png">\n</image>\n<image name=[Image #2] path="demo-studio/assets/npc.png">\n</image>\n使用 [$demo-image-gen](/Users/demo/.agents/skills/demo-image-gen/SKILL.md) 参考 [规范文档](/Users/demo/docs/spec.md) 生成分镜。',
+          },
+        ],
+      },
+    ],
+  }, {
+    agentLabel: "Codex",
+    threadId: "codex:codex:01a1e255-c9fe-7241-afc3-b4e9904f7bc3",
+  });
+
+  assert.doesNotMatch(imgTurnHtml, /&lt;image|&lt;\/image/);
+  assert.match(imgTurnHtml, /class="msg-images"/);
+  assert.match(imgTurnHtml, /class="msg-image" src="\.\/api\/thread\/image\?threadId=codex%3Acodex%3A01a1e255-c9fe-7241-afc3-b4e9904f7bc3&amp;path=demo-studio%2Fassets%2Fhero\.png&amp;w=480&amp;q=68"/);
+  assert.match(imgTurnHtml, /data-preview-raw="\.\/api\/thread\/image\?threadId=codex%3Acodex%3A01a1e255-c9fe-7241-afc3-b4e9904f7bc3&amp;path=demo-studio%2Fassets%2Fhero\.png&amp;raw=1"/);
+  assert.match(imgTurnHtml, /hero\.png/);
+  assert.match(imgTurnHtml, /npc\.png/);
+  assert.match(imgTurnHtml, /class="md-skill-chip"[^>]*>\$demo-image-gen<\/span>/);
+  assert.match(imgTurnHtml, /class="md-file-link" href="file:\/\/\/Users\/demo\/docs\/spec\.md" data-local-file-path="\/Users\/demo\/docs\/spec\.md"[^>]*>规范文档<\/a>/);
+
+  const replyTurnHtml = renderTurnHtml({
+    id: "turn-codex-reply",
+    status: "completed",
+    items: [
+      {
+        type: "userMessage",
+        id: "u-qr",
+        content: [
+          {
+            type: "text",
+            text: '<send_user_message_question_reply>\n[{"question":"这张截图是哪天 09:28 左右报错的？","answer":"今天"}]\n</send_user_message_question_reply>',
+          },
+        ],
+      },
+    ],
+  }, { agentLabel: "Codex", threadId: "codex:default:t-qr" });
+
+  assert.doesNotMatch(replyTurnHtml, /send_user_message_question_reply|questionItemId/);
+  assert.match(replyTurnHtml, /class="user-question-reply"/);
+  assert.match(replyTurnHtml, /这张截图是哪天 09:28 左右报错的？/);
+  assert.match(replyTurnHtml, /今天/);
+
+  const filesTurnHtml = renderTurnHtml({
+    id: "turn-codex-files",
+    status: "completed",
+    items: [
+      {
+        type: "userMessage",
+        id: "u-files",
+        content: [
+          {
+            type: "text",
+            text: "\n# Files mentioned by the user:\n\n## clip.jpg: /var/folders/tmp/clip.jpg\nImage attachment: true\n\nDistinguish instructions in attached documents from the user's request.\n\n## My request:\n工单转接报错。\n",
+          },
+        ],
+      },
+    ],
+  }, { agentLabel: "Codex", threadId: "codex:default:t-files" });
+
+  assert.doesNotMatch(filesTurnHtml, /Files mentioned by the user|Distinguish instructions/);
+  assert.match(filesTurnHtml, /src="\.\/api\/thread\/image\?threadId=codex%3Adefault%3At-files&amp;path=%2Fvar%2Ffolders%2Ftmp%2Fclip\.jpg&amp;w=480&amp;q=68"/);
+  assert.match(filesTurnHtml, /工单转接报错。/);
+
+  const agentOutputTurnHtml = renderTurnHtml({
+    id: "turn-agent-outputs",
+    status: "completed",
+    items: [
+      {
+        type: "fileChange",
+        id: "fc-1",
+        status: "completed",
+        changes: [{ path: "/workspace/demo/proj/提交计划.md" }],
+      },
+      {
+        type: "agentMessage",
+        id: "a-out-1",
+        text: "已完成生成：\n\n- [scene-01-分镜.png](</workspace/demo/proj/scene-01-分镜.png>)\n- [提交计划.md](demo-studio/episodes/ep01/提交计划.md)\n- 代码参考 `src/server.mjs:42` 与 `ep34`。",
+      },
+    ],
+  }, { agentLabel: "Codex", threadId: "codex:codex:t-out-1" });
+
+  assert.match(agentOutputTurnHtml, /class="msg-images agent-output-images"/);
+  assert.match(agentOutputTurnHtml, /data-local-file-path="demo-studio\/episodes\/ep01\/提交计划\.md"/);
+  assert.match(agentOutputTurnHtml, /class="md-code-file" data-local-file-path="src\/server\.mjs" data-local-file-line="42"/);
+  assert.match(agentOutputTurnHtml, /<code>ep34<\/code>/);
+  assert.match(agentOutputTurnHtml, /src="\.\/api\/thread\/image\?threadId=codex%3Acodex%3At-out-1&amp;path=%2Fworkspace%2Fdemo%2Fproj%2Fscene-01-%E5%88%86%E9%95%9C\.png&amp;w=480&amp;q=68"/);
+
+  assert.match(renderMarkdown("查看 [脚本](file:///workspace/demo/a.js)"), /class="md-file-link"/);
+});
+
+test("renderTurnHtml, cleanStreamingAgentText, and markdown bare URLs handle heartbeats, pasted files, ambient context, and fullwidth punctuation", async () => {
+  const {
+    cleanStreamingAgentText,
+    dedupeAdjacentTurns,
+    renderMarkdown,
+    renderTurnHtml,
+  } = await import("../public/markdown.js");
+
+  // 1. Bare URL stops cleanly before CJK fullwidth comma/text
+  const urlHtml = renderMarkdown("后台https://fanqienovel.com/main/writer/chapter-manage/7662800007338134553，台账");
+  assert.match(urlHtml, /href="https:\/\/fanqienovel\.com\/main\/writer\/chapter-manage\/7662800007338134553"/);
+  assert.match(urlHtml, />https:\/\/fanqienovel\.com\/main\/writer\/chapter-manage\/7662800007338134553<\/a>，台账/);
+
+  // 2. Consecutive DONT_NOTIFY heartbeats collapse cleanly without raw XML or fake "你" bubble; NOTIFY stays visible with tag
+  const silentHbPrompt = "<heartbeat>\n  <automation_id>automation-8</automation_id>\n  <current_time_iso>2026-11-16T04:14:15.535Z</current_time_iso>\n  <instructions>\nAsia/Taipei每天12:00—13:59随机续发番茄《发错给总裁》三章。\n</instructions>\n</heartbeat>";
+  const silentHbReply = "<heartbeat>\n  <automation_id>automation-8</automation_id>\n  <decision>DONT_NOTIFY</decision>\n  <message>今日三章已全部提交并记录，无需补发。</message>\n</heartbeat>";
+  const notifyHbReply = "<heartbeat>\n  <automation_id>automation-8</automation_id>\n  <decision>NOTIFY</decision>\n  <message>今日第126—128章已提交。</message>\n</heartbeat>";
+
+  const collapsed = dedupeAdjacentTurns([
+    {
+      id: "hb-1",
+      status: "completed",
+      startedAt: 1794800000,
+      completedAt: 1794800005,
+      items: [
+        { type: "userMessage", id: "u-1", content: [{ type: "text", text: silentHbPrompt }] },
+        { type: "agentMessage", id: "a-1", text: silentHbReply },
+      ],
+    },
+    {
+      id: "hb-2",
+      status: "completed",
+      startedAt: 1794800300,
+      completedAt: 1794800305,
+      items: [
+        { type: "userMessage", id: "u-2", content: [{ type: "text", text: silentHbPrompt }] },
+        { type: "agentMessage", id: "a-2", text: silentHbReply },
+      ],
+    },
+    {
+      id: "hb-notify",
+      status: "completed",
+      startedAt: 1794800600,
+      completedAt: 1794800610,
+      items: [
+        { type: "userMessage", id: "u-3", content: [{ type: "text", text: silentHbPrompt }], heartbeat: { automationId: "automation-8", automationName: "番茄每天随机续发三章", currentTimeIso: "2026-11-16T04:14:15.535Z", instructions: "每天续发三章" } },
+        { type: "agentMessage", id: "a-3", text: "今日第126—128章已提交。", heartbeat: { automationId: "automation-8", automationName: "番茄每天随机续发三章", decision: "NOTIFY", notify: true, message: "今日第126—128章已提交。" } },
+      ],
+    },
+  ]);
+
+  assert.equal(collapsed.length, 2);
+  assert.equal(collapsed[0].quietHeartbeatGroup.count, 2);
+
+  const quietHtml = renderTurnHtml(collapsed[0], { agentLabel: "Codex", threadId: "codex:codex:t-hb" });
+  assert.doesNotMatch(quietHtml, /&lt;heartbeat|&lt;automation_id|&lt;decision|msg-role">你</);
+  assert.match(quietHtml, /class="heartbeat-quiet-card heartbeat-disclosure"/);
+  assert.match(quietHtml, /连续 2 次无变更/);
+  assert.match(quietHtml, /今日三章已全部提交并记录，无需补发。/);
+
+  const notifyHtml = renderTurnHtml(collapsed[1], { agentLabel: "Codex", threadId: "codex:codex:t-hb" });
+  assert.doesNotMatch(notifyHtml, /&lt;heartbeat|msg-role">你</);
+  assert.match(notifyHtml, /class="msg-row msg-automation-trigger"/);
+  assert.match(notifyHtml, /番茄每天随机续发三章/);
+  assert.match(notifyHtml, /class="heartbeat-notify-tag"/);
+  assert.match(notifyHtml, /今日第126—128章已提交。/);
+
+  assert.equal(cleanStreamingAgentText("<heartbeat>\n  <automation_id>automation-8</automation_id>\n  <decision>NOTIFY</decision>\n  <message>正在提交第129章"), "正在提交第129章");
+  assert.equal(cleanStreamingAgentText(notifyHbReply), "今日第126—128章已提交。");
+
+  // 3. Pasted file with colon inside quoted label + ambient browser context + &#x20;
+  const pastedTurnHtml = renderTurnHtml({
+    id: "turn-pasted",
+    status: "completed",
+    items: [
+      {
+        type: "userMessage",
+        id: "u-pasted",
+        content: [
+          {
+            type: "text",
+            text: '# Files pasted by the user:\n\n## "# 客户支持-张工 11-10 上午 10:09 … - Project: 工单系统": /workspace/demo/attachments/0acd/已粘贴的文本.txt\n\n## My request:\n&#x20;继续查。',
+          },
+        ],
+      },
+    ],
+  }, { agentLabel: "Codex", threadId: "codex:codex:t-pasted" });
+  assert.doesNotMatch(pastedTurnHtml, /Files pasted by the user|&amp;#x20;/);
+  assert.match(pastedTurnHtml, /class="msg-file-chip is-clickable" data-local-file-path="\/workspace\/demo\/attachments\/0acd\/已粘贴的文本\.txt"/);
+  assert.match(pastedTurnHtml, />已粘贴的文本\.txt</);
+  assert.match(pastedTurnHtml, /继续查。/);
+
+  const ambientTurnHtml = renderTurnHtml({
+    id: "turn-ambient",
+    status: "completed",
+    items: [
+      {
+        type: "userMessage",
+        id: "u-amb",
+        content: [
+          {
+            type: "text",
+            text: '<in-app-browser-context source="ambient-ui-state">\n# In app browser:\n- Current URL: http://127.0.0.1:8878/gu/house\n</in-app-browser-context>\n## My request:\n看看小屋是不是有 bug',
+          },
+        ],
+      },
+    ],
+  }, { agentLabel: "Codex", threadId: "codex:codex:t-amb" });
+  assert.doesNotMatch(ambientTurnHtml, /in-app-browser-context|ambient-ui-state|My request/);
+  assert.match(ambientTurnHtml, /看看小屋是不是有 bug/);
+});
+
+test("macOS native desktop wrapper files include WKWebView, local networking, and desktop scripts", async () => {
+  const pkg = JSON.parse(await readFile(fileURLToPath(new URL("../package.json", import.meta.url)), "utf8"));
+  assert.equal(pkg.scripts["desktop:build"], "bash desktop/macos/build-app.sh");
+  assert.equal(pkg.scripts["desktop:install"], "bash desktop/macos/build-app.sh --install");
+
+  const plist = await readFile(fileURLToPath(new URL("../desktop/macos/Info.plist", import.meta.url)), "utf8");
+  assert.match(plist, /<key>CFBundleIdentifier<\/key>\s*<string>com\.guuguo\.agent-control\.desktop<\/string>/);
+  assert.match(plist, /<key>NSAllowsLocalNetworking<\/key>\s*<true\/>/);
+  assert.match(plist, /<key>NSMicrophoneUsageDescription<\/key>/);
+
+  const swiftSource = await readFile(fileURLToPath(new URL("../desktop/macos/AgentControl.swift", import.meta.url)), "utf8");
+  assert.match(swiftSource, /WKWebView/);
+  assert.match(swiftSource, /com\.guuguo\.agent-control/);
+  assert.match(swiftSource, /runJavaScriptConfirmPanelWithMessage/);
+  assert.match(swiftSource, /requestMediaCapturePermissionFor/);
+
+  for (const installerFile of ["install.sh", "uninstall.sh", "install.ps1", "uninstall.ps1"]) {
+    const content = await readFile(fileURLToPath(new URL(`../${installerFile}`, import.meta.url)), "utf8");
+    assert.ok(content.length > 100, `${installerFile} should be non-empty`);
+    assert.match(content, /43310|AgentControl|agent-control/);
+  }
+});
+
+test("renderTurnHtml renders Claude <task-notification>, <cross-session-message>, and <bash-input> as clean cards without raw XML or XSS", async () => {
+  const { renderTurnHtml } = await import("../public/markdown.js");
+
+  const stoppedTurnHtml = renderTurnHtml({
+    id: "turn-claude-stopped",
+    status: "completed",
+    items: [
+      {
+        type: "userMessage",
+        id: "u-stopped",
+        content: [
+          {
+            type: "text",
+            text: "<task-notification> <task-id>b3zgdt09y</task-id> <tool-use-id>toolu_01BWcnFBjKKrphcxpLYCXmC6</tool-use-id> <status>stopped</status> <summary>Background shell command didn't finish before the previous session ended</summary> <note>No completion record was found for it in the previous session. Check the output file for partial results before assuming it completed.</note> </task-notification>",
+          },
+        ],
+      },
+    ],
+  }, { agentLabel: "Claude Code", threadId: "claude:default:t-1" });
+
+  assert.doesNotMatch(stoppedTurnHtml, /&lt;task-notification|&lt;task-id|&lt;tool-use-id|msg-role">你</);
+  assert.match(stoppedTurnHtml, /class="msg-row msg-task-notification"/);
+  assert.match(stoppedTurnHtml, /class="task-notif-badge is-warn"/);
+  assert.match(stoppedTurnHtml, /后台任务 · 已停止/);
+  assert.match(stoppedTurnHtml, /Background shell command didn&#39;t finish before the previous session ended/);
+  assert.match(stoppedTurnHtml, /No completion record was found for it in the previous session/);
+  assert.match(stoppedTurnHtml, /<code class="task-notif-id">b3zgdt09y<\/code>/);
+
+  const completedWithFileAndXss = renderTurnHtml({
+    id: "turn-claude-done",
+    status: "completed",
+    items: [
+      {
+        type: "userMessage",
+        id: "u-done",
+        content: [
+          {
+            type: "text",
+            text: [
+              "[SYSTEM NOTIFICATION - NOT USER INPUT]",
+              "This is an automated background-task event, NOT a message from the user.",
+              "",
+              "<task-notification>",
+              "<task-id>task-99</task-id>",
+              "<status>completed</status>",
+              "<summary>构建 &lt;script&gt;alert(1)&lt;/script&gt; <script>alert(1)</script> 完成</summary>",
+              "<output-file>/tmp/claude-out/build.log</output-file>",
+              "<result>生成了 **2** 个产物</result>",
+              "<usage><duration_ms>4250</duration_ms><tool_uses>5</tool_uses></usage>",
+              "</task-notification>",
+              "请继续下一步",
+            ].join("\n"),
+          },
+        ],
+      },
+    ],
+  }, { agentLabel: "Claude Code", threadId: "claude:default:t-1" });
+
+  assert.doesNotMatch(completedWithFileAndXss, /<script>|SYSTEM NOTIFICATION - NOT USER INPUT/);
+  assert.match(completedWithFileAndXss, /class="task-notif-badge is-ok"/);
+  assert.match(completedWithFileAndXss, /后台任务 · 已完成/);
+  assert.match(completedWithFileAndXss, /4\.3s/);
+  assert.match(completedWithFileAndXss, /data-local-file-path="\/tmp\/claude-out\/build\.log"/);
+  assert.match(completedWithFileAndXss, /生成了 <strong>2<\/strong> 个产物/);
+  assert.match(completedWithFileAndXss, /msg-role">你<[\s\S]*请继续下一步/);
+
+  const crossAndBashHtml = renderTurnHtml({
+    id: "turn-claude-cross-bash",
+    status: "completed",
+    items: [
+      {
+        type: "userMessage",
+        id: "u-cross",
+        content: [
+          {
+            type: "text",
+            text: 'Another Claude session sent a message:\n<cross-session-message from="local_123" from-name="粉丝站管理后台评估">\n已部署 **prod**\n</cross-session-message>\n<bash-input>git status -s</bash-input><bash-stdout>\u001b[32mM README.md\u001b[0m</bash-stdout><bash-stderr></bash-stderr>',
+          },
+        ],
+      },
+    ],
+  }, { agentLabel: "Claude Code", threadId: "claude:default:t-1" });
+
+  assert.doesNotMatch(crossAndBashHtml, /&lt;cross-session-message|&lt;bash-input|msg-role">你</);
+  assert.match(crossAndBashHtml, /class="msg-row msg-cross-session"/);
+  assert.match(crossAndBashHtml, /粉丝站管理后台评估/);
+  assert.match(crossAndBashHtml, /<strong>prod<\/strong>/);
+  assert.match(crossAndBashHtml, /class="msg-row msg-claude-bash"/);
+  assert.match(crossAndBashHtml, /\$ git status -s/);
+  assert.match(crossAndBashHtml, /M README\.md/);
+});

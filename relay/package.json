@@ -1,0 +1,14 @@
+{
+  "name": "agent-control-relay",
+  "version": "0.1.0",
+  "description": "Outbound relay for Agent Control hosts and paired mobile browsers.",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "scripts": {
+    "start": "node relay-server.mjs"
+  },
+  "dependencies": {
+    "ws": "^8.21.1"
+  }
+}

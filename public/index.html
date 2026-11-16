@@ -1,0 +1,484 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="ac-ui-version" content="20261116g" />
+  <title>Agent Control · 多智能体远程控制台</title>
+  <link rel="stylesheet" href="./app.css?v=20261116g" />
+  <link rel="stylesheet" href="./project-workspace.css?v=20261116g" />
+</head>
+<body>
+  <div id="appShell" class="app-shell">
+    <div id="sidebarBackdrop" class="sidebar-backdrop" hidden></div>
+
+    <aside id="sidebar" class="sidebar" aria-label="会话列表">
+      <div class="sidebar-header">
+        <div class="brand-row">
+          <div class="brand-title">
+            <span class="brand-dot" id="sseStatusDot" title="实时连接状态"></span>
+            <strong>Agent Control</strong>
+          </div>
+          <span class="host-pill" id="hostBadge">本机</span>
+        </div>
+        <div class="sidebar-actions">
+          <button type="button" id="newThreadBtn" class="btn-primary btn-sm">+ 新建会话</button>
+          <button type="button" id="remoteModalBtn" class="btn-secondary btn-sm remote-launch-btn">
+            <span id="remoteActiveDot" class="remote-btn-dot" hidden aria-hidden="true"></span>
+            <span>手机远程</span>
+          </button>
+        </div>
+        <div id="localAppsStrip" class="local-apps-strip" aria-label="本机扩展工作台" hidden></div>
+      </div>
+
+      <div class="sidebar-filter-row">
+        <div id="providerTabs" class="provider-tabs" role="tablist" aria-label="按智能体筛选">
+          <button type="button" class="provider-tab is-active" data-provider="all">全部</button>
+          <button type="button" class="provider-tab" data-provider="codex">Codex</button>
+          <button type="button" class="provider-tab" data-provider="claude">Claude</button>
+          <button type="button" class="provider-tab" data-provider="antigravity" title="Antigravity">Agy</button>
+          <button type="button" class="provider-tab" data-provider="grok">Grok</button>
+        </div>
+        <button type="button" id="sidebarBatchSelectBtn" class="batch-mode-toggle-btn" title="批量选择项目或会话（也可直接长按列表项）">多选</button>
+      </div>
+
+      <div id="agentQuotaStrip" class="agent-quota-strip" aria-label="智能体可用额度" hidden></div>
+
+      <div id="threadWarnings" class="thread-warnings" hidden></div>
+      <div id="threadList" class="thread-list"></div>
+      <div id="sidebarBatchBar" class="batch-action-bar is-sidebar" hidden></div>
+    </aside>
+
+    <main id="mainArea" class="main-area">
+      <header id="topbar" class="topbar">
+        <div class="topbar-left">
+          <button type="button" id="menuBtn" class="icon-btn mobile-only topbar-menu-btn" aria-label="打开会话菜单">
+            <span class="btn-icon-glyph" data-icon="menu" data-icon-size="16" aria-hidden="true"></span>
+            <span id="topbarConnDot" class="topbar-conn-dot is-connecting" aria-hidden="true"></span>
+          </button>
+          <div class="active-head">
+            <div class="active-title-row">
+              <span id="activeProviderBadge" class="provider-badge" hidden></span>
+              <span id="activeProfileBadge" class="profile-badge" hidden></span>
+              <button type="button" id="activeProjectCrumb" class="active-project-crumb" hidden aria-hidden="true" title="打开项目总控面板"></button>
+              <h1 id="activeTitle" class="active-title">选择一个会话或新建任务</h1>
+              <button type="button" id="activeGoalBadge" class="goal-pill" hidden title="点击切换 Goal 自动推进"><span class="btn-icon-glyph" data-icon="target" data-icon-size="11" aria-hidden="true"></span><span>1/20</span></button>
+            </div>
+            <div class="active-subrow">
+              <code id="activeCwd" class="active-cwd"></code>
+            </div>
+          </div>
+        </div>
+        <div class="topbar-actions">
+          <div id="topbarTelemetrySlot" class="topbar-telemetry-slot" hidden></div>
+          <button type="button" id="telemetryTopbarBtn" class="btn-secondary btn-sm topbar-icon-action telemetry-topbar-btn mobile-only" hidden aria-hidden="true" aria-expanded="false" title="查看智能体运行状态与额度">
+            <span id="telemetryTopbarDot" class="telemetry-summary-dot" aria-hidden="true"></span>
+            <span id="telemetryTopbarText">额度</span>
+          </button>
+          <button type="button" id="boardToggleBtn" class="btn-secondary btn-sm topbar-icon-action" title="项目总控面板">
+            <span id="boardToggleIcon" class="btn-icon-glyph" data-icon="board" data-icon-size="14" aria-hidden="true"></span>
+            <span id="boardToggleLabel" class="btn-label-desktop">项目面板</span>
+            <span id="boardAttentionDot" class="btn-attention-dot" hidden aria-hidden="true"></span>
+          </button>
+          <button type="button" id="voiceModeBtn" class="btn-secondary btn-sm voice-launch-btn topbar-icon-action" title="AI 语音通话总控">
+            <span class="btn-icon-glyph" data-icon="mic" data-icon-size="14" aria-hidden="true"></span>
+            <span class="btn-label-desktop">通话</span>
+            <span id="voiceAttentionDot" class="btn-attention-dot" hidden aria-hidden="true"></span>
+          </button>
+          <button type="button" id="interruptBtn" class="btn-danger btn-sm topbar-icon-action" hidden title="中断当前执行">
+            <span class="btn-icon-glyph" data-icon="stop" data-icon-size="13" aria-hidden="true"></span>
+            <span class="btn-label-desktop">中断</span>
+          </button>
+          <div class="topbar-more-wrap">
+            <button type="button" id="topbarMoreBtn" class="btn-secondary btn-sm topbar-icon-action" aria-expanded="false" aria-label="更多操作" title="更多操作">
+              <span class="btn-icon-glyph" data-icon="more" data-icon-size="14" aria-hidden="true"></span>
+              <span id="topbarMoreDot" class="btn-state-dot" hidden aria-hidden="true"></span>
+            </button>
+            <div id="topbarMoreMenu" class="topbar-more-menu">
+              <div id="topbarLocalAppsBox" class="topbar-local-apps-box" hidden></div>
+              <div id="topbarMoreProjectCard" class="topbar-more-project-card" hidden>
+                <div class="topbar-more-project-actions">
+                  <button type="button" id="topbarPinProjectBtn" class="btn-secondary btn-xs"><span class="btn-icon-glyph" data-icon="star" data-icon-size="12" aria-hidden="true"></span><span>关注项目</span></button>
+                  <button type="button" id="topbarNewInProjectBtn" class="btn-secondary btn-xs"><span class="btn-icon-glyph" data-icon="plus" data-icon-size="12" aria-hidden="true"></span><span>同目录新任务</span></button>
+                </div>
+                <code id="topbarMoreCwd" class="topbar-more-cwd"></code>
+              </div>
+              <button type="button" id="goalToggleBtn" class="btn-secondary btn-sm" hidden>开启 Goal</button>
+              <button type="button" id="renameThreadBtn" class="btn-secondary btn-sm" hidden>重命名</button>
+              <button type="button" id="archiveThreadBtn" class="btn-secondary btn-sm" hidden>归档</button>
+              <button type="button" id="refreshThreadBtn" class="btn-secondary btn-sm" title="刷新当前视图">刷新</button>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <div id="agentTelemetryBar" class="agent-telemetry-bar" aria-label="智能体实时运行与额度监控"></div>
+      <div id="projectTaskStrip" class="project-task-strip" hidden></div>
+
+      <div id="liveBanner" class="live-banner" hidden>
+        <span class="pulse-dot"></span>
+        <span id="livePhaseText" class="live-phase">执行中</span>
+        <span id="liveDetailText" class="live-detail"></span>
+      </div>
+
+      <section id="messagesViewport" class="messages-viewport">
+        <div id="loadOlderWrap" class="load-older-wrap" hidden>
+          <button type="button" id="loadOlderBtn" class="btn-secondary btn-sm">加载更早对话</button>
+        </div>
+
+        <div id="projectBoard" class="project-board" hidden></div>
+
+        <div id="turnList" class="turn-list"></div>
+        <div id="streamingTurn" class="turn-block streaming-turn" hidden></div>
+      </section>
+
+      <div id="boardBatchBar" class="batch-action-bar is-board" hidden></div>
+      <div id="pendingRequestsDock" class="pending-requests-dock" hidden></div>
+      <div id="queuedTurnsBar" class="queued-turns-bar" hidden></div>
+
+      <footer id="composerArea" class="composer-area" hidden>
+        <div id="composerStatus" class="composer-status" role="status" aria-live="polite" hidden></div>
+        <div id="composerImages" class="composer-images" hidden></div>
+        <div class="composer-box">
+          <div class="composer-input-row">
+            <textarea
+              id="promptInput"
+              class="prompt-input"
+              rows="1"
+              placeholder="输入指令…"
+            ></textarea>
+          </div>
+          <div class="composer-toolbar">
+            <div class="composer-quick-left">
+              <input type="file" id="imageFileInput" accept="image/*" multiple hidden />
+              <button type="button" id="imageUploadBtn" class="btn-secondary btn-xs composer-icon-btn" title="添加图片">
+                <span class="btn-icon-glyph" data-icon="paperclip" data-icon-size="14" aria-hidden="true"></span>
+                <span class="btn-label-desktop">图片</span>
+                <span id="imageCountBadge" class="img-count-badge" hidden></span>
+              </button>
+              <button type="button" id="composerVoiceBtn" class="btn-secondary btn-xs composer-icon-btn composer-voice-btn" title="语音输入转文字（点击开始/停止）" aria-pressed="false">
+                <span id="composerVoiceIcon" class="btn-icon-glyph" data-icon="mic" data-icon-size="14" aria-hidden="true"></span>
+                <span id="composerVoiceLabel" class="btn-label-desktop">语音</span>
+              </button>
+              <button type="button" id="composerConfigBtn" class="composer-config-chip tone-turbo mobile-only" aria-expanded="false" title="模型、权限与高级参数设置">
+                <span id="cfgChipPermIcon" class="cfg-chip-perm" data-icon="bolt" data-icon-size="12" aria-hidden="true"></span>
+                <span id="cfgChipProfileText" class="cfg-chip-profile" hidden></span>
+                <span id="cfgChipModelText" class="cfg-chip-model">Carbon</span>
+                <span id="cfgChipEffortText" class="cfg-chip-effort" hidden></span>
+                <span id="cfgChipGoalDot" class="cfg-chip-goal" hidden data-icon="target" data-icon-size="11" aria-label="已开启 Goal"></span>
+                <span class="cfg-chip-caret" data-icon="chevron-down" data-icon-size="11" aria-hidden="true"></span>
+              </button>
+              <div id="composerConfigPopover" class="composer-config-popover">
+                <div class="composer-config-head mobile-only">
+                  <span>对话参数与实例健康</span>
+                  <button type="button" id="composerConfigCloseBtn" class="icon-btn" aria-label="收起参数面板"><span class="btn-icon-glyph" data-icon="close" data-icon-size="14" aria-hidden="true"></span></button>
+                </div>
+                <div class="composer-controls">
+                  <label class="cfg-field">
+                    <span class="cfg-field-label mobile-only">智能体</span>
+                    <select id="composerProviderSelect" class="ctrl-select" aria-label="智能体" title="选择智能体"></select>
+                  </label>
+                  <div class="cfg-field cfg-field-profile" id="composerProfileField">
+                    <div class="cfg-field-head">
+                      <span class="cfg-field-label mobile-only">实例配置（点击测通可实测可用性）</span>
+                      <button type="button" id="composerProbeProfilesBtn" class="btn-probe-inline" title="手动测通当前智能体的全部实例"><span class="btn-icon-glyph" data-icon="bolt" data-icon-size="11" aria-hidden="true"></span><span>测通</span></button>
+                    </div>
+                    <select id="composerProfileSelect" class="ctrl-select" aria-label="实例" title="选择实例配置"></select>
+                    <div id="composerProfilePills" class="profile-pills-strip"></div>
+                  </div>
+                  <label class="cfg-field">
+                    <span class="cfg-field-label mobile-only">模型</span>
+                    <select id="modelSelect" class="ctrl-select ctrl-model" aria-label="模型" title="选择大模型"></select>
+                  </label>
+                  <label class="cfg-field">
+                    <span class="cfg-field-label mobile-only">思考强度</span>
+                    <select id="effortSelect" class="ctrl-select ctrl-effort" aria-label="推理强度" title="选择推理思考强度" hidden></select>
+                  </label>
+                  <label class="cfg-field">
+                    <span class="cfg-field-label mobile-only">权限模式</span>
+                    <select id="permissionSelect" class="ctrl-select ctrl-permission is-turbo" aria-label="权限模式" title="选择工具与命令执行权限">
+                      <option value="turbo" selected>Turbo（自动批准）</option>
+                      <option value="workspace">工作区读写</option>
+                      <option value="full">自动安全命令 (Auto)</option>
+                      <option value="safe">只读 / 询问</option>
+                      <option value="plan">仅规划 (Plan)</option>
+                    </select>
+                  </label>
+                  <div class="cfg-field cfg-field-goal">
+                    <span class="cfg-field-label mobile-only">目标自动推进</span>
+                    <button type="button" id="composerGoalBtn" class="btn-toggle btn-xs" aria-pressed="false" title="开启后将在未出现完成标记时自动推进">/goal</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="composer-submit-group">
+              <select id="runningSubmitMode" class="ctrl-select ctrl-submit-mode" hidden aria-label="运行中发送方式">
+                <option value="queue">排队</option>
+                <option value="steer">插话</option>
+              </select>
+              <button type="button" id="sendBtn" class="btn-primary">发送</button>
+            </div>
+          </div>
+        </div>
+      </footer>
+    </main>
+  </div>
+
+  <dialog id="newThreadModal" class="modal-dialog">
+    <form id="newThreadForm" method="dialog" class="modal-card">
+      <div class="modal-head">
+        <h3>新建远程会话</h3>
+        <button type="button" class="icon-btn" data-close-modal="newThreadModal" aria-label="关闭"><span class="btn-icon-glyph" data-icon="close" data-icon-size="14" aria-hidden="true"></span></button>
+      </div>
+      <div class="modal-body">
+        <label class="field">
+          <span>智能体</span>
+          <select id="newProviderSelect"></select>
+        </label>
+        <div class="field field-profile-picker">
+          <div class="field-label-row">
+            <span>实例配置</span>
+            <button type="button" id="newModalProbeProfilesBtn" class="btn-probe-inline" title="手动测通当前智能体的全部实例"><span class="btn-icon-glyph" data-icon="bolt" data-icon-size="11" aria-hidden="true"></span><span>测通</span></button>
+          </div>
+          <select id="newProfileSelect"></select>
+          <div id="newProfilePills" class="profile-pills-strip"></div>
+        </div>
+        <label class="field">
+          <span>模型</span>
+          <select id="newModelSelect"></select>
+        </label>
+        <label class="field">
+          <span>工作目录（CWD）</span>
+          <input id="newCwdInput" type="text" list="recentCwdsList" placeholder="/path/to/project" />
+          <datalist id="recentCwdsList"></datalist>
+        </label>
+        <label class="field">
+          <span>权限模式</span>
+          <select id="newPermissionSelect">
+            <option value="turbo" selected>Turbo（自动批准全权限）</option>
+            <option value="workspace">工作区读写（命令询问）</option>
+            <option value="full">自动安全命令 (Auto)</option>
+            <option value="safe">只读 / 每次询问</option>
+            <option value="plan">仅规划 (Plan)</option>
+          </select>
+        </label>
+        <label class="field-checkbox">
+          <input id="newGoalCheckbox" type="checkbox" />
+          <span>启用 /goal 自动推进模式</span>
+        </label>
+        <label class="field">
+          <span>首条任务指令（可选）</span>
+          <textarea id="newPromptInput" rows="3" placeholder="输入你想让智能体立即开始的任务…"></textarea>
+        </label>
+        <div id="newThreadError" class="composer-status is-error" role="alert" hidden></div>
+      </div>
+      <div class="modal-foot">
+        <button type="button" class="btn-secondary" data-close-modal="newThreadModal">取消</button>
+        <button type="submit" id="createThreadSubmitBtn" class="btn-primary">创建会话</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="remoteModal" class="modal-dialog">
+    <div class="modal-card remote-modal-card">
+      <div class="modal-head">
+        <h3>手机远程配对与隧道</h3>
+        <button type="button" class="icon-btn" data-close-modal="remoteModal" aria-label="关闭"><span class="btn-icon-glyph" data-icon="close" data-icon-size="14" aria-hidden="true"></span></button>
+      </div>
+      <div class="modal-body">
+        <section id="remoteLocalAppsSection" class="tunnel-card local-apps-remote-card" aria-label="已接入工作台" hidden>
+          <div class="tunnel-card-head">
+            <strong class="tunnel-card-title"><span class="btn-icon-glyph" data-icon="film" data-icon-size="13" aria-hidden="true"></span> 已接入本机工作台（经当前安全通道直达）</strong>
+          </div>
+          <p class="tunnel-card-desc">无需额外暴露端口或二次扫码，直接复用当前 Sealos 中继或临时隧道登录态在手机上操作本机工具。</p>
+          <div id="remoteLocalAppsList" class="remote-local-apps-list"></div>
+        </section>
+        <section class="tunnel-card" aria-label="一键免费隧道">
+          <div class="tunnel-card-head">
+            <strong class="tunnel-card-title"><span class="btn-icon-glyph" data-icon="bolt" data-icon-size="13" aria-hidden="true"></span> 一键免费隧道（免注册 · 临时扫码）</strong>
+            <span id="tunnelStateText" class="tunnel-state-pill">未开启</span>
+          </div>
+          <p class="tunnel-card-desc">复用本机 cloudflared 建立临时加密通道，内置本地鉴权网关，手机扫码即连、关闭即焚。</p>
+          <p id="tunnelReadonlyNotice" class="tunnel-readonly-note" hidden>当前为手机远程会话视图；隧道启停与重置二维码仅限在本机控制台操作。</p>
+          <div id="tunnelManageWrap" class="tunnel-manage-wrap">
+            <div class="tunnel-actions-row">
+              <button type="button" id="startTunnelBtn" class="btn-primary"><span class="btn-icon-glyph" data-icon="bolt" data-icon-size="13" aria-hidden="true"></span><span>一键开启并生成二维码</span></button>
+              <button type="button" id="rotateTunnelBtn" class="btn-secondary btn-sm" hidden><span class="btn-icon-glyph" data-icon="refresh" data-icon-size="13" aria-hidden="true"></span><span>重置二维码</span></button>
+              <button type="button" id="stopTunnelBtn" class="btn-danger btn-sm" hidden><span class="btn-icon-glyph" data-icon="stop" data-icon-size="12" aria-hidden="true"></span><span>关闭隧道</span></button>
+            </div>
+            <div id="tunnelMissingBox" class="tunnel-install-box" hidden>
+              <span>未检测到 <code>cloudflared</code>，请先在本机终端安装：</span>
+              <div class="tunnel-install-cmd">
+                <code id="tunnelInstallCmdCode">brew install cloudflared</code>
+                <button type="button" id="copyBrewCmdBtn" class="btn-secondary btn-xs">复制命令</button>
+              </div>
+            </div>
+            <div id="tunnelErrorText" class="composer-status is-error" role="alert" hidden></div>
+            <div id="tunnelQrWrap" class="remote-qr-wrap" hidden>
+              <img id="tunnelQrImg" alt="临时隧道手机扫码二维码" />
+              <div class="remote-link-row">
+                <input id="tunnelPairUrlInput" type="text" readonly />
+                <button type="button" id="copyTunnelUrlBtn" class="btn-secondary btn-sm">复制</button>
+              </div>
+              <p class="remote-hint">手机相机或微信扫码一次即自动写入安全会话；点击「关闭隧道」或「重置二维码」后旧会话立即失效。</p>
+            </div>
+          </div>
+        </section>
+
+        <details id="relayAdvancedSection" class="relay-advanced-details">
+          <summary class="relay-advanced-summary"><span class="btn-icon-glyph" data-icon="radio" data-icon-size="13" aria-hidden="true"></span> 自托管固定中继（Sealos / 云服务器长期固定域名）</summary>
+          <div class="relay-advanced-body">
+            <div class="remote-status-box">
+              <span>当前状态：</span>
+              <strong id="remoteStateText">未配对</strong>
+            </div>
+            <p id="remoteReadonlyNotice" class="tunnel-readonly-note" hidden>中继配对与撤销凭证仅限在本机控制台操作。</p>
+            <div id="remoteQrWrap" class="remote-qr-wrap" hidden>
+              <img id="remoteQrImg" alt="手机扫码配对二维码" />
+              <div class="remote-link-row">
+                <input id="remotePairUrlInput" type="text" readonly />
+                <button type="button" id="copyPairUrlBtn" class="btn-secondary btn-sm">复制</button>
+              </div>
+              <p class="remote-hint">手机扫码一次即完成配对；切到后台或断网后，主机上线会自动恢复连接。</p>
+            </div>
+            <form id="remotePairForm" class="remote-form">
+              <label class="field">
+                <span>中继服务地址</span>
+                <input id="relayUrlInput" type="url" placeholder="https://relay.example.com" required />
+              </label>
+              <label class="field">
+                <span>邀请码</span>
+                <input id="inviteCodeInput" type="text" placeholder="输入一次性的中继邀请码" required />
+              </label>
+              <label class="field">
+                <span>主机备注名称</span>
+                <input id="hostLabelInput" type="text" placeholder="我的工作主机" />
+              </label>
+              <div class="remote-form-actions">
+                <button type="submit" id="remotePairSubmitBtn" class="btn-primary">配对并连接中继</button>
+                <button type="button" id="unpairBtn" class="btn-danger" hidden>断开并撤销凭证</button>
+              </div>
+            </form>
+          </div>
+        </details>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="voiceCopilotModal" class="modal-dialog voice-modal voice-call-dialog">
+    <div class="modal-card voice-modal-card voice-call-sheet">
+      <div class="voice-call-topbar">
+        <div class="voice-call-identity">
+          <span id="voiceCallDot" class="voice-call-dot is-connecting" aria-hidden="true"></span>
+          <div class="voice-call-title-wrap">
+            <div class="voice-call-title-row">
+              <strong>Hydrogen 语音通话</strong>
+              <span id="voiceCallTimer" class="voice-call-timer">00:00</span>
+            </div>
+            <span id="voiceModelBadge" class="voice-model-badge">Hydrogen · 免提</span>
+          </div>
+        </div>
+        <div class="voice-head-actions">
+          <button type="button" id="voiceMinimizeBtn" class="btn-secondary btn-xs" title="收起通话面板查看对话，保持后台免提通话"><span class="btn-icon-glyph" data-icon="chat" data-icon-size="12" aria-hidden="true"></span><span>看对话</span></button>
+          <button type="button" id="voiceAutoAnnounceBtn" class="btn-secondary btn-xs is-on" title="后台任务完成或新审批时自动语音播报"><span class="btn-icon-glyph" data-icon="bell" data-icon-size="12" aria-hidden="true"></span><span>进展播报</span></button>
+          <button type="button" id="voiceKeyboardToggleBtn" class="btn-secondary btn-xs" title="展开文字补充输入" aria-label="展开文字输入"><span class="btn-icon-glyph" data-icon="keyboard" data-icon-size="13" aria-hidden="true"></span></button>
+          <button type="button" id="voiceCloseHangupBtn" class="icon-btn" data-close-modal="voiceCopilotModal" aria-label="挂断并关闭通话窗口"><span class="btn-icon-glyph" data-icon="close" data-icon-size="14" aria-hidden="true"></span></button>
+        </div>
+      </div>
+
+      <div class="voice-call-body">
+        <div class="voice-call-stage">
+          <div class="voice-orb-wrap">
+            <button type="button" id="voiceOrbBtn" class="voice-orb" aria-label="语音通话控制球">
+              <span class="voice-orb-ring is-outer" aria-hidden="true"></span>
+              <span class="voice-orb-ring is-inner" aria-hidden="true"></span>
+              <span class="voice-orb-core" data-icon="mic" data-icon-size="28" aria-hidden="true"></span>
+            </button>
+          </div>
+          <div id="voiceStateText" class="voice-state-text">正在接入本机 Hydrogen 语音通道…</div>
+          <div id="voiceSubHintText" class="voice-sub-hint">说话停顿约 1 秒后自动发送；AI 说话时轻点光球可打断</div>
+          <div id="voiceUnheardBanner" class="voice-unheard-banner" hidden></div>
+          <div id="voiceCallTranscript" class="voice-call-transcript"></div>
+        </div>
+
+        <section id="voiceLiveProgressSection" class="voice-progress-section" aria-label="实时任务动态">
+          <div class="voice-progress-head">
+            <span class="voice-progress-heading"><span class="btn-icon-glyph" data-icon="radio" data-icon-size="13" aria-hidden="true"></span> 实时任务动态</span>
+            <span id="voiceLiveSummaryBadge" class="voice-live-summary-badge">实时同步</span>
+          </div>
+          <div id="voiceLiveProgressList" class="voice-live-progress-list"></div>
+        </section>
+
+        <form id="voiceTextForm" class="voice-text-row" hidden>
+          <input
+            id="voiceTextInput"
+            type="text"
+            class="voice-text-input"
+            placeholder="不方便说话时，可输入指令直接让 Hydrogen 调度…"
+          />
+          <button type="submit" id="voiceTextSubmitBtn" class="btn-primary btn-sm">发送</button>
+        </form>
+      </div>
+
+      <div class="voice-call-dock">
+        <button type="button" id="voiceMuteBtn" class="voice-dock-btn">
+          <span class="voice-dock-icon" data-icon="mic" data-icon-size="18" aria-hidden="true"></span>
+          <span id="voiceMuteLabel" class="voice-dock-label">静音</span>
+        </button>
+        <button type="button" id="voiceReadProgressBtn" class="voice-dock-btn is-read">
+          <span class="voice-dock-icon" data-icon="speaker" data-icon-size="18" aria-hidden="true"></span>
+          <span id="voiceReadLabel" class="voice-dock-label">播报进度</span>
+        </button>
+        <button type="button" id="voiceTalkBtn" class="voice-dock-btn is-primary">
+          <span class="voice-dock-icon" data-icon="bolt" data-icon-size="18" aria-hidden="true"></span>
+          <span id="voiceTalkBtnTitle" class="voice-dock-label">立即发送</span>
+        </button>
+        <button type="button" id="voiceHangupBtn" class="voice-dock-btn is-hangup" aria-label="挂断通话">
+          <span class="voice-dock-icon" data-icon="offline" data-icon-size="18" aria-hidden="true"></span>
+          <span id="voiceHangupLabel" class="voice-dock-label">挂断</span>
+        </button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="imagePreviewModal" class="modal-dialog image-preview-modal" aria-label="图片大图预览">
+    <div class="image-preview-card">
+      <div class="image-preview-head">
+        <div class="image-preview-title-wrap">
+          <span id="imagePreviewCaption" class="image-preview-caption">图片预览</span>
+          <span id="imagePreviewMeta" class="image-preview-meta" hidden></span>
+        </div>
+        <div class="image-preview-actions">
+          <button type="button" id="imagePreviewLoadRawBtn" class="btn-secondary btn-xs" hidden>加载原图</button>
+          <a id="imagePreviewOpenRaw" class="btn-secondary btn-xs" href="#" target="_blank" rel="noopener noreferrer" hidden>原图新窗</a>
+          <button type="button" class="icon-btn" data-close-modal="imagePreviewModal" aria-label="关闭"><span class="btn-icon-glyph" data-icon="close" data-icon-size="14" aria-hidden="true"></span></button>
+        </div>
+      </div>
+      <div class="image-preview-stage">
+        <img id="imagePreviewImg" src="" alt="图片预览" />
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="filePreviewModal" class="modal-dialog file-preview-modal" aria-label="文件预览">
+    <div class="file-preview-card">
+      <div class="file-preview-head">
+        <div class="file-preview-title-wrap">
+          <div id="filePreviewName" class="file-preview-name">文件预览</div>
+          <div id="filePreviewPath" class="file-preview-path"></div>
+        </div>
+        <div class="file-preview-actions">
+          <span id="filePreviewMeta" class="file-preview-meta" hidden></span>
+          <button type="button" id="filePreviewToggleRawBtn" class="btn-secondary btn-xs" hidden>源码</button>
+          <button type="button" id="filePreviewCopyBtn" class="btn-secondary btn-xs" hidden>复制</button>
+          <a id="filePreviewDownloadBtn" class="btn-secondary btn-xs" href="#" target="_blank" rel="noopener noreferrer" hidden>下载</a>
+          <button type="button" class="icon-btn" data-close-modal="filePreviewModal" aria-label="关闭"><span class="btn-icon-glyph" data-icon="close" data-icon-size="14" aria-hidden="true"></span></button>
+        </div>
+      </div>
+      <div id="filePreviewBody" class="file-preview-body"></div>
+    </div>
+  </dialog>
+
+  <script type="module" src="./app.js?v=20261116g"></script>
+</body>
+</html>
