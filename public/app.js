@@ -1,20 +1,23 @@
-import { apiGet, apiPost, apiUrl } from "./api-client.js?v=20261116g";
+import { apiGet, apiPost, apiUrl } from "./api-client.js?v=20261116p";
 import {
   extractGoalDirective,
   renderQueuedTurnsPanelHtml,
   resolveComposerSubmission,
-} from "./composer-mode.js?v=20261116g";
-import { hydrateDeclarativeIcons, iconSvg, providerIconSvg } from "./icons.js?v=20261116g";
+  submitComposerRequest,
+} from "./composer-mode.js?v=20261116p";
+import { hydrateDeclarativeIcons, iconSvg, providerIconSvg } from "./icons.js?v=20261116p";
 import {
   compressImageFileForUpload,
   formatByteSize,
   validateImageBatchBudget,
-} from "./image-attachment.js?v=20261116g";
+} from "./image-attachment.js?v=20261116p";
 import {
+  abbreviateMiddleText,
   buildSelectableTelemetryItems,
   compactEffortBadgeLabel,
   compactModelBadgeLabel,
   compactProfileChipText,
+  compactProfileDisplayLabel,
   ensurePreferredModelInList,
   filterProfilesByProvider,
   findFailoverCandidateProfile,
@@ -30,24 +33,26 @@ import {
   providerVisualMeta,
   renderAgentTelemetryBarHtml,
   renderProfilePillsHtml,
+  renderProviderPillsHtml,
   renderQuotaOverviewHtml,
   resolveModelsForProvider,
   resolveVisibleTelemetryKeys,
   sortProfilesByAvailability,
   summarizeTelemetryMobileBadge,
-} from "./instance-switcher.js?v=20261116g";
-import { bindFollowIntent, humanizeLiveActivity, mergeLiveActivity } from "./live-state.js?v=20261116g";
+} from "./instance-switcher.js?v=20261116p";
+import { bindFollowIntent, humanizeLiveActivity, mergeLiveActivity } from "./live-state.js?v=20261116p";
 import {
   cleanStreamingAgentText,
   dedupeAdjacentTurns,
   escapeHtml,
   formatToolExecutionError,
+  formatTurnModelBadge,
   isRecoverableToolErrorText,
   isStreamingTextAlreadyPersisted,
   renderMarkdown,
   renderTurnHtml,
   turnEndsWithProcessGroup,
-} from "./markdown.js?v=20261116g";
+} from "./markdown.js?v=20261116p";
 import {
   SIDEBAR_MANUAL_HOLD_MS,
   buildProjectGroups,
@@ -60,8 +65,8 @@ import {
   renderProjectTaskStripHtml,
   renderSidebarThreadListHtml,
   resolveProjectGroupCollapsed,
-} from "./project-board.js?v=20261116g";
-import { collectUserInputAnswers, renderServerRequestCard } from "./server-request-ui.js?v=20261116g";
+} from "./project-board.js?v=20261116p";
+import { collectUserInputAnswers, renderServerRequestCard } from "./server-request-ui.js?v=20261116p";
 import {
   base64ToUint8Array,
   buildLocalProgressBriefing,
@@ -77,14 +82,16 @@ import {
   humanizeVoiceDeliveryReason,
   loadVoiceConfig,
   normalizeVoiceTtsPayload,
+  parseVoiceModelSelectionKey,
   pickPreferredChineseSpeechVoice,
   renderVoiceCallTranscriptHtml,
   renderVoiceLiveProgressHtml,
+  renderVoiceModelSelectOptionsHtml,
   renderVoiceUnheardBannerHtml,
   saveVoiceConfig,
   stripMarkdownForSpeech,
   uint8ArrayToBase64,
-} from "./voice-copilot.js?v=20261116g";
+} from "./voice-copilot.js?v=20261116p";
 
 const $ = (id) => document.getElementById(id);
 
@@ -94,6 +101,56 @@ const MODELS_CACHE_KEY = "agentControl.modelsCache.v3";
 const THREADS_CACHE_KEY = "agentControl.threadsCache.v1";
 const SIDEBAR_FOLD_PREFS_KEY = "agentControl.sidebarFold.v1";
 const TELEMETRY_VISIBLE_PREFS_KEY = "agentControl.telemetryVisibleKeys.v1";
+const THREAD_READ_STATE_KEY = "agentControl.threadReadState.v1";
+
+function loadThreadReadState() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(THREAD_READ_STATE_KEY) || "null");
+    if (!parsed || typeof parsed !== "object") {
+      return { initialized: false, seenById: {}, unreadById: {} };
+    }
+    return {
+      initialized: Boolean(parsed.initialized),
+      seenById: parsed.seenById && typeof parsed.seenById === "object" ? { ...parsed.seenById } : {},
+      unreadById: parsed.unreadById && typeof parsed.unreadById === "object" ? { ...parsed.unreadById } : {},
+    };
+  } catch {
+    return { initialized: false, seenById: {}, unreadById: {} };
+  }
+}
+
+const threadReadState = loadThreadReadState();
+
+function persistThreadReadState() {
+  try {
+    const seenEntries = Object.entries(threadReadState.seenById || {})
+      .filter(([id, ts]) => id && Number(ts) > 0)
+      .sort((a, b) => Number(b[1]) - Number(a[1]))
+      .slice(0, 400);
+    threadReadState.seenById = Object.fromEntries(seenEntries);
+    const cutoffMs = Date.now() - 7 * 24 * 3600 * 1000;
+    const unreadEntries = Object.entries(threadReadState.unreadById || {})
+      .filter(([id, entry]) => id && entry && Number(entry.at || 0) >= cutoffMs)
+      .sort((a, b) => Number(b[1]?.at || 0) - Number(a[1]?.at || 0))
+      .slice(0, 120);
+    threadReadState.unreadById = Object.fromEntries(unreadEntries);
+    localStorage.setItem(THREAD_READ_STATE_KEY, JSON.stringify(threadReadState));
+  } catch {}
+}
+
+function buildInitialRecentCompletedMap() {
+  const map = new Map();
+  for (const [id, entry] of Object.entries(threadReadState.unreadById || {})) {
+    if (!id || !entry || typeof entry !== "object") continue;
+    map.set(id, {
+      status: entry.status || "completed",
+      summary: String(entry.summary || ""),
+      at: Number(entry.at) || Date.now(),
+      updatedAt: Number(entry.updatedAt) || 0,
+    });
+  }
+  return map;
+}
 
 function loadTelemetryVisiblePrefs() {
   try {
@@ -411,7 +468,7 @@ const state = {
   probingProfileKeys: new Set(),
   lastFailoverContext: null,
   liveActivityByThread: new Map(),
-  recentCompletedByThread: new Map(),
+  recentCompletedByThread: buildInitialRecentCompletedMap(),
   useHotExtension: false,
   hotExtensionRoutes: new Set(),
   remoteStatus: null,
@@ -465,7 +522,12 @@ const state = {
     processingStageTimer: null,
     processingPhaseText: "",
     lastUserActivityAt: 0,
-    modelName: "gemini-4-hydrogen-low",
+    modelName: "自动轻量",
+    dispatchProvider: "",
+    modelOptions: [],
+    asrAvailable: true,
+    asrEngine: "mlx-whisper",
+    speechRecognition: null,
     backendMissing: false,
   },
   dictation: {
@@ -611,6 +673,22 @@ function syncThreadSummaryIntoList(thread) {
 
 function defaultProviderValue() {
   return state.defaultProvider || "antigravity";
+}
+
+function defaultNewThreadProvider() {
+  if (state.providerFilter && state.providerFilter !== "all") {
+    return state.providerFilter;
+  }
+  return state.activeThread?.provider || defaultProviderValue();
+}
+
+function setProviderFilter(nextFilter = "all") {
+  state.providerFilter = nextFilter || "all";
+  for (const tab of $("providerTabs")?.querySelectorAll(".provider-tab") || []) {
+    tab.classList.toggle("is-active", tab.dataset.provider === state.providerFilter);
+  }
+  syncProfileSelectors();
+  renderThreadList();
 }
 
 function defaultProfileForProvider(provider) {
@@ -783,6 +861,7 @@ function syncProfileSelectors() {
   newProviderSelect.dataset.initialized = "1";
 
   syncComposerProfileSelect();
+  syncNewProviderPills();
   syncNewProfileSelect();
   syncNewModelSelect();
   syncPermissionSelectors();
@@ -1108,15 +1187,29 @@ function syncComposerProfileSelect() {
       activeLocked: hasActiveThread,
     });
   }
-  const probeBtn = $("composerProbeProfilesBtn");
-  if (probeBtn) {
-    const anyProbing = list.some((p) => state.probingProfileKeys.has(p.key || `${p.provider}:${p.id}`));
-    probeBtn.disabled = anyProbing || !list.length;
-    probeBtn.innerHTML = anyProbing ? "测通中…" : `${iconSvg("bolt", { size: 11 })}<span>测通</span>`;
-  }
 
   syncCfgFieldVisibility();
   renderComposerConfigChip();
+}
+
+function syncNewProviderPills() {
+  const pillsEl = $("newProviderPills");
+  if (!pillsEl) return;
+  const provider = $("newProviderSelect")?.value || defaultNewThreadProvider();
+  pillsEl.innerHTML = renderProviderPillsHtml({
+    selectedProvider: provider,
+    profiles: state.profiles,
+  });
+}
+
+function selectNewModalProvider(nextProvider) {
+  const select = $("newProviderSelect");
+  if (!select || !nextProvider) return;
+  if (![...select.options].some((o) => o.value === nextProvider)) return;
+  select.value = nextProvider;
+  syncNewProviderPills();
+  syncNewProfileSelect();
+  void refreshModelsForProfile(nextProvider, $("newProfileSelect")?.value || "");
 }
 
 function syncNewProfileSelect() {
@@ -1710,6 +1803,7 @@ function renderProjectBoard() {
     searchText: state.searchText,
     selectionMode: state.batchSelect.active,
     selectedThreadIds: state.batchSelect.selectedIds,
+    profiles: state.profiles,
   });
 
   if (activeInput) {
@@ -1732,8 +1826,23 @@ function renderProjectTaskStrip() {
   stripEl.innerHTML = "";
 }
 
+function renderActiveHeading(title, cwd) {
+  const titleEl = $("activeTitle");
+  titleEl.textContent = title;
+  titleEl.title = title;
+  const cwdEl = $("activeCwd");
+  const splitAt = Math.max(cwd.lastIndexOf("/"), cwd.lastIndexOf("\\"));
+  cwdEl.title = cwd;
+  cwdEl.setAttribute("aria-label", cwd);
+  cwdEl.innerHTML = splitAt >= 0 && splitAt < cwd.length - 1
+    ? `<span class="active-cwd-prefix">${escapeHtml(cwd.slice(0, splitAt + 1))}</span><span class="active-cwd-leaf">${escapeHtml(cwd.slice(splitAt + 1))}</span>`
+    : escapeHtml(cwd);
+}
+
 function renderTopbarAndControls() {
-  const thread = state.activeThread;
+  const thread = state.activeThread || (state.initialThreadLoading && state.activeThreadId
+    ? (state.threads.find((t) => t.id === state.activeThreadId) || null)
+    : null);
   const topbar = $("topbar");
   const provBadge = $("activeProviderBadge");
   const profBadge = $("activeProfileBadge");
@@ -1743,20 +1852,11 @@ function renderTopbarAndControls() {
   const interruptBtn = $("interruptBtn");
   const renameBtn = $("renameThreadBtn");
   const archiveBtn = $("archiveThreadBtn");
-  const boardIcon = $("boardToggleIcon");
-  const boardLabel = $("boardToggleLabel");
+  const boardBtn = $("boardToggleBtn");
   const moreDot = $("topbarMoreDot");
   const moreProjCard = $("topbarMoreProjectCard");
 
-  if (boardIcon && boardLabel) {
-    const showReturn = Boolean(state.boardOpen && thread);
-    boardIcon.innerHTML = showReturn ? iconSvg("chat", { size: 14 }) : iconSvg("board", { size: 14 });
-    boardLabel.textContent = showReturn ? "回到对话" : "项目面板";
-  } else if ($("boardToggleBtn")) {
-    $("boardToggleBtn").innerHTML = (state.boardOpen && thread)
-      ? `${iconSvg("chat", { size: 14 })}<span>回到对话</span>`
-      : `${iconSvg("board", { size: 14 })}<span>项目面板</span>`;
-  }
+  boardBtn?.setAttribute("aria-pressed", state.boardOpen || !thread ? "true" : "false");
 
   if (!thread) {
     topbar?.classList.remove("is-running");
@@ -1770,8 +1870,7 @@ function renderTopbarAndControls() {
     archiveBtn.hidden = true;
     if (moreDot) moreDot.hidden = true;
     if (moreProjCard) moreProjCard.hidden = true;
-    $("activeTitle").textContent = "项目与多任务总控";
-    $("activeCwd").textContent = "选择关注项目或点击语音说话直达对话";
+    renderActiveHeading("项目与多任务总控", "选择关注项目或点击语音说话直达对话");
     syncBoardAttentionDot();
     syncWorkspaceVisibility();
     renderLiveBanner();
@@ -1789,13 +1888,15 @@ function renderTopbarAndControls() {
   const profVisual = activeProfile ? profileHealthVisualMeta(activeProfile) : null;
   const profileLabel = activeProfile
     ? profileOptionLabel(activeProfile)
-    : (thread.profileLabel || thread.profileId || "");
+    : compactProfileDisplayLabel(thread.profileLabel || thread.profileId || "", thread.provider);
   const compactProfileText = activeProfile
     ? compactProfileChipText(activeProfile)
-    : String(thread.profileLabel || thread.profileId || "")
-        .replace(/^(Codex|Claude|Antigravity)\s*[·:/\-]?\s*/i, "")
-        .trim()
-        .slice(0, 9);
+    : abbreviateMiddleText(
+        String(thread.profileLabel || thread.profileId || "")
+          .replace(/^(Antigravity|Codex|Claude\s*Code|Claude|Grok)\s*[·:/\-]?\s*/i, "")
+          .trim(),
+        { head: 3, tail: 3, maxLen: 8 },
+      );
   provBadge.hidden = false;
   provBadge.className = `provider-badge is-${thread.provider}`;
   provBadge.innerHTML = `<span class="provider-glyph" aria-hidden="true">${providerIconSvg(thread.provider, { size: 12 })}</span><span class="provider-text">${escapeHtml(meta.short)}</span>`;
@@ -1825,8 +1926,7 @@ function renderTopbarAndControls() {
     projectCrumb.classList.remove("is-pinned");
   }
 
-  $("activeTitle").textContent = thread.title || "新会话";
-  $("activeCwd").textContent = thread.cwd || "";
+  renderActiveHeading(thread.title || "新会话", thread.cwd || "");
 
   const goalActive = Boolean(thread.goalState?.active);
   goalBadge.hidden = !goalActive;
@@ -1967,6 +2067,9 @@ function buildTurnRenderOptions(turns, idx) {
     showIncompleteSummaryHint: true,
     supersededByNextTurn: !isLastTurn,
     hasExternalStreamingReply: Boolean(isLastTurn && hasStreamingReply),
+    fallbackModel: state.activeThread?.model || "",
+    fallbackEffort: state.activeThread?.reasoningEffort || "",
+    goalSuspended: Boolean(isLastTurn && state.activeThread?.goalState?.active),
   };
 }
 
@@ -2015,6 +2118,13 @@ function renderStreamingTurn() {
   }
   el.hidden = false;
   const agentLabel = providerDisplayName(state.activeThread?.provider || currentComposerProvider());
+  const streamBadge = formatTurnModelBadge({
+    model: state.activeThread?.model || $("modelSelect")?.value || "",
+    effort: state.activeThread?.reasoningEffort || ($("effortSelect")?.hidden ? "" : $("effortSelect")?.value || ""),
+  });
+  const streamModelPillHtml = streamBadge?.label
+    ? `<span class="process-model-pill" title="${escapeHtml(streamBadge.title || streamBadge.label)}">${escapeHtml(streamBadge.label)}</span>`
+    : "";
   const parts = [];
   const hasStreamingReply = Boolean(state.streamingText);
   const thoughtAlreadyFolded = Boolean(
@@ -2034,6 +2144,7 @@ function renderStreamingTurn() {
             <summary>
               <span class="process-summary-dot"></span>
               <span class="process-summary-text">${thoughtLabel}</span>
+              ${streamModelPillHtml}
               <span class="process-summary-hint">查看推理</span>
             </summary>
             <div class="process-summary-body">
@@ -2052,6 +2163,7 @@ function renderStreamingTurn() {
             <summary>
               <span class="process-summary-dot"></span>
               <span class="process-summary-text">${thoughtLabel}</span>
+              ${streamModelPillHtml}
               <span class="process-summary-hint">查看推理</span>
             </summary>
             <div class="process-summary-body">
@@ -2070,6 +2182,7 @@ function renderStreamingTurn() {
       <div class="msg-row msg-agent">
         <div class="msg-meta">
           <span class="msg-role">${escapeHtml(agentLabel)}</span>
+          ${streamBadge?.label ? `<span class="turn-model-tag" title="${escapeHtml(streamBadge.title || streamBadge.label)}">${escapeHtml(streamBadge.label)}</span>` : ""}
           <span class="phase-tag is-streaming"><span class="live-frontier-dot" aria-hidden="true"></span>正在回复…</span>
         </div>
         <div class="msg-bubble agent-bubble md-body">${renderMarkdown(cleanStreamText, { threadId: streamThreadId })}</div>
@@ -2482,6 +2595,107 @@ async function refreshProvidersAndModels() {
   ]);
 }
 
+function markThreadUnread(threadId, { status = "completed", summary = "", updatedAt = 0 } = {}) {
+  if (!threadId) return;
+  const entry = {
+    status: status || "completed",
+    summary: stripMarkdownForSpeech(summary || "", 80),
+    at: Date.now(),
+    updatedAt: Number(updatedAt) || Math.floor(Date.now() / 1000),
+  };
+  state.recentCompletedByThread.set(threadId, entry);
+  threadReadState.unreadById[threadId] = entry;
+  persistThreadReadState();
+}
+
+function markThreadRead(threadId, updatedAtSec = 0) {
+  if (!threadId) return;
+  const hadUnread = state.recentCompletedByThread.has(threadId) || Boolean(threadReadState.unreadById[threadId]);
+  state.recentCompletedByThread.delete(threadId);
+  delete threadReadState.unreadById[threadId];
+  const prevSeen = Number(threadReadState.seenById[threadId] || 0);
+  const nextSeen = Math.max(Math.floor(Date.now() / 1000), Number(updatedAtSec) || 0, prevSeen);
+  if (hadUnread || nextSeen > prevSeen) {
+    threadReadState.seenById[threadId] = nextSeen;
+    persistThreadReadState();
+  }
+}
+
+function reconcileThreadStatusTrackers(prevThreads = [], nextThreads = []) {
+  const prevById = new Map((Array.isArray(prevThreads) ? prevThreads : []).map((t) => [t.id, t]));
+  const nowSec = Math.floor(Date.now() / 1000);
+  const isForegroundActive = (tid) => (
+    tid === state.activeThreadId
+    && !state.boardOpen
+    && (typeof document === "undefined" || document.visibilityState !== "hidden")
+  );
+  let touched = false;
+
+  for (const t of Array.isArray(nextThreads) ? nextThreads : []) {
+    if (!t?.id) continue;
+    const updatedAt = Number(t.updatedAt || 0);
+    if (t.live) {
+      if (state.recentCompletedByThread.delete(t.id) || threadReadState.unreadById[t.id]) {
+        delete threadReadState.unreadById[t.id];
+        touched = true;
+      }
+      const prevAct = state.liveActivityByThread.get(t.id) || {};
+      if (t.livePhase || t.liveDetail) {
+        const nextAct = mergeLiveActivity(prevAct, {
+          status: "running",
+          phase: t.livePhase || prevAct.phase || "",
+          text: t.liveDetail ?? prevAct.text ?? "",
+        });
+        nextAct.isStreamingText = Boolean(prevAct.isStreamingText);
+        state.liveActivityByThread.set(t.id, nextAct);
+      } else if (!prevAct.status) {
+        state.liveActivityByThread.set(t.id, { status: "running", phase: `${providerDisplayName(t.provider)} 执行中` });
+      }
+      continue;
+    }
+
+    state.liveActivityByThread.delete(t.id);
+    const prev = prevById.get(t.id);
+    const seenAt = Number(threadReadState.seenById[t.id] || 0);
+    const finishedFromLive = Boolean(prev?.live);
+    const updatedSincePrev = Boolean(prev && updatedAt > Number(prev.updatedAt || 0));
+    const updatedSinceSeen = Boolean(seenAt > 0 && updatedAt > seenAt);
+    const freshOnInitialLoad = Boolean(
+      !threadReadState.initialized
+      && !seenAt
+      && updatedAt > 0
+      && (nowSec - updatedAt) <= 10 * 60,
+    );
+
+    if (finishedFromLive || updatedSincePrev || updatedSinceSeen || freshOnInitialLoad) {
+      if (isForegroundActive(t.id)) {
+        markThreadRead(t.id, updatedAt);
+      } else {
+        const entry = {
+          status: "completed",
+          summary: stripMarkdownForSpeech(t.preview || "", 80),
+          at: Date.now(),
+          updatedAt: updatedAt || nowSec,
+        };
+        state.recentCompletedByThread.set(t.id, entry);
+        threadReadState.unreadById[t.id] = entry;
+        touched = true;
+      }
+    } else if (!seenAt && updatedAt > 0) {
+      threadReadState.seenById[t.id] = updatedAt;
+      touched = true;
+    }
+  }
+
+  if (!threadReadState.initialized && Array.isArray(nextThreads) && nextThreads.length > 0) {
+    threadReadState.initialized = true;
+    touched = true;
+  }
+  if (touched) {
+    persistThreadReadState();
+  }
+}
+
 let refreshThreadsPromise = null;
 let refreshThreadsArchivedKey = "";
 
@@ -2493,7 +2707,11 @@ async function refreshThreads() {
   const runPromise = (async () => {
     const res = await apiGet(`api/threads?archived=${archivedKey}`);
     if ((state.showArchived ? "1" : "0") !== archivedKey) return;
+    const prevThreads = state.threads;
     state.threads = (res.threads || []).filter((t) => !isInternalVoiceThreadClient(t));
+    if (!state.showArchived) {
+      reconcileThreadStatusTrackers(prevThreads, state.threads);
+    }
     if (state.pendingRequestsSynced) {
       syncThreadsPendingCounts();
     }
@@ -2827,6 +3045,7 @@ async function selectThread(compositeId, { focusScroll = true, preserveStatus = 
   history.replaceState(null, "", url.toString());
 
   if (!compositeId) {
+    state.initialThreadLoading = false;
     state.activeThread = null;
     state.nextCursor = null;
     state.liveActivity = null;
@@ -2843,14 +3062,44 @@ async function selectThread(compositeId, { focusScroll = true, preserveStatus = 
   }
 
   const cachedSummary = state.threads.find((t) => t.id === compositeId);
+  markThreadRead(compositeId, cachedSummary?.updatedAt || 0);
   if (cachedSummary?.cwd) {
     setSidebarGroupManualPref(cachedSummary.cwd, "expand");
   }
 
-  const res = await fetchThreadRead(
-    `api/thread?id=${encodeURIComponent(compositeId)}&limit=12`,
-    compositeId,
-  );
+  const isSwitchingThread = compositeId !== prevThreadId || !state.activeThread;
+  if (isSwitchingThread) {
+    state.activeThread = null;
+    state.nextCursor = null;
+    state.queuedTurns = [];
+    state.liveActivity = cachedSummary?.live ? { status: "running" } : null;
+    state.initialThreadLoading = true;
+    const turnListEl = $("turnList");
+    if (turnListEl) {
+      turnListEl.hidden = false;
+      turnListEl.innerHTML = `<div class="empty-state" style="text-align:center;color:var(--text-muted);">正在加载会话…</div>`;
+    }
+    syncProfileSelectors();
+    syncModelAndEffortSelectors();
+    renderThreadList();
+    renderTopbarAndControls();
+    renderActiveMessages();
+    renderPendingRequests();
+    renderQueuedTurns();
+    setSidebarOpen(false);
+  }
+
+  let res;
+  try {
+    res = await fetchThreadRead(
+      `api/thread?id=${encodeURIComponent(compositeId)}&limit=12`,
+      compositeId,
+    );
+  } finally {
+    if (state.activeThreadId === compositeId && isSwitchingThread) {
+      state.initialThreadLoading = false;
+    }
+  }
   if (state.activeThreadId !== compositeId) return;
   lastActiveThreadReloadDoneAt = Date.now();
   state.activeThread = res.thread;
@@ -2870,6 +3119,7 @@ async function selectThread(compositeId, { focusScroll = true, preserveStatus = 
   state.pendingRequestsSynced = true;
   syncThreadsPendingCounts();
   syncThreadSummaryIntoList(res.thread);
+  markThreadRead(compositeId, res.thread?.updatedAt || 0);
   if (res.thread?.cwd) {
     setSidebarGroupManualPref(res.thread.cwd, "expand");
   }
@@ -2910,16 +3160,42 @@ async function loadOlderMessages() {
   vp.scrollTop = vp.scrollHeight - prevHeight;
 }
 
-async function handleSend() {
+async function copyTextToClipboard(text) {
+  const value = String(text || "");
+  if (!value) return false;
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(value);
+      return true;
+    }
+  } catch {}
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = value;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(ta);
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
+async function handleSend({ overrideText = null, clearDraft = true, forceGoal = false } = {}) {
   if (state.isSubmitting) return;
   if (state.imageProcessingCount > 0) {
     setComposerStatus("error", "图片正在压缩处理中，请稍候再发送", { autoClearMs: 2500 });
     return;
   }
   const input = $("promptInput");
-  const rawText = input.value;
+  const isOverride = typeof overrideText === "string";
+  const rawText = isOverride ? overrideText : input.value;
   const { hasDirective, cleanedText } = extractGoalDirective(rawText);
-  const goalMode = Boolean(state.composerGoal || hasDirective);
+  const goalMode = Boolean(forceGoal || state.composerGoal || hasDirective);
   const text = hasDirective && cleanedText ? rawText : rawText;
 
   const running = isActiveThreadRunning();
@@ -2929,14 +3205,14 @@ async function handleSend() {
     isSubmitting: false,
     mode: $("runningSubmitMode").value,
     text,
-    imageCount: state.images.length,
+    imageCount: isOverride ? 0 : state.images.length,
   });
   if (!sub.canSubmit) {
     setComposerStatus("error", "请输入指令或添加图片后再发送", { autoClearMs: 2500 });
     return;
   }
 
-  const savedImages = [...state.images];
+  const savedImages = isOverride ? [] : [...state.images];
   const cleanImages = savedImages.map((img, idx) => ({
     name: img?.name || `image-${idx + 1}.jpg`,
     dataUrl: img?.dataUrl || "",
@@ -2949,6 +3225,13 @@ async function handleSend() {
   if (state.activeThreadId) {
     saveLocalThreadPrefs(state.activeThreadId, { model, effort, permissionMode });
   }
+
+  const resetDraftIfNeeded = () => {
+    if (!clearDraft) return;
+    input.value = "";
+    state.images = [];
+    renderComposerImages();
+  };
 
   state.isSubmitting = true;
   state.autoFollow = true;
@@ -2971,9 +3254,7 @@ async function handleSend() {
         permissionMode,
         goalMode,
       }, { timeoutMs: requestTimeoutMs });
-      input.value = "";
-      state.images = [];
-      renderComposerImages();
+      resetDraftIfNeeded();
       await refreshThreads();
       if (created?.thread?.id) {
         saveLocalThreadPrefs(created.thread.id, { model, effort, permissionMode });
@@ -2983,8 +3264,9 @@ async function handleSend() {
       return;
     }
 
-    if (sub.action === "queue") {
-      const qRes = await apiPost("api/thread/queue", {
+    const submitted = await submitComposerRequest(apiPost, {
+      action: sub.action,
+      payload: {
         threadId: state.activeThreadId,
         text,
         images: cleanImages,
@@ -2992,10 +3274,13 @@ async function handleSend() {
         effort,
         permissionMode,
         goalMode,
-      }, { timeoutMs: requestTimeoutMs });
-      input.value = "";
-      state.images = [];
-      renderComposerImages();
+        expectedTurnId: state.liveActivity?.turnId || "",
+      },
+      options: { timeoutMs: requestTimeoutMs },
+    });
+    if (submitted.action === "queue") {
+      const qRes = submitted.result;
+      resetDraftIfNeeded();
       applyActiveQueuedTurns(state.activeThreadId, qRes.items || state.queuedTurns);
       renderQueuedTurns();
       setComposerStatus("success", "已加入排队，等待当前轮次完成后发送", { autoClearMs: 3000 });
@@ -3003,20 +3288,8 @@ async function handleSend() {
       return;
     }
 
-    const turnRes = await apiPost("api/turn", {
-      threadId: state.activeThreadId,
-      text,
-      images: cleanImages,
-      model,
-      effort,
-      permissionMode,
-      steer: sub.action === "steer",
-      expectedTurnId: state.liveActivity?.turnId || "",
-      goalMode,
-    }, { timeoutMs: requestTimeoutMs });
-    input.value = "";
-    state.images = [];
-    renderComposerImages();
+    const turnRes = submitted.result;
+    resetDraftIfNeeded();
     if (state.activeThread) {
       const optimisticTurnId = turnRes?.turn?.id || turnRes?.turnId || `optimistic-turn-${Date.now()}`;
       const userContent = [
@@ -3204,6 +3477,7 @@ async function triggerProfileProbe({ provider, profileId = "" } = {}) {
   if (!addedKeys.length && profileId) addedKeys.push(`${cleanProvider}:${profileId}`);
   for (const key of addedKeys) state.probingProfileKeys.add(key);
   syncComposerProfileSelect();
+  syncNewProviderPills();
   syncNewProfileSelect();
 
   try {
@@ -3457,16 +3731,21 @@ function connectEvents() {
     merged.isStreamingText = Boolean(patch.isStreamingText ?? prev.isStreamingText);
     state.liveActivityByThread.set(threadId, merged);
     state.recentCompletedByThread.delete(threadId);
+    if (threadReadState.unreadById[threadId]) {
+      delete threadReadState.unreadById[threadId];
+      persistThreadReadState();
+    }
   };
 
   const markThreadLiveCompleted = (threadId, status, summary = "") => {
     if (!threadId) return;
     state.liveActivityByThread.delete(threadId);
-    state.recentCompletedByThread.set(threadId, {
-      status: status || "completed",
-      summary: stripMarkdownForSpeech(summary || "", 80),
-      at: Date.now(),
-    });
+    const isVisibleActive = threadId === state.activeThreadId && !state.boardOpen && document.visibilityState !== "hidden";
+    if (isVisibleActive) {
+      markThreadRead(threadId);
+    } else {
+      markThreadUnread(threadId, { status, summary });
+    }
   };
 
   es.addEventListener("server_request", (ev) => {
@@ -4241,10 +4520,15 @@ function openNewThreadModal({ cwd = "", provider = "", model = "", promptText = 
   setComposerConfigOpen(false);
   $("newThreadError").hidden = true;
   $("newThreadError").textContent = "";
-  const chosenProvider = provider || defaultProviderValue();
+  const titleEl = $("newModalTitle");
+  if (titleEl) {
+    titleEl.textContent = cwd ? `在「${projectBaseName(cwd)}」新建会话` : "新建远程会话";
+  }
+  const chosenProvider = provider || defaultNewThreadProvider();
   if ([...$("newProviderSelect").options].some((o) => o.value === chosenProvider)) {
     $("newProviderSelect").value = chosenProvider;
   }
+  syncNewProviderPills();
   syncNewProfileSelect();
   if (model) syncNewModelSelect(model);
   $("newPermissionSelect").value = normalizeUiPermissionMode(state.defaultPermissionMode || "turbo", "turbo");
@@ -4533,8 +4817,9 @@ function renderVoiceCallUi() {
     if (phaseClass) orb.classList.add(phaseClass);
     const core = orb.querySelector(".voice-orb-core");
     if (core) {
+      const activeProv = v.dispatchProvider && v.dispatchProvider !== "local" ? v.dispatchProvider : "";
       core.innerHTML = v.isProcessing
-        ? providerIconSvg("antigravity", { size: 28 })
+        ? (activeProv ? providerIconSvg(activeProv, { size: 28 }) : iconSvg("bolt", { size: 28 }))
         : v.isSpeaking
           ? iconSvg("speaker", { size: 28 })
           : v.isMuted
@@ -4549,9 +4834,14 @@ function renderVoiceCallUi() {
   if (stateEl && !v.backendMissing) stateEl.textContent = statusText;
   if (hintEl && !v.backendMissing) hintEl.textContent = hintText;
   if (modelBadge) {
-    const shortModel = String(v.modelName || "Hydrogen").includes("hydrogen") ? "Hydrogen" : compactModelBadgeLabel(v.modelName);
+    const shortModel = String(v.modelName || "").includes("hydrogen")
+      ? "Hydrogen"
+      : (v.modelName === "local-rules"
+          ? "本机规则"
+          : (compactModelBadgeLabel(v.modelName) || v.modelName || "自动轻量"));
     const lockText = v.wakeLock ? " · 常亮" : "";
-    modelBadge.textContent = `${shortModel} · ${v.isMuted ? "已静音" : "免提"}${lockText}`;
+    const statusLabel = `${v.isMuted ? "已静音" : "免提"}${lockText}`;
+    modelBadge.textContent = v.modelOptions?.length ? statusLabel : `${shortModel} · ${statusLabel}`;
   }
   if (muteBtn && muteLabel) {
     muteBtn.classList.toggle("is-muted", v.isMuted);
@@ -4631,7 +4921,35 @@ function startVoiceLevelAnimation() {
   state.voice.levelRafId = requestAnimationFrame(tick);
 }
 
+function voiceSelectionPayload() {
+  const parsed = parseVoiceModelSelectionKey(state.voice.config?.preferredModelKey || "auto");
+  return {
+    voiceProvider: parsed.voiceProvider || "",
+    voiceProfileId: parsed.voiceProfileId || "",
+    voiceModel: parsed.voiceModel || "",
+  };
+}
+
+function renderVoiceModelSelector() {
+  const sel = $("voiceModelSelect");
+  if (!sel) return;
+  const preferredKey = state.voice.config?.preferredModelKey || "auto";
+  sel.innerHTML = renderVoiceModelSelectOptionsHtml(state.voice.modelOptions, preferredKey);
+  if ([...sel.options].some((o) => o.value === preferredKey)) {
+    sel.value = preferredKey;
+  }
+}
+
 function stopVoiceCallMicPipeline() {
+  if (state.voice.speechRecognition) {
+    try {
+      state.voice.speechRecognition.onresult = null;
+      state.voice.speechRecognition.onerror = null;
+      state.voice.speechRecognition.onend = null;
+      state.voice.speechRecognition.stop();
+    } catch {}
+    state.voice.speechRecognition = null;
+  }
   if (state.voice.processorNode) {
     try {
       state.voice.processorNode.onaudioprocess = null;
@@ -4656,9 +4974,70 @@ function stopVoiceCallMicPipeline() {
   state.voice.currentRms = 0;
 }
 
+function startBrowserSpeechRecognitionPipeline() {
+  const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRec) return false;
+  const rec = new SpeechRec();
+  rec.lang = "zh-CN";
+  rec.continuous = true;
+  rec.interimResults = true;
+  rec.onresult = (event) => {
+    if (!state.voice.callActive || state.voice.isMuted || state.voice.isSpeaking || state.voice.isProcessing) return;
+    let finalText = "";
+    let hasInterim = false;
+    for (let i = event.resultIndex || 0; i < event.results.length; i += 1) {
+      const res = event.results[i];
+      if (res?.isFinal) {
+        finalText += res[0]?.transcript || "";
+      } else if (res?.[0]?.transcript) {
+        hasInterim = true;
+      }
+    }
+    state.voice.isRecording = Boolean(hasInterim && !finalText.trim());
+    renderVoiceCallUi();
+    if (finalText.trim()) {
+      state.voice.isRecording = false;
+      void sendVoiceTurnToMac({ transcriptText: finalText.trim() });
+    }
+  };
+  rec.onerror = () => {
+    state.voice.isRecording = false;
+  };
+  rec.onend = () => {
+    if (state.voice.callActive && !state.voice.isMuted && !state.voice.asrAvailable && state.voice.speechRecognition === rec) {
+      setTimeout(() => {
+        if (state.voice.callActive && !state.voice.isMuted && state.voice.speechRecognition === rec) {
+          try { rec.start(); } catch {}
+        }
+      }, 300);
+    }
+  };
+  try {
+    rec.start();
+    state.voice.speechRecognition = rec;
+    state.voice.isMuted = false;
+    renderVoiceCallUi();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function startVoiceCallMicPipeline() {
   stopVoiceCallMicPipeline();
+  if (state.voice.asrAvailable === false) {
+    if (startBrowserSpeechRecognitionPipeline()) {
+      return;
+    }
+    state.voice.isMuted = true;
+    renderVoiceCallUi();
+    $("voiceSubHintText").textContent = "当前环境未配置本地 Whisper，可展开右上角键盘输入或连接 Mac Whisper";
+    return;
+  }
   if (!navigator.mediaDevices?.getUserMedia || !state.voice.audioCtx) {
+    if (startBrowserSpeechRecognitionPipeline()) {
+      return;
+    }
     state.voice.isMuted = true;
     renderVoiceCallUi();
     $("voiceStateText").textContent = "浏览器不支持网页麦克风（可用文字输入控制）";
@@ -5717,6 +6096,7 @@ async function sendVoiceTurnToMac({ wavUint8Array = null, transcriptText = "", m
       audioMimeType: audioBase64 ? "audio/wav" : "",
       transcriptText: String(transcriptText || "").trim(),
       activeThreadId: state.activeThreadId || "",
+      ...voiceSelectionPayload(),
       mode,
       autoExecute: true,
       asyncDispatch: true,
@@ -5725,6 +6105,9 @@ async function sendVoiceTurnToMac({ wavUint8Array = null, transcriptText = "", m
     clearVoiceProcessingStageTimer();
     if (res?.executed?.model || res?.dispatchModel || res?.model) {
       state.voice.modelName = res?.executed?.model || res?.dispatchModel || res.model;
+    }
+    if (res?.executed?.provider) {
+      state.voice.dispatchProvider = res.executed.provider;
     }
     if (res?.noSpeech) {
       state.voice.isProcessing = false;
@@ -6069,6 +6452,7 @@ async function openVoiceModal() {
   state.voice.callTimerId = setInterval(updateVoiceCallTimerLabel, 1000);
   updateVoiceCallTimerLabel();
 
+  renderVoiceModelSelector();
   renderVoiceTranscript();
   renderVoiceLiveProgress();
   renderVoiceCallUi();
@@ -6079,19 +6463,35 @@ async function openVoiceModal() {
   void requestVoiceWakeLock();
   startVoiceLevelAnimation();
 
-  const warmPromise = apiPostWithHotFallback("api/voice/call/start", { callId: state.voice.callId })
+  const warmPromise = apiPostWithHotFallback("api/voice/call/start", {
+    callId: state.voice.callId,
+    ...voiceSelectionPayload(),
+  })
     .then((res) => {
       if (res?.dispatchModel || res?.model) {
         state.voice.modelName = res?.dispatchModel || res.model;
       }
+      if (res?.dispatchProvider) {
+        state.voice.dispatchProvider = res.dispatchProvider;
+      }
+      if (Array.isArray(res?.modelOptions)) {
+        state.voice.modelOptions = res.modelOptions;
+      }
+      const prevAsrAvailable = state.voice.asrAvailable;
+      state.voice.asrAvailable = res?.asrAvailable !== false;
+      state.voice.asrEngine = res?.asrEngine || (state.voice.asrAvailable ? "mlx-whisper" : "browser");
       state.voice.backendMissing = false;
+      renderVoiceModelSelector();
       renderVoiceCallUi();
+      if (prevAsrAvailable && state.voice.asrAvailable === false && state.voice.callActive && !state.voice.speechRecognition) {
+        void startVoiceCallMicPipeline();
+      }
     })
     .catch((err) => {
       if (Number(err?.status) === 404 || Number(err?.status) === 502) {
         state.voice.backendMissing = true;
-        $("voiceStateText").textContent = "本机语音热扩展尚未连上（/api/voice/call）";
-        $("voiceSubHintText").textContent = "下方仍可实时查看任务动态，启动热扩展或重载守护进程后即可对话 Hydrogen";
+        $("voiceStateText").textContent = "本机语音服务尚未连上（/api/voice/call）";
+        $("voiceSubHintText").textContent = "下方仍可实时查看任务动态，重启本地服务或热扩展后即可使用语音总控";
         renderVoiceCallUi();
       }
     });
@@ -6133,12 +6533,7 @@ function bindEvents() {
   $("providerTabs").addEventListener("click", (e) => {
     const btn = e.target.closest("[data-provider]");
     if (!btn) return;
-    state.providerFilter = btn.dataset.provider;
-    for (const tab of $("providerTabs").querySelectorAll(".provider-tab")) {
-      tab.classList.toggle("is-active", tab === btn);
-    }
-    syncProfileSelectors();
-    renderThreadList();
+    setProviderFilter(btn.dataset.provider);
   });
 
   $("agentQuotaStrip")?.addEventListener("click", (e) => {
@@ -6241,12 +6636,7 @@ function bindEvents() {
     if (filterBtn) {
       e.stopPropagation();
       const nextProv = filterBtn.dataset.telemetryFilterProvider || "all";
-      state.providerFilter = state.providerFilter === nextProv ? "all" : nextProv;
-      for (const tab of $("providerTabs")?.querySelectorAll(".provider-tab") || []) {
-        tab.classList.toggle("is-active", tab.dataset.provider === state.providerFilter);
-      }
-      syncProfileSelectors();
-      renderThreadList();
+      setProviderFilter(state.providerFilter === nextProv ? "all" : nextProv);
       return;
     }
     if (e.target.closest("[data-telemetry-toggle]")) {
@@ -6276,17 +6666,7 @@ function bindEvents() {
   $("sidebarBatchBar")?.addEventListener("click", handleBatchBarClick);
   $("boardBatchBar")?.addEventListener("click", handleBatchBarClick);
 
-  $("boardToggleBtn").addEventListener("click", () => {
-    if (state.boardOpen && state.activeThread) {
-      state.boardOpen = false;
-      renderTopbarAndControls();
-      renderActiveMessages();
-      renderPendingRequests();
-      renderQueuedTurns();
-    } else {
-      openProjectBoardView();
-    }
-  });
+  $("boardToggleBtn").addEventListener("click", () => openProjectBoardView());
 
   $("voiceModeBtn").addEventListener("click", () => void openVoiceModal());
 
@@ -6322,7 +6702,7 @@ function bindEvents() {
   $("topbarNewInProjectBtn")?.addEventListener("click", () => {
     openNewThreadModal({
       cwd: state.activeThread?.cwd || "",
-      provider: defaultProviderValue(),
+      provider: defaultNewThreadProvider(),
     });
   });
 
@@ -6382,7 +6762,7 @@ function bindEvents() {
     }
     const newBtn = e.target.closest("[data-new-in-cwd]");
     if (newBtn) {
-      openNewThreadModal({ cwd: newBtn.dataset.newInCwd, provider: defaultProviderValue() });
+      openNewThreadModal({ cwd: newBtn.dataset.newInCwd, provider: defaultNewThreadProvider() });
       return;
     }
     const pill = e.target.closest("[data-strip-thread-id]");
@@ -6408,7 +6788,7 @@ function bindEvents() {
         if (state.batchSelect.active) exitBatchSelectMode();
         else enterBatchSelectMode();
       } else if (act === "voice") void openVoiceModal();
-      else if (act === "new") openNewThreadModal({ provider: defaultProviderValue() });
+      else if (act === "new") openNewThreadModal({ provider: defaultNewThreadProvider() });
       else if (act === "resume" && state.activeThread) {
         state.boardOpen = false;
         renderTopbarAndControls();
@@ -6466,7 +6846,7 @@ function bindEvents() {
 
     const newBtn = e.target.closest("[data-new-in-cwd]");
     if (newBtn) {
-      openNewThreadModal({ cwd: newBtn.dataset.newInCwd, provider: defaultProviderValue() });
+      openNewThreadModal({ cwd: newBtn.dataset.newInCwd, provider: defaultNewThreadProvider() });
       return;
     }
 
@@ -6488,7 +6868,7 @@ function bindEvents() {
     const newBtn = e.target.closest("[data-new-in-cwd]");
     if (newBtn) {
       e.stopPropagation();
-      openNewThreadModal({ cwd: newBtn.dataset.newInCwd, provider: defaultProviderValue() });
+      openNewThreadModal({ cwd: newBtn.dataset.newInCwd, provider: defaultNewThreadProvider() });
       return;
     }
     const staleBtn = e.target.closest("[data-sidebar-stale-projects]");
@@ -6582,15 +6962,33 @@ function bindEvents() {
     void refreshModelsForProfile(currentComposerProvider(), currentComposerProfileId());
   });
 
-  $("composerProbeProfilesBtn")?.addEventListener("click", () => {
-    void triggerProfileProbe({ provider: currentComposerProvider() });
-  });
-
   $("newModalProbeProfilesBtn")?.addEventListener("click", () => {
     void triggerProfileProbe({ provider: $("newProviderSelect").value || defaultProviderValue() });
   });
 
   const handleProfilePillClick = (e, { isNewModal = false } = {}) => {
+    const copyLoginBtn = e.target.closest("[data-copy-login-cmd]");
+    if (copyLoginBtn) {
+      e.stopPropagation();
+      const loginCmd = copyLoginBtn.dataset.copyLoginCmd || "";
+      if (loginCmd) {
+        void copyTextToClipboard(loginCmd).then((copied) => {
+          if (copied) {
+            copyLoginBtn.textContent = "已复制";
+            clearTimeout(copyLoginBtn._copyTimer);
+            copyLoginBtn._copyTimer = setTimeout(() => {
+              copyLoginBtn.textContent = "复制登录";
+            }, 1800);
+            showToastBanner("已复制终端登录命令", {
+              detail: "请在 Mac 终端粘贴执行登录后点击「测通」",
+            });
+          } else {
+            showToastBanner("请手动在终端执行以下命令", { detail: loginCmd });
+          }
+        });
+      }
+      return;
+    }
     const probeBtn = e.target.closest("[data-probe-profile]");
     if (probeBtn) {
       e.stopPropagation();
@@ -6716,7 +7114,15 @@ function bindEvents() {
     );
   });
 
-  $("newProviderSelect").addEventListener("change", () => syncNewProfileSelect());
+  $("newProviderPills")?.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-select-provider]");
+    if (btn?.dataset?.selectProvider) {
+      selectNewModalProvider(btn.dataset.selectProvider);
+    }
+  });
+  $("newProviderSelect").addEventListener("change", () => {
+    selectNewModalProvider($("newProviderSelect").value || defaultNewThreadProvider());
+  });
 
   $("promptInput").addEventListener("input", () => renderComposerControls());
   $("promptInput").addEventListener("change", () => renderComposerControls());
@@ -6915,31 +7321,32 @@ function bindEvents() {
 
   $("sendBtn").addEventListener("click", () => void handleSend());
   $("messagesViewport")?.addEventListener("click", async (e) => {
+    const resumeBtn = e.target.closest("[data-resume-interrupted-turn]");
+    if (resumeBtn) {
+      if (!state.activeThreadId || state.isSubmitting) return;
+      if (isActiveThreadRunning()) {
+        showToastBanner("当前会话正在执行中", { detail: "无需重复启动" });
+        return;
+      }
+      const goalSuspended = Boolean(state.activeThread?.goalState?.active);
+      resumeBtn.disabled = true;
+      try {
+        await handleSend({
+          overrideText: "继续完成刚才中断的步骤",
+          clearDraft: false,
+          forceGoal: goalSuspended,
+        });
+      } finally {
+        resumeBtn.disabled = false;
+      }
+      return;
+    }
     const copyBtn = e.target.closest("[data-copy-code]");
     if (!copyBtn) return;
     const block = copyBtn.closest(".md-code-block");
     const codeText = block?.querySelector("pre > code")?.textContent ?? "";
     if (!codeText) return;
-    let copied = false;
-    try {
-      if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(codeText);
-        copied = true;
-      }
-    } catch {}
-    if (!copied) {
-      try {
-        const ta = document.createElement("textarea");
-        ta.value = codeText;
-        ta.setAttribute("readonly", "");
-        ta.style.position = "fixed";
-        ta.style.opacity = "0";
-        document.body.appendChild(ta);
-        ta.select();
-        copied = document.execCommand("copy");
-        document.body.removeChild(ta);
-      } catch {}
-    }
+    const copied = await copyTextToClipboard(codeText);
     if (copied) {
       copyBtn.textContent = "已复制";
       copyBtn.classList.add("is-copied");
@@ -7160,7 +7567,7 @@ function bindEvents() {
   $("newThreadBtn").addEventListener("click", () => {
     openNewThreadModal({
       cwd: state.activeThread?.cwd || "",
-      provider: defaultProviderValue(),
+      provider: defaultNewThreadProvider(),
     });
   });
 
@@ -7194,6 +7601,10 @@ function bindEvents() {
       });
       $("newPromptInput").value = "";
       $("newThreadModal").close();
+      const createdProvider = created?.thread?.provider || provider;
+      if (state.providerFilter !== "all" && createdProvider && state.providerFilter !== createdProvider) {
+        setProviderFilter("all");
+      }
       await refreshThreads();
       if (created?.thread?.id) {
         saveLocalThreadPrefs(created.thread.id, { model, permissionMode });
@@ -7215,6 +7626,37 @@ function bindEvents() {
     const next = !state.voice.config.autoBroadcastEvents;
     state.voice.config = saveVoiceConfig({ autoBroadcastEvents: next });
     renderVoiceCallUi();
+  });
+
+  $("voiceModelSelect")?.addEventListener("change", (e) => {
+    const selectedKey = String(e.target?.value || "auto").trim() || "auto";
+    state.voice.config = saveVoiceConfig({ preferredModelKey: selectedKey });
+    const parsed = parseVoiceModelSelectionKey(selectedKey);
+    if (parsed.voiceModel) {
+      state.voice.modelName = parsed.voiceModel;
+    }
+    if (parsed.voiceProvider && parsed.voiceProvider !== "auto") {
+      state.voice.dispatchProvider = parsed.voiceProvider;
+    }
+    renderVoiceCallUi();
+    if (state.voice.callActive && state.voice.callId && !state.voice.backendMissing) {
+      void apiPostWithHotFallback("api/voice/call/start", {
+        callId: state.voice.callId,
+        ...voiceSelectionPayload(),
+      }).then((res) => {
+        if (res?.dispatchModel || res?.model) {
+          state.voice.modelName = res?.dispatchModel || res.model;
+        }
+        if (res?.dispatchProvider) {
+          state.voice.dispatchProvider = res.dispatchProvider;
+        }
+        if (Array.isArray(res?.modelOptions)) {
+          state.voice.modelOptions = res.modelOptions;
+          renderVoiceModelSelector();
+        }
+        renderVoiceCallUi();
+      }).catch(() => {});
+    }
   });
 
   $("voiceKeyboardToggleBtn")?.addEventListener("click", () => {
@@ -7723,7 +8165,7 @@ function startLiveActivityPolling() {
       }
       const sidebarVisible = Boolean($("sidebar")?.classList.contains("is-open")) || window.innerWidth > 900;
       const listPollTicks = (isBoardViewActive() || sidebarVisible) ? 6 : 12;
-      if (activityPollTick % listPollTicks === 0 && !state.isSubmitting && (isBoardViewActive() || state.threads.some((t) => t.live || (t.queuedCount || 0) > 0))) {
+      if (activityPollTick % listPollTicks === 0 && !state.isSubmitting && (isBoardViewActive() || sidebarVisible || state.threads.some((t) => t.live || (t.queuedCount || 0) > 0))) {
         await refreshThreads().catch(() => {});
       }
     } finally {

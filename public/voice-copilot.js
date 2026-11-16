@@ -8,14 +8,59 @@ export const VOICE_CONFIG_STORAGE_KEY = "agentControl.voiceCallPrefs.v2";
 export const DEFAULT_VOICE_CONFIG = Object.freeze({
   autoBroadcastEvents: true,
   handsFreeVad: true,
+  preferredModelKey: "auto",
 });
 
 export function normalizeVoiceConfig(raw = {}) {
   const src = raw && typeof raw === "object" ? raw : {};
+  const preferredModelKey = String(src.preferredModelKey || "").trim() || "auto";
   return {
     autoBroadcastEvents: src.autoBroadcastEvents !== false,
     handsFreeVad: src.handsFreeVad !== false,
+    preferredModelKey,
   };
+}
+
+export function parseVoiceModelSelectionKey(selectionKey = "auto") {
+  const key = String(selectionKey || "").trim();
+  if (!key || key === "auto") {
+    return { key: "auto", voiceProvider: "auto", voiceProfileId: "", voiceModel: "" };
+  }
+  if (key === "local:local-rules" || key === "local") {
+    return { key: "local:local-rules", voiceProvider: "local", voiceProfileId: "", voiceModel: "local-rules" };
+  }
+  const firstColon = key.indexOf(":");
+  if (firstColon < 0) {
+    return { key, voiceProvider: key, voiceProfileId: "", voiceModel: "" };
+  }
+  const provider = key.slice(0, firstColon).trim();
+  const rest = key.slice(firstColon + 1);
+  const secondColon = rest.indexOf(":");
+  if (secondColon < 0) {
+    return { key, voiceProvider: provider, voiceProfileId: "", voiceModel: rest.trim() };
+  }
+  return {
+    key,
+    voiceProvider: provider,
+    voiceProfileId: rest.slice(0, secondColon).trim(),
+    voiceModel: rest.slice(secondColon + 1).trim(),
+  };
+}
+
+export function renderVoiceModelSelectOptionsHtml(options = [], selectedKey = "auto") {
+  const list = Array.isArray(options) && options.length
+    ? options
+    : [
+        { key: "auto", label: "自动优选轻量模型" },
+        { key: "local:local-rules", label: "仅本机规则（零模型）" },
+      ];
+  const hasSelected = list.some((opt) => opt.key === selectedKey);
+  const effectiveKey = hasSelected ? selectedKey : list[0].key;
+  return list.map((opt) => {
+    const sel = opt.key === effectiveKey ? " selected" : "";
+    const title = opt.description ? ` title="${escapeHtml(opt.description)}"` : "";
+    return `<option value="${escapeHtml(opt.key)}"${sel}${title}>${escapeHtml(opt.label || opt.key)}</option>`;
+  }).join("");
 }
 
 export function loadVoiceConfig(storage = typeof localStorage !== "undefined" ? localStorage : null) {
@@ -988,7 +1033,7 @@ export function renderVoiceCallTranscriptHtml(entries = []) {
   if (!list.length) {
     return `
       <div class="voice-transcript-placeholder">
-        已连线 Mac 本机语音引擎：直接开口说“粉丝站现在什么进度？”、“让 Agent Control 跑一下测试”或“批准请求”。
+        开车免提语音总控已就绪：直接开口说“现在什么进度？”、“让控制台跑一下测试”或“批准请求”（支持可选轻量模型，不依赖 Gemini 也能用）。
       </div>
     `;
   }

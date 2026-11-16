@@ -358,9 +358,20 @@ export async function createHotExtensionServer({
         return;
       }
 
+      if (pathname === "/api/voice/call/models" && request.method === "GET") {
+        const result = await voiceService.listVoiceModelOptions();
+        sendJson(response, 200, result);
+        return;
+      }
+
       if (pathname === "/api/voice/call/start" && request.method === "POST") {
         const body = await readJsonBody(request);
-        const result = await voiceService.startCall({ callId: body.callId || "" });
+        const result = await voiceService.startCall({
+          callId: body.callId || "",
+          voiceProvider: body.voiceProvider || "",
+          voiceModel: body.voiceModel || "",
+          voiceProfileId: body.voiceProfileId || "",
+        });
         sendJson(response, 200, result);
         return;
       }
@@ -379,6 +390,9 @@ export async function createHotExtensionServer({
           audioMimeType: body.audioMimeType || "audio/wav",
           transcriptText: body.transcriptText || "",
           activeThreadId: body.activeThreadId || "",
+          voiceProvider: body.voiceProvider || "",
+          voiceModel: body.voiceModel || "",
+          voiceProfileId: body.voiceProfileId || "",
           mode,
           autoExecute: body.autoExecute !== false,
           asyncDispatch: Boolean(body.asyncDispatch),

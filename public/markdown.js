@@ -1779,7 +1779,128 @@ function extractAgentOutputImagePaths(text = "", maxCount = 6) {
   return found;
 }
 
-function renderAgentMessageItem(item, agentLabel, { forcePrimary = false, threadId = "" } = {}) {
+function shortModelName(rawModel = "") {
+  const clean = String(rawModel || "").trim();
+  if (!clean) return "";
+  const lower = clean.toLowerCase();
+  if (clean === "gemini-pro-orchestrator" || lower.includes("orchestrator")) {
+    return "Carbon";
+  }
+  if (lower.includes("carbon")) {
+    if (lower.includes("high")) return "Carbon H";
+    if (lower.includes("medium")) return "Carbon M";
+    return "Carbon";
+  }
+  if (lower.includes("argon")) {
+    return "Argon";
+  }
+  if (lower.includes("hydrogen")) {
+    if (lower.includes("xhigh")) return "Hydrogen XH";
+    if (lower.includes("high")) return "Hydrogen H";
+    if (lower.includes("low")) return "Hydrogen L";
+    return "Hydrogen";
+  }
+  if (lower.startsWith("gemini-")) {
+    const cleaned = clean
+      .replace(/^gemini-/i, "Gemini ")
+      .replace(/-\d{8,}$/, "")
+      .replace(/-/g, " ")
+      .replace(/\bpro\b/gi, "Pro")
+      .replace(/\bflash\b/gi, "Flash")
+      .replace(/\blite\b/gi, "Lite")
+      .trim();
+    return cleaned.length > 16 ? cleaned.slice(0, 16) : cleaned;
+  }
+  if (lower.includes("opus")) {
+    const ver = clean.match(/(\d+(?:[.-]\d+)?)/);
+    return ver ? `Opus ${ver[1].replace(/-/g, ".")}` : "Opus";
+  }
+  if (lower.includes("sonnet")) {
+    const ver = clean.match(/(\d+(?:[.-]\d+)?)/);
+    return ver ? `Sonnet ${ver[1].replace(/-/g, ".")}` : "Sonnet";
+  }
+  if (lower.includes("fable")) {
+    const ver = clean.match(/(\d+(?:[.-]\d+)?)/);
+    return ver ? `Fable ${ver[1].replace(/-/g, ".")}` : "Fable";
+  }
+  if (lower.includes("haiku")) {
+    const ver = clean.match(/(\d+(?:[.-]\d+)?)/);
+    return ver ? `Haiku ${ver[1].replace(/-/g, ".")}` : "Haiku";
+  }
+  if (clean === "gpt-5.3-codex" || /5\.3.*codex/i.test(clean)) {
+    return "5.3 Codex";
+  }
+  if (lower.includes("gpt-")) {
+    return clean.replace(/^.*?(gpt-[0-9a-z.-]+).*$/i, "$1").toUpperCase().slice(0, 14);
+  }
+  if (lower.startsWith("grok-")) {
+    if (lower.includes("4.7-build-fast") || lower.includes("4.7 fast")) return "Grok 4.7F";
+    const ver = clean.match(/grok-(\d+(?:[.-]\d+)?)/i);
+    return ver ? `Grok ${ver[1].replace(/-/g, ".")}` : clean.slice(0, 14);
+  }
+  const stripped = clean
+    .replace(/\s*\([^)]*\)\s*/g, " ")
+    .replace(/^(Claude|Gemini)\s+/i, "")
+    .trim();
+  return stripped.length > 14 ? stripped.slice(0, 14) : stripped;
+}
+
+function shortEffortLabel(effort = "") {
+  const clean = String(effort || "").trim().toLowerCase();
+  return ({ low: "L", medium: "M", high: "H", xhigh: "XH", max: "MAX" })[clean] || "";
+}
+
+export function formatTurnModelBadge(turnOrModel, fallbackModel = "", fallbackEffort = "") {
+  let rawModels = [];
+  let rawEffort = "";
+  if (turnOrModel && typeof turnOrModel === "object") {
+    const list = Array.isArray(turnOrModel.models)
+      ? turnOrModel.models.map((m) => String(m || "").trim()).filter(Boolean)
+      : [];
+    const single = String(turnOrModel.model || "").trim();
+    if (list.length) {
+      rawModels = list;
+      rawEffort = String(turnOrModel.effort || turnOrModel.reasoningEffort || "").trim();
+    } else if (single) {
+      rawModels = [single];
+      rawEffort = String(turnOrModel.effort || turnOrModel.reasoningEffort || "").trim();
+    } else if (String(fallbackModel || "").trim()) {
+      rawModels = [String(fallbackModel).trim()];
+      rawEffort = String(turnOrModel.effort || turnOrModel.reasoningEffort || fallbackEffort || "").trim();
+    }
+  } else if (typeof turnOrModel === "string" && turnOrModel.trim()) {
+    rawModels = [turnOrModel.trim()];
+    rawEffort = String(fallbackEffort || "").trim();
+  } else if (String(fallbackModel || "").trim()) {
+    rawModels = [String(fallbackModel).trim()];
+    rawEffort = String(fallbackEffort || "").trim();
+  }
+
+  const shortNames = [];
+  const rawNames = [];
+  for (const raw of rawModels) {
+    const short = shortModelName(raw);
+    if (!short) continue;
+    if (!shortNames.includes(short)) {
+      shortNames.push(short);
+    }
+    if (!rawNames.includes(raw)) {
+      rawNames.push(raw);
+    }
+  }
+  if (!shortNames.length) return null;
+
+  const baseLabel = shortNames.length === 1
+    ? shortNames[0]
+    : `${shortNames[0]} → ${shortNames[shortNames.length - 1]}`;
+  const effShort = shortEffortLabel(rawEffort);
+  const alreadyHasEffort = effShort && new RegExp(`\\b${effShort}$`).test(baseLabel);
+  const label = effShort && !alreadyHasEffort ? `${baseLabel} · ${effShort}` : baseLabel;
+  const title = `${rawNames.join(" → ")}${rawEffort ? ` (${rawEffort})` : ""}`;
+  return { label, title };
+}
+
+function renderAgentMessageItem(item, agentLabel, { forcePrimary = false, threadId = "", modelBadge = null } = {}) {
   const rawText = String(item.text || "");
   const parsedHb = item.heartbeat || parseClientHeartbeatAgentReply(rawText, { allowIncomplete: false });
   const text = item.heartbeat
@@ -1816,6 +1937,7 @@ function renderAgentMessageItem(item, agentLabel, { forcePrimary = false, thread
     <div class="msg-row msg-agent ${isCommentary ? "is-commentary" : ""}">
       <div class="msg-meta">
         <span class="msg-role">${escapeHtml(agentLabel)}</span>
+        ${modelBadge?.label ? `<span class="turn-model-tag" title="${escapeHtml(modelBadge.title || modelBadge.label)}">${escapeHtml(modelBadge.label)}</span>` : ""}
         ${hbTagHtml}
         ${isCommentary ? `<span class="phase-tag">过程汇报</span>` : ""}
         ${goalComplete ? `<span class="goal-done-tag">目标已达成</span>` : ""}
@@ -2128,7 +2250,7 @@ function renderLiveProgressFeedHtml(processItems, digest, { liveThought = "", li
   `;
 }
 
-function renderProcessGroupHtml(processItems, { isRunning = false, liveThought = "", livePhase = "", extraReasoning = "", threadId = "" } = {}) {
+function renderProcessGroupHtml(processItems, { isRunning = false, liveThought = "", livePhase = "", extraReasoning = "", threadId = "", modelBadge = null } = {}) {
   const safeItems = Array.isArray(processItems) ? processItems : [];
   const cleanExtraThought = String(liveThought || extraReasoning || "").trim();
   const cleanPhase = String(livePhase || "").trim();
@@ -2331,6 +2453,7 @@ function renderProcessGroupHtml(processItems, { isRunning = false, liveThought =
         <summary>
           <span class="process-summary-dot"></span>
           <span class="process-summary-text">${escapeHtml(summaryLabel)}</span>
+          ${modelBadge?.label ? `<span class="process-model-pill" title="${escapeHtml(modelBadge.title || modelBadge.label)}">${escapeHtml(modelBadge.label)}</span>` : ""}
           <span class="process-summary-hint">展开明细</span>
         </summary>
         <div class="process-summary-body">
@@ -2647,6 +2770,9 @@ export function renderTurnHtml(turn, {
   showIncompleteSummaryHint = false,
   supersededByNextTurn = false,
   hasExternalStreamingReply = false,
+  fallbackModel = "",
+  fallbackEffort = "",
+  goalSuspended = false,
 } = {}) {
   const { normalizedTurn, cleanItems, primaryAgentIndexes } = classifyTurnItems(turn, { hideSyntheticLiveReply });
   const isRunning = suppressRunning
@@ -2660,6 +2786,14 @@ export function renderTurnHtml(turn, {
     }
   }
 
+  const modelBadge = formatTurnModelBadge(normalizedTurn, fallbackModel, fallbackEffort);
+  let processBadgeShown = false;
+  const takeProcessBadge = () => {
+    if (processBadgeShown || !modelBadge) return null;
+    processBadgeShown = true;
+    return modelBadge;
+  };
+
   const parts = [];
   let pendingProcessItems = [];
   const flushProcessGroup = (groupRunning = false, isFinalFlush = false) => {
@@ -2670,6 +2804,7 @@ export function renderTurnHtml(turn, {
       livePhase: groupRunning ? livePhase : "",
       extraReasoning: (!groupRunning && isFinalFlush) ? trailingThought : "",
       threadId,
+      modelBadge: takeProcessBadge(),
     });
     pendingProcessItems = [];
     if (html) parts.push(html);
@@ -2683,7 +2818,7 @@ export function renderTurnHtml(turn, {
       parts.push(renderUserItem(item, { threadId }));
     } else if (item.type === "agentMessage" && primaryAgentIndexes.has(i)) {
       flushProcessGroup(false, false);
-      parts.push(renderAgentMessageItem(item, agentLabel, { forcePrimary: true, threadId }));
+      parts.push(renderAgentMessageItem(item, agentLabel, { forcePrimary: true, threadId, modelBadge }));
     } else if (isTurnProcessItem(item)) {
       pendingProcessItems.push(item);
     }
@@ -2696,6 +2831,7 @@ export function renderTurnHtml(turn, {
       liveThought,
       livePhase,
       threadId,
+      modelBadge: takeProcessBadge(),
     });
     if (syntheticHtml) parts.push(syntheticHtml);
   } else if (!isRunning && String(trailingThought || "").trim()) {
@@ -2703,6 +2839,7 @@ export function renderTurnHtml(turn, {
       isRunning: false,
       extraReasoning: trailingThought,
       threadId,
+      modelBadge: takeProcessBadge(),
     });
     if (syntheticDoneHtml) parts.push(syntheticDoneHtml);
   }
@@ -2719,7 +2856,12 @@ export function renderTurnHtml(turn, {
     if (supersededByNextTurn) {
       parts.push(`<div class="turn-no-summary-hint">已由后续新消息接续处理（本轮无独立汇总）</div>`);
     } else {
-      parts.push(`<div class="turn-no-summary-hint is-incomplete">本轮停在工具执行步（未生成结果汇总，可能在桌面端等待确认或已中断）</div>`);
+      parts.push(`
+        <div class="turn-no-summary-hint is-incomplete">
+          <span>本轮停在工具执行步（未生成结果汇总，可能在桌面端等待确认或已中断）</span>
+          <button type="button" class="turn-resume-inline-btn" data-resume-interrupted-turn="1">${goalSuspended ? "▶ 恢复 Goal" : "▶ 继续执行"}</button>
+        </div>
+      `);
     }
   }
 
@@ -2800,6 +2942,9 @@ export function dedupeAdjacentTurns(turns = []) {
       result[result.length - 1] = {
         ...prev,
         status: turn.status || "inProgress",
+        model: turn.model || prev.model || "",
+        models: (Array.isArray(turn.models) && turn.models.length) ? turn.models : (prev.models || []),
+        effort: turn.effort || prev.effort || "",
         items: mergedItems,
       };
       continue;

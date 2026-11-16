@@ -1084,6 +1084,7 @@ function parseAntigravityTranscriptInternal(lines, { rawId = "", fullLinesMap = 
   let currentTurn = null;
   let pendingToolTargets = [];
   let lastEffectiveStep = null;
+  let lastModel = "";
   const usedTurnIds = new Set();
   const allocUniqueTurnId = (baseId, lineIdx) => {
     const cleanBase = baseId || `agy-turn-${turns.length + 1}`;
@@ -1102,6 +1103,8 @@ function parseAntigravityTranscriptInternal(lines, { rawId = "", fullLinesMap = 
         startedAt: ts || null,
         completedAt: ts || null,
         durationMs: null,
+        model: "",
+        models: [],
       };
       turns.push(currentTurn);
       pendingToolTargets = [];
@@ -1173,6 +1176,8 @@ function parseAntigravityTranscriptInternal(lines, { rawId = "", fullLinesMap = 
         startedAt: ts || null,
         completedAt: ts || null,
         durationMs: null,
+        model: "",
+        models: [],
       };
       turns.push(currentTurn);
       pendingToolTargets = [];
@@ -1182,6 +1187,13 @@ function parseAntigravityTranscriptInternal(lines, { rawId = "", fullLinesMap = 
 
     if (type === "PLANNER_RESPONSE") {
       const turn = ensureTurn(`agy-step-${step.step_index ?? idx}`, ts, idx);
+      const stepModel = String(step.model || "").trim();
+      if (stepModel) {
+        turn.model = stepModel;
+        if (!Array.isArray(turn.models)) turn.models = [];
+        if (!turn.models.includes(stepModel)) turn.models.push(stepModel);
+        lastModel = stepModel;
+      }
       const stepStatus = step.status === "RUNNING" ? "inProgress" : (step.status === "ERROR" ? "failed" : "completed");
       if (stepStatus === "inProgress") turn.status = "inProgress";
       else if (turn.status === "inProgress" && stepStatus === "completed") turn.status = "completed";
@@ -1300,6 +1312,7 @@ function parseAntigravityTranscriptInternal(lines, { rawId = "", fullLinesMap = 
     id: rawId,
     turns,
     lastTurnOpen: isAntigravityStepTurnOpen(lastEffectiveStep),
+    model: lastModel,
   };
 }
 
@@ -1355,7 +1368,7 @@ export async function readAntigravityThreadHistory(appDataDir, rawId, {
   const compactPath = resolve(logsDir, "transcript.jsonl");
   const fullPath = resolve(logsDir, "transcript_full.jsonl");
   const normalizedDetail = detail === "full" ? "full" : "auto";
-  const cacheKey = `${compactPath}|${normalizedDetail}`;
+  const cacheKey = `${compactPath}|${normalizedDetail}|v2`;
 
   const [compactStat, fullStat] = await Promise.all([
     stat(compactPath).catch(() => null),
@@ -1364,6 +1377,7 @@ export async function readAntigravityThreadHistory(appDataDir, rawId, {
 
   let parsedTurns = null;
   let lastTurnOpen = false;
+  let lastModel = "";
   if (compactStat?.isFile()) {
     const fullMtimeMs = fullStat?.isFile() ? fullStat.mtimeMs : 0;
     const fullSize = fullStat?.isFile() ? fullStat.size : 0;
@@ -1379,6 +1393,7 @@ export async function readAntigravityThreadHistory(appDataDir, rawId, {
       parsedTranscriptCache.set(cacheKey, cached);
       parsedTurns = cached.turns;
       lastTurnOpen = Boolean(cached.lastTurnOpen);
+      lastModel = String(cached.model || "");
     } else {
       const compactText = await readFile(compactPath, "utf8").catch(() => "");
       if (compactText) {
@@ -1423,6 +1438,7 @@ export async function readAntigravityThreadHistory(appDataDir, rawId, {
         });
         parsedTurns = parsed.turns;
         lastTurnOpen = parsed.lastTurnOpen;
+        lastModel = String(parsed.model || "");
         if (parsedTranscriptCache.size >= MAX_PARSED_TRANSCRIPT_CACHE) {
           const oldestKey = parsedTranscriptCache.keys().next().value;
           if (oldestKey !== undefined) parsedTranscriptCache.delete(oldestKey);
@@ -1434,6 +1450,7 @@ export async function readAntigravityThreadHistory(appDataDir, rawId, {
           fullSize,
           turns: parsedTurns,
           lastTurnOpen,
+          model: lastModel,
         });
       }
     }
@@ -1471,6 +1488,7 @@ export async function readAntigravityThreadHistory(appDataDir, rawId, {
       ...(indexedThread || {}),
       id: rawId,
       cwd: indexedThread?.cwd || os.homedir(),
+      model: lastModel || indexedThread?.model || "",
       firstUserText: fullFirstUser || indexedThread?.firstUserText || "",
       lastUserText: fullLastUser || indexedThread?.lastUserText || "",
       hasFollowUpTurns: Boolean(hasFollowUpTurns || indexedThread?.hasFollowUpTurns),

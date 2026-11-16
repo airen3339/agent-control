@@ -5,7 +5,8 @@ import {
   normalizeCodexUserMessageItem,
 } from "../codex-input-clean.mjs";
 
-const DEFAULT_TAIL_BYTES = 64 * 1024 * 1024;
+const DEFAULT_TAIL_BYTES = 512 * 1024;
+const DEFAULT_MAX_SCAN_BYTES = 64 * 1024 * 1024;
 const CURSOR_PREFIX = "tail:";
 const DUPLICATE_MESSAGE_WINDOW_MS = 2_000;
 const PREVIEW_EVENT_TYPES = new Set([
@@ -29,6 +30,7 @@ function previewRecordType(record) {
     if (payload.role === "user") return "response_user_message";
     if (payload.role === "assistant") return "response_agent_message";
   }
+  if (record?.type === "turn_context") return "turn_context";
   return "";
 }
 
@@ -190,13 +192,30 @@ function isMessageRecordType(type) {
 
 function previewTurns(records, limit, { automationNames = null } = {}) {
   const turns = [];
+  const turnById = new Map();
   let current = null;
+  let pendingTurnCtx = null;
   let previousMessage = null;
   let sequence = 0;
   for (const { record, offset } of records) {
     const payload = record.payload || {};
     const type = previewRecordType(record);
+    if (type === "turn_context") {
+      const targetId = String(payload.turn_id || "").trim();
+      const targetTurn = targetId ? (turnById.get(targetId) || (current?.id === targetId ? current : null)) : current;
+      const ctxModel = String(payload.model || "").trim();
+      const ctxEffort = String(payload.effort || payload.reasoning_effort || "").trim().toLowerCase();
+      if (targetTurn) {
+        if (ctxModel) targetTurn.model = ctxModel;
+        if (ctxEffort) targetTurn.effort = ctxEffort;
+      } else if (targetId) {
+        pendingTurnCtx = { turnId: targetId, model: ctxModel, effort: ctxEffort };
+      }
+      continue;
+    }
     if (type === "task_started" && payload.turn_id) {
+      const matchedCtx = pendingTurnCtx?.turnId === payload.turn_id ? pendingTurnCtx : null;
+      pendingTurnCtx = null;
       current = {
         id: payload.turn_id,
         items: [],
@@ -206,9 +225,12 @@ function previewTurns(records, limit, { automationNames = null } = {}) {
         startedAt: payload.started_at || timestampSeconds(record),
         completedAt: null,
         durationMs: null,
+        ...(matchedCtx?.model ? { model: matchedCtx.model } : {}),
+        ...(matchedCtx?.effort ? { effort: matchedCtx.effort } : {}),
         _offset: offset,
       };
       turns.push(current);
+      turnById.set(current.id, current);
       previousMessage = null;
       sequence = 0;
       continue;
@@ -255,7 +277,7 @@ export async function readLargeThreadPreview(path, {
   endOffset = null,
   limit = 12,
   maxBytes = DEFAULT_TAIL_BYTES,
-  maxScanBytes = Math.max(DEFAULT_TAIL_BYTES * 4, maxBytes * 4),
+  maxScanBytes = Math.max(DEFAULT_MAX_SCAN_BYTES, maxBytes * 4),
   automationNames = null,
 } = {}) {
   const file = await open(path, "r");
@@ -289,7 +311,8 @@ export async function readLargeThreadPreview(path, {
         const mayBeEvent = line.includes('"type":"event_msg"');
         const mayBeMessage = line.includes('"type":"response_item"')
           && line.includes('"payload":{"type":"message"');
-        if (!mayBeEvent && !mayBeMessage) continue;
+        const mayBeTurnCtx = line.includes('"type":"turn_context"');
+        if (!mayBeEvent && !mayBeMessage && !mayBeTurnCtx) continue;
         let record;
         try { record = JSON.parse(line); } catch { continue; }
         if (previewRecordType(record)) {

@@ -604,6 +604,8 @@ export class ClaudeTurnManager extends EventEmitter {
         id: turnId,
         status: "inProgress",
         startedAt: run.startedAt,
+        model: model || "",
+        effort: effort || "",
         items: [{
           type: "userMessage",
           id: `user-${turnId}`,
@@ -1053,8 +1055,11 @@ export async function probeClaudeProfile({
       const emailArg = boundEmail ? ` --email ${boundEmail}` : "";
       if (auth.loggedIn) {
         if (boundEmail && auth.email && auth.email.toLowerCase() !== boundEmail.toLowerCase()) {
+          const targetConfigDir = (!profile?.isDesktopInstance && profileId === "default")
+            ? "~/.claude-default"
+            : `~/.claude-${profileId}`;
           throw new Error(
-            `401 CLI未登录目标账号：默认 CLI 当前登录为 ${auth.email}，与该实例绑定的 ${boundEmail} 不一致；请在终端执行 CLAUDE_CONFIG_DIR=~/.claude-${profileId} claude auth login${emailArg}`,
+            `401 CLI未登录目标账号：默认 CLI 当前登录为 ${auth.email}，与该实例绑定的 ${boundEmail} 不一致；请在终端执行 CLAUDE_CONFIG_DIR=${targetConfigDir} claude auth login${emailArg}`,
           );
         }
         return {
@@ -1065,11 +1070,11 @@ export async function probeClaudeProfile({
       }
       if (profile?.isDesktopInstance) {
         throw new Error(
-          `401 CLI未登录：Claude 桌面端登录态与 CLI 隔离（桌面历史可正常读取）；请在终端执行 claude auth login${emailArg}（双账号隔离可用 CLAUDE_CONFIG_DIR=~/.claude-${profileId} claude auth login${emailArg}）`,
+          `401 CLI未登录：已识别桌面账号，但 CLI 需要单独授权；请使用对应桌面账号完成登录，在终端执行 CLAUDE_CONFIG_DIR=~/.claude-${profileId} claude auth login${emailArg}`,
         );
       }
       throw new Error(
-        `401 CLI未登录：Claude 桌面端登录态与 CLI 隔离（桌面历史可正常读取）；请在终端执行 claude auth login${emailArg}`,
+        `401 CLI未登录：Claude 桌面 App 内置登录态不写入终端 CLI 凭证（桌面历史可正常读取）；请在终端执行 claude auth login${emailArg}`,
       );
     }
   }

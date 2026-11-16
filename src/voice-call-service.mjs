@@ -183,6 +183,115 @@ export function pickPreferredHydrogenModel(models = [], preferredOverride = "") 
   return DEFAULT_VOICE_HYDROGEN_MODEL;
 }
 
+export const VOICE_LIGHT_PROVIDER_PRIORITY = Object.freeze(["antigravity", "claude", "codex", "grok"]);
+
+function voiceModelScoreForProvider(provider, item) {
+  const id = String(item?.id || item?.model || "").trim().toLowerCase();
+  const text = `${id} ${item?.displayName || ""} ${item?.description || ""}`.toLowerCase();
+  const effort = String(item?.defaultReasoningEffort || "").toLowerCase();
+  if (provider === "antigravity") {
+    if (id === DEFAULT_VOICE_HYDROGEN_MODEL) return 1000;
+    if (text.includes("hydrogen") && (effort === "low" || /\b(low|fast|lite)\b|-low\b/.test(text))) return 900;
+    if (text.includes("hydrogen")) return 820;
+    if (/\bflash\b|\bargon\b/.test(text)) return 760;
+    if (/(orchestrator|carbon|opus)/.test(text)) return 200;
+    return 500;
+  }
+  if (provider === "claude") {
+    if (id === "claude-haiku-5-5") return 960;
+    if (id === "claude-haiku-4-5") return 940;
+    if (text.includes("haiku")) return 920;
+    if (/\b(fast|mini|flash|lite)\b/.test(text)) return 800;
+    if (text.includes("sonnet")) return 600;
+    if (text.includes("opus")) return 250;
+    return 450;
+  }
+  if (provider === "codex") {
+    if (/\bmini\b/.test(text) && !text.includes("preview")) return 950;
+    if (/\b(mini|spark|nano|fast|lite)\b/.test(text)) return 900;
+    if (effort === "low") return 760;
+    if (item?.isDefault) return 680;
+    if (/\bmax\b|\bxhigh\b|\bpro\b/.test(text)) return 300;
+    return 500;
+  }
+  if (provider === "grok") {
+    if (/\b(mini|fast|lite|small)\b/.test(text)) return 900;
+    if (item?.isDefault) return 700;
+    return 500;
+  }
+  return item?.isDefault ? 600 : 400;
+}
+
+export function pickPreferredVoiceModel(provider, models = [], preferredOverride = "") {
+  const override = String(preferredOverride || "").trim();
+  if (override) return override;
+  const prov = String(provider || "").trim().toLowerCase();
+  if (prov === "local") return "local-rules";
+  if (prov === "antigravity") return pickPreferredHydrogenModel(models, "");
+  const list = (Array.isArray(models) ? models : [])
+    .map((m) => (typeof m === "string"
+      ? { id: m.trim(), displayName: m.trim(), description: "", defaultReasoningEffort: "", isDefault: false }
+      : {
+          id: String(m?.id || m?.model || "").trim(),
+          displayName: String(m?.displayName || m?.model || m?.id || "").trim(),
+          description: String(m?.description || ""),
+          defaultReasoningEffort: String(m?.defaultReasoningEffort || ""),
+          isDefault: Boolean(m?.isDefault),
+        }))
+    .filter((m) => Boolean(m.id));
+  if (list.length > 0) {
+    const ranked = [...list].sort((a, b) => voiceModelScoreForProvider(prov, b) - voiceModelScoreForProvider(prov, a));
+    return ranked[0].id;
+  }
+  if (prov === "claude") return "claude-haiku-4-5";
+  if (prov === "codex") return "gpt-5.4-mini";
+  if (prov === "grok") return "grok-3-mini";
+  return "";
+}
+
+function voiceProviderDisplayName(provider) {
+  switch (String(provider || "").toLowerCase()) {
+    case "antigravity":
+      return "Antigravity";
+    case "codex":
+      return "Codex";
+    case "claude":
+      return "Claude";
+    case "grok":
+      return "Grok";
+    case "local":
+      return "本机规则";
+    default:
+      return String(provider || "AI");
+  }
+}
+
+function formatVoiceModelShortName(provider, model) {
+  const prov = String(provider || "").toLowerCase();
+  const raw = String(model || "").trim();
+  if (prov === "local" || raw === "local-rules") return "本地规则";
+  if (!raw) return voiceProviderDisplayName(prov);
+  if (/hydrogen/i.test(raw)) return "Hydrogen";
+  if (/haiku/i.test(raw)) return raw.replace(/^claude-/i, "").replace(/-(\d)/g, " $1");
+  return raw.replace(/^gemini-\d+(?:\.\d+)?-/i, "");
+}
+
+function buildLocalSubagentSummary({ instruction = "", snapshot = {}, threadSnippet = "" } = {}) {
+  const cleanAsk = stripSpeechNoise(instruction, 48);
+  const parts = [];
+  if (threadSnippet) {
+    parts.push(`当前聚焦会话最新结论是：${stripSpeechNoise(threadSnippet, 140)}。`);
+  }
+  const briefing = summarizeFallbackBriefing(snapshot, { askResult: true });
+  if (briefing) parts.push(briefing);
+  if (!parts.length) {
+    parts.push(cleanAsk
+      ? `关于「${cleanAsk}」，当前处于本机轻量规则模式，暂时未连接外部推理模型。你可以在顶部切换 Claude、Codex 或 Antigravity 轻量模型来获取深度分析。`
+      : "当前处于本机规则模式，所有语音播报与快捷调度均正常运行。");
+  }
+  return parts.join(" ");
+}
+
 function extensionForAudioMime(mimeType = "") {
   const low = String(mimeType || "").toLowerCase();
   if (low.includes("mpeg") || low.includes("mp3")) return "mp3";
@@ -1242,9 +1351,9 @@ export function buildDeterministicVoicePlan({
       executionTier: "subagent_hydrogen",
       targetProjectCwd: activeThread?.cwd || "",
       targetThreadId: activeThreadId || snapshot?.activeThreadId || "",
-      provider: "antigravity",
+      provider: route.provider || "",
       model: route.model,
-      explicitFastHydrogen: true,
+      explicitFastHydrogen: route.explicitFastHydrogen,
       instruction: clean,
       spokenReply: "好的，这个需要一点时间处理，我先开一个 Hydrogen 子代理帮你做，过程中会持续同步进展，有结果马上反馈给你。",
     };
@@ -1336,12 +1445,14 @@ export class VoiceCallService {
   #clientAppDataDir = "";
   #initClientPromise = null;
   #modelsCache = null;
+  #hubModelsCache = new Map();
   #calls = new Map();
   #callStates = new Map();
   #ttsCache = new Map();
   #pendingDispatchPromises = new Set();
   #activeSessionTurn = new Map();
   #activeSubagentSessions = new Map();
+  #pendingSubagentThreads = new Map();
   #turnQueue = Promise.resolve();
   #subagentProgressIntervalMs = 18_000;
   #subagentMinFeedbackGapMs = 12_000;
@@ -1394,6 +1505,346 @@ export class VoiceCallService {
       }
     }
     return pickPreferredHydrogenModel(this.#modelsCache.items);
+  }
+
+  #hasLocalWhisperRuntime() {
+    const explicitBin = String(this.#env?.VOICE_ASR_BIN || process.env.VOICE_ASR_BIN || "").trim();
+    if (explicitBin) return true;
+    if (process.platform !== "darwin") return false;
+    const pyBin = String(this.#env?.VOICE_PYTHON_BIN || "").trim();
+    if (pyBin) return existsSync(pyBin);
+    return existsSync("/opt/homebrew/bin/python3.12") || existsSync("/usr/bin/python3");
+  }
+
+  async #listModelsForProviderSafe(provider) {
+    const prov = String(provider || "").trim().toLowerCase();
+    const cached = this.#hubModelsCache.get(prov);
+    if (cached && Date.now() - cached.at < MODEL_CACHE_TTL_MS) {
+      return cached.items;
+    }
+    let items = [];
+    if (prov === "antigravity") {
+      try {
+        items = await Promise.race([
+          listAgyModelsFromCli({ env: this.#env, execFileImpl: this.#execFile }),
+          new Promise((res) => setTimeout(() => res([]), 1500)),
+        ]);
+      } catch {
+        items = [];
+      }
+      if (!Array.isArray(items) || !items.length) {
+        items = [...FALLBACK_AGY_MODELS];
+      }
+    } else if (typeof this.#hub?.listModels === "function") {
+      try {
+        const res = await Promise.race([
+          this.#hub.listModels(prov),
+          new Promise((res) => setTimeout(() => res(null), 1500)),
+        ]);
+        items = Array.isArray(res?.items) ? res.items : (Array.isArray(res) ? res : []);
+      } catch {
+        items = [];
+      }
+    }
+    if (items.length > 0) {
+      this.#hubModelsCache.set(prov, { at: Date.now(), items });
+    }
+    return items;
+  }
+
+  async #getInstalledVoiceProfiles() {
+    if (typeof this.#hub?.listProvidersAndProfiles === "function") {
+      try {
+        const payload = await this.#hub.listProvidersAndProfiles();
+        const profiles = Array.isArray(payload?.profiles) ? payload.profiles : [];
+        return profiles.filter((p) => p?.installed !== false && !p?.health?.disabled && p?.health?.status !== "unavailable");
+      } catch {}
+    }
+    const agyProfiles = await discoverAntigravityProfiles({ env: this.#env }).catch(() => []);
+    return agyProfiles.filter((p) => p?.installed !== false && !p?.health?.disabled);
+  }
+
+  async listVoiceModelOptions({
+    voiceProvider = "",
+    voiceModel = "",
+    voiceProfileId = "",
+  } = {}) {
+    const installedProfiles = await this.#getInstalledVoiceProfiles();
+    const byProvider = new Map();
+    for (const p of installedProfiles) {
+      const prov = String(p?.provider || "").toLowerCase();
+      if (!prov || !VOICE_LIGHT_PROVIDER_PRIORITY.includes(prov)) continue;
+      if (!byProvider.has(prov)) byProvider.set(prov, []);
+      byProvider.get(prov).push(p);
+    }
+
+    const availableProviders = VOICE_LIGHT_PROVIDER_PRIORITY.filter((prov) => byProvider.has(prov));
+    const modelsEntries = await Promise.all(
+      availableProviders.map(async (prov) => [prov, await this.#listModelsForProviderSafe(prov)]),
+    );
+    const modelsByProvider = new Map(modelsEntries);
+
+    const options = [
+      {
+        key: "auto",
+        provider: "auto",
+        profileId: "",
+        model: "",
+        label: "自动优选轻量模型",
+        shortLabel: "自动轻量",
+        description: "优先使用本机已登录的轻量模型（Hydrogen / Haiku / Mini）",
+      },
+    ];
+
+    for (const prov of availableProviders) {
+      const profiles = byProvider.get(prov) || [];
+      const chosenProfile = profiles.find((p) => p.authenticated !== false) || profiles[0];
+      const profileId = chosenProfile?.id || (prov === "antigravity" ? "cli" : "default");
+      const rawModels = modelsByProvider.get(prov) || [];
+      const preferredModelId = pickPreferredVoiceModel(prov, rawModels, "");
+      const deduped = [];
+      const seenIds = new Set();
+
+      if (preferredModelId) {
+        const hit = rawModels.find((m) => (m?.id || m?.model) === preferredModelId);
+        seenIds.add(preferredModelId);
+        deduped.push({
+          id: preferredModelId,
+          displayName: hit?.displayName || formatVoiceModelShortName(prov, preferredModelId),
+          isLight: true,
+          effort: /\b(low|fast|lite|mini|haiku|spark)\b/i.test(preferredModelId) ? "low" : "",
+        });
+      }
+      const ranked = [...rawModels].sort((a, b) => voiceModelScoreForProvider(prov, b) - voiceModelScoreForProvider(prov, a));
+      for (const m of ranked) {
+        const id = String(m?.id || m?.model || "").trim();
+        if (!id || seenIds.has(id)) continue;
+        seenIds.add(id);
+        deduped.push({
+          id,
+          displayName: m?.displayName || formatVoiceModelShortName(prov, id),
+          isLight: voiceModelScoreForProvider(prov, m) >= 750,
+          effort: String(m?.defaultReasoningEffort || ""),
+        });
+        if (deduped.length >= 6) break;
+      }
+
+      if (!deduped.length) {
+        const fallbackId = pickPreferredVoiceModel(prov, [], "");
+        if (fallbackId) {
+          deduped.push({
+            id: fallbackId,
+            displayName: formatVoiceModelShortName(prov, fallbackId),
+            isLight: true,
+            effort: "low",
+          });
+        }
+      }
+
+      const provName = voiceProviderDisplayName(prov);
+      for (const item of deduped) {
+        const key = `${prov}:${profileId}:${item.id}`;
+        const shortName = formatVoiceModelShortName(prov, item.id);
+        options.push({
+          key,
+          provider: prov,
+          profileId,
+          model: item.id,
+          effort: item.effort || "",
+          isLight: Boolean(item.isLight),
+          label: `${provName} · ${item.displayName}${item.isLight ? " (轻量)" : ""}`,
+          shortLabel: prov === "antigravity" && /hydrogen/i.test(item.id)
+            ? "Hydrogen"
+            : `${provName} · ${shortName}`,
+        });
+      }
+    }
+
+    options.push({
+      key: "local:local-rules",
+      provider: "local",
+      profileId: "",
+      model: "local-rules",
+      effort: "",
+      isLight: true,
+      label: "仅本机规则（零模型）",
+      shortLabel: "本机规则",
+      description: "无需 Gemini 或任何外部分析模型，纯本地状态总结与语音操控",
+    });
+
+    const resolved = await this.resolveVoiceTarget({
+      voiceProvider,
+      voiceModel,
+      voiceProfileId,
+      _installedProfiles: installedProfiles,
+      _modelsByProvider: modelsByProvider,
+    });
+
+    return {
+      options,
+      resolved,
+    };
+  }
+
+  async resolveVoiceTarget({
+    callId = "",
+    voiceProvider = "",
+    voiceModel = "",
+    voiceProfileId = "",
+    _installedProfiles = null,
+    _modelsByProvider = null,
+  } = {}) {
+    const callPref = callId ? this.#callStates.get(callId)?.voicePref : null;
+    const rawProvider = String(
+      voiceProvider
+      || callPref?.voiceProvider
+      || this.#env?.AGENT_CONTROL_VOICE_PROVIDER
+      || "",
+    ).trim().toLowerCase();
+    const rawModel = String(
+      voiceModel
+      || callPref?.voiceModel
+      || this.#env?.AGENT_CONTROL_VOICE_MODEL
+      || "",
+    ).trim();
+    const rawProfileId = String(voiceProfileId || callPref?.voiceProfileId || "").trim();
+
+    if (rawProvider === "local" || rawModel === "local-rules") {
+      return {
+        selectionKey: "local:local-rules",
+        provider: "local",
+        profileId: "",
+        model: "local-rules",
+        effort: "",
+        shortLabel: "本机规则",
+        displayName: "本机规则",
+      };
+    }
+
+    const installedProfiles = _installedProfiles || await this.#getInstalledVoiceProfiles();
+    const hasProviderList = installedProfiles.length > 0;
+
+    const pickProfileFor = (prov) => {
+      const candidates = installedProfiles.filter((p) => String(p?.provider || "").toLowerCase() === prov);
+      if (rawProfileId) {
+        const exact = candidates.find((p) => p.id === rawProfileId);
+        if (exact) return exact;
+      }
+      return candidates.find((p) => p.authenticated !== false) || candidates[0] || null;
+    };
+
+    const getModelsFor = async (prov) => {
+      if (_modelsByProvider?.has(prov)) return _modelsByProvider.get(prov);
+      return this.#listModelsForProviderSafe(prov);
+    };
+
+    if (rawProvider && rawProvider !== "auto") {
+      const prof = pickProfileFor(rawProvider);
+      const models = await getModelsFor(rawProvider);
+      const chosenModel = rawProvider === "antigravity"
+        ? (rawModel || await this.resolveHydrogenModel().catch(() => DEFAULT_VOICE_HYDROGEN_MODEL))
+        : pickPreferredVoiceModel(rawProvider, models, rawModel);
+      const effort = /\b(low|fast|lite|mini|haiku|spark)\b|-low\b/i.test(chosenModel) ? "low" : "";
+      const shortName = formatVoiceModelShortName(rawProvider, chosenModel);
+      return {
+        selectionKey: `${rawProvider}:${prof?.id || rawProfileId || "default"}:${chosenModel}`,
+        provider: rawProvider,
+        profileId: prof?.id || rawProfileId || (rawProvider === "antigravity" ? "cli" : "default"),
+        model: chosenModel,
+        effort,
+        shortLabel: rawProvider === "antigravity" && /hydrogen/i.test(chosenModel) ? "Hydrogen" : `${voiceProviderDisplayName(rawProvider)} · ${shortName}`,
+        displayName: `${voiceProviderDisplayName(rawProvider)} (${shortName})`,
+      };
+    }
+
+    if (rawModel) {
+      const inferredProvider = /claude|haiku|sonnet|opus/i.test(rawModel)
+        ? "claude"
+        : (/gpt|codex|o1|o3|o4|spark/i.test(rawModel) ? "codex" : (/grok/i.test(rawModel) ? "grok" : "antigravity"));
+      const prof = pickProfileFor(inferredProvider);
+      const effort = /\b(low|fast|lite|mini|haiku|spark)\b|-low\b/i.test(rawModel) ? "low" : "";
+      const shortName = formatVoiceModelShortName(inferredProvider, rawModel);
+      return {
+        selectionKey: `${inferredProvider}:${prof?.id || "default"}:${rawModel}`,
+        provider: inferredProvider,
+        profileId: prof?.id || (inferredProvider === "antigravity" ? "cli" : "default"),
+        model: rawModel,
+        effort,
+        shortLabel: inferredProvider === "antigravity" && /hydrogen/i.test(rawModel) ? "Hydrogen" : `${voiceProviderDisplayName(inferredProvider)} · ${shortName}`,
+        displayName: `${voiceProviderDisplayName(inferredProvider)} (${shortName})`,
+      };
+    }
+
+    // "auto": pick best available authenticated lightweight provider
+    const hasExplicitOrMockAgy = basename(agyExecutable(this.#env) || "").includes("mock-agy");
+    if (hasProviderList) {
+      // First pass: prefer authenticated providers in priority order
+      for (const prov of VOICE_LIGHT_PROVIDER_PRIORITY) {
+        const candidates = installedProfiles.filter((p) => String(p?.provider || "").toLowerCase() === prov);
+        const authed = candidates.find((p) => p.authenticated !== false);
+        if (authed) {
+          const models = await getModelsFor(prov);
+          const chosenModel = prov === "antigravity"
+            ? await this.resolveHydrogenModel().catch(() => DEFAULT_VOICE_HYDROGEN_MODEL)
+            : pickPreferredVoiceModel(prov, models, "");
+          const effort = /\b(low|fast|lite|mini|haiku|spark)\b|-low\b/i.test(chosenModel) ? "low" : "";
+          const shortName = formatVoiceModelShortName(prov, chosenModel);
+          return {
+            selectionKey: "auto",
+            provider: prov,
+            profileId: authed.id || (prov === "antigravity" ? "cli" : "default"),
+            model: chosenModel,
+            effort,
+            shortLabel: prov === "antigravity" && /hydrogen/i.test(chosenModel) ? "Hydrogen" : `${voiceProviderDisplayName(prov)} · ${shortName}`,
+            displayName: `${voiceProviderDisplayName(prov)} (${shortName})`,
+          };
+        }
+      }
+      // Second pass: installed even if auth metadata unknown
+      for (const prov of VOICE_LIGHT_PROVIDER_PRIORITY) {
+        const first = installedProfiles.find((p) => String(p?.provider || "").toLowerCase() === prov);
+        if (first) {
+          const models = await getModelsFor(prov);
+          const chosenModel = prov === "antigravity"
+            ? await this.resolveHydrogenModel().catch(() => DEFAULT_VOICE_HYDROGEN_MODEL)
+            : pickPreferredVoiceModel(prov, models, "");
+          const effort = /\b(low|fast|lite|mini|haiku|spark)\b|-low\b/i.test(chosenModel) ? "low" : "";
+          const shortName = formatVoiceModelShortName(prov, chosenModel);
+          return {
+            selectionKey: "auto",
+            provider: prov,
+            profileId: first.id || (prov === "antigravity" ? "cli" : "default"),
+            model: chosenModel,
+            effort,
+            shortLabel: prov === "antigravity" && /hydrogen/i.test(chosenModel) ? "Hydrogen" : `${voiceProviderDisplayName(prov)} · ${shortName}`,
+            displayName: `${voiceProviderDisplayName(prov)} (${shortName})`,
+          };
+        }
+      }
+    }
+
+    if (hasExplicitOrMockAgy || typeof this.#hub?.listProvidersAndProfiles !== "function") {
+      const model = await this.resolveHydrogenModel().catch(() => DEFAULT_VOICE_HYDROGEN_MODEL);
+      return {
+        selectionKey: "auto",
+        provider: "antigravity",
+        profileId: "cli",
+        model,
+        effort: /\b(low|fast|lite)\b|-low\b/i.test(model) ? "low" : "",
+        shortLabel: "Hydrogen",
+        displayName: "Antigravity (Hydrogen)",
+      };
+    }
+
+    return {
+      selectionKey: "local:local-rules",
+      provider: "local",
+      profileId: "",
+      model: "local-rules",
+      effort: "",
+      shortLabel: "本机规则",
+      displayName: "本机规则",
+    };
   }
 
   async #resolveTaskModelAndEffort({
@@ -1795,79 +2246,174 @@ export class VoiceCallService {
     };
   }
 
-  async startCall({ callId = "" } = {}) {
+  async startCall({
+    callId = "",
+    voiceProvider = "",
+    voiceModel = "",
+    voiceProfileId = "",
+  } = {}) {
     const cleanCallId = String(callId || "").trim() || `call-${randomUUID().slice(0, 8)}`;
-    this.#ensureCallState(cleanCallId);
+    const callState = this.#ensureCallState(cleanCallId);
+    if (voiceProvider || voiceModel || voiceProfileId) {
+      callState.voicePref = {
+        voiceProvider: String(voiceProvider || "").trim(),
+        voiceModel: String(voiceModel || "").trim(),
+        voiceProfileId: String(voiceProfileId || "").trim(),
+      };
+    } else if (!callState.voicePref) {
+      callState.voicePref = { voiceProvider: "", voiceModel: "", voiceProfileId: "" };
+    }
+    const activePref = callState.voicePref;
     const hasExplicitAsrBin = Boolean(String(this.#env?.VOICE_ASR_BIN || "").trim());
     const agyBinName = basename(agyExecutable(this.#env) || "");
     const isMockAgy = agyBinName.includes("mock-agy");
     let model = "";
     let dispatchModel = DEFAULT_VOICE_HYDROGEN_MODEL;
+    let dispatchProvider = "antigravity";
+    let dispatchProfileId = "";
+    let dispatchLabel = "Hydrogen";
+    let modelOptions = [];
+    let selectedVoiceOption = activePref.voiceProvider === "local"
+      ? "local:local-rules"
+      : (activePref.voiceProvider && activePref.voiceProvider !== "auto" && activePref.voiceModel
+          ? `${activePref.voiceProvider}:${activePref.voiceProfileId || "default"}:${activePref.voiceModel}`
+          : "auto");
+    let asrAvailable = true;
+    let asrEngine = hasExplicitAsrBin ? "mock-whisper" : "mlx-whisper";
     let warmed = false;
     let warning = "";
 
+    const catalogPromise = Promise.race([
+      this.listVoiceModelOptions(activePref).catch(() => null),
+      new Promise((resolveTimeout) => setTimeout(() => resolveTimeout(null), 2500)),
+    ]);
+
     if (!isMockAgy || hasExplicitAsrBin) {
-      model = hasExplicitAsrBin ? "mock-whisper" : "mlx-whisper";
-      const warmDispatchPromise = Promise.race([
-        this.resolveHydrogenModel().catch(() => DEFAULT_VOICE_HYDROGEN_MODEL),
-        new Promise((resolveTimeout) => setTimeout(() => resolveTimeout(DEFAULT_VOICE_HYDROGEN_MODEL), 2500)),
-      ]);
-      const asrWarmPromise = this.#ensureAsrWorker();
-      asrWarmPromise.catch(() => {});
-      try {
-        const [, resolvedDispatchModel] = await Promise.all([
-          Promise.race([
-            asrWarmPromise,
-            new Promise((resolveWarm) => setTimeout(resolveWarm, 3_500)),
-          ]),
-          warmDispatchPromise,
-        ]);
-        dispatchModel = resolvedDispatchModel || DEFAULT_VOICE_HYDROGEN_MODEL;
+      const canWhisper = this.#hasLocalWhisperRuntime();
+      if (!canWhisper) {
+        model = "browser-speech";
+        asrAvailable = false;
+        asrEngine = "browser";
         warmed = true;
-      } catch (error) {
-        warning = error?.message || "本地 Whisper 预热暂不可用";
-        dispatchModel = await warmDispatchPromise.catch(() => DEFAULT_VOICE_HYDROGEN_MODEL);
+        const catalog = await catalogPromise;
+        if (catalog?.resolved) {
+          dispatchProvider = catalog.resolved.provider;
+          dispatchProfileId = catalog.resolved.profileId;
+          dispatchModel = catalog.resolved.model;
+          dispatchLabel = catalog.resolved.shortLabel;
+          selectedVoiceOption = catalog.resolved.selectionKey || selectedVoiceOption;
+        }
+        modelOptions = catalog?.options || [];
+      } else {
+        model = hasExplicitAsrBin ? "mock-whisper" : "mlx-whisper";
+        const asrWarmPromise = this.#ensureAsrWorker();
+        asrWarmPromise.catch(() => {});
+        let asrWarmResult = "ok";
+        try {
+          const [warmOutcome, catalog] = await Promise.all([
+            Promise.race([
+              asrWarmPromise.then(() => "ok"),
+              new Promise((resolveWarm) => setTimeout(() => resolveWarm("timeout"), 3_500)),
+            ]),
+            catalogPromise,
+          ]);
+          asrWarmResult = warmOutcome;
+          if (catalog?.resolved) {
+            dispatchProvider = catalog.resolved.provider;
+            dispatchProfileId = catalog.resolved.profileId;
+            dispatchModel = catalog.resolved.model;
+            dispatchLabel = catalog.resolved.shortLabel;
+            selectedVoiceOption = catalog.resolved.selectionKey || selectedVoiceOption;
+          }
+          modelOptions = catalog?.options || [];
+          warmed = asrWarmResult === "ok";
+          if (asrWarmResult === "timeout") {
+            warning = "本地语音识别正在加载，稍候片刻即可使用";
+          }
+        } catch (error) {
+          asrAvailable = false;
+          asrEngine = "browser";
+          model = "browser-speech";
+          warning = error?.message || "本地 Whisper 暂不可用，已切换浏览器/文本识别模式";
+          const catalog = await catalogPromise;
+          if (catalog?.resolved) {
+            dispatchProvider = catalog.resolved.provider;
+            dispatchProfileId = catalog.resolved.profileId;
+            dispatchModel = catalog.resolved.model;
+            dispatchLabel = catalog.resolved.shortLabel;
+            selectedVoiceOption = catalog.resolved.selectionKey || selectedVoiceOption;
+          }
+          modelOptions = catalog?.options || [];
+        }
       }
     } else {
-      model = await this.resolveHydrogenModel();
-      dispatchModel = model;
-      try {
-        const client = await this.#ensureClient();
-        let entry = this.#calls.get(cleanCallId);
-        if (!entry) {
-          const created = await client.newSession({ cwd: this.#workspaceDir });
-          const sessionId = String(created?.sessionId || "");
-          if (!sessionId) throw new Error("Antigravity 未返回语音通话会话 ID");
-          await client.configureSession(sessionId, {
-            model,
-            effort: "low",
-            permissionMode: "turbo",
-          });
-          entry = {
-            callId: cleanCallId,
-            sessionId,
-            model,
-            createdAt: Date.now(),
-            lastUsedAt: Date.now(),
-          };
-          this.#calls.set(cleanCallId, entry);
-          this.#trimCallCache();
-        } else {
-          entry.lastUsedAt = Date.now();
+      const catalog = await catalogPromise;
+      if (catalog?.resolved) {
+        dispatchProvider = catalog.resolved.provider;
+        dispatchProfileId = catalog.resolved.profileId;
+        dispatchModel = catalog.resolved.model;
+        dispatchLabel = catalog.resolved.shortLabel;
+        selectedVoiceOption = catalog.resolved.selectionKey || selectedVoiceOption;
+      } else {
+        dispatchModel = await this.resolveHydrogenModel();
+      }
+      modelOptions = catalog?.options || [];
+      model = dispatchModel;
+      asrEngine = "multimodal-acp";
+      if (dispatchProvider === "antigravity") {
+        try {
+          const client = await this.#ensureClient();
+          let entry = this.#calls.get(cleanCallId);
+          if (!entry) {
+            const created = await client.newSession({ cwd: this.#workspaceDir });
+            const sessionId = String(created?.sessionId || "");
+            if (!sessionId) throw new Error("Antigravity 未返回语音通话会话 ID");
+            await client.configureSession(sessionId, {
+              model: dispatchModel,
+              effort: "low",
+              permissionMode: "turbo",
+            });
+            entry = {
+              callId: cleanCallId,
+              sessionId,
+              model: dispatchModel,
+              createdAt: Date.now(),
+              lastUsedAt: Date.now(),
+            };
+            this.#calls.set(cleanCallId, entry);
+            this.#trimCallCache();
+          } else {
+            entry.lastUsedAt = Date.now();
+          }
+          warmed = true;
+        } catch (error) {
+          warning = error?.message || "Hydrogen 预热暂不可用";
         }
+      } else {
         warmed = true;
-      } catch (error) {
-        warning = error?.message || "Hydrogen 预热暂不可用";
       }
     }
 
     const ttsBin = resolveEdgeTtsExecutable(this.#env);
     const sayBin = resolveMacSayExecutable(this.#env);
+    callState.resolvedTarget = {
+      provider: dispatchProvider,
+      profileId: dispatchProfileId,
+      model: dispatchModel,
+      shortLabel: dispatchLabel,
+    };
     return {
       ok: true,
       callId: cleanCallId,
       model,
+      dispatchProvider,
+      dispatchProfileId,
       dispatchModel,
+      dispatchLabel,
+      selectedVoiceOption,
+      modelOptions,
+      asrAvailable,
+      asrEngine,
       warmed,
       ttsEngine: ttsBin ? "edge-tts" : (sayBin ? "macos-say" : "browser"),
       ...(warning ? { warning } : {}),
@@ -2281,17 +2827,31 @@ export class VoiceCallService {
 
     if (intent === "subagent_hydrogen") {
       const taskText = plan.instruction || plan.heardText || "";
+      const callState = callId ? this.#callStates.get(callId) : null;
+      const voicePref = callState?.voicePref || {};
+      const resolvedProv = callState?.resolvedTarget?.provider || "";
+      const fallbackProv = VOICE_LIGHT_PROVIDER_PRIORITY.find((p) =>
+        (snapshot?.availableProfiles || []).some((prof) => prof.provider === p && prof.authenticated !== false),
+      ) || "";
+      const prefProv = String(plan.provider || voicePref.voiceProvider || resolvedProv || fallbackProv || "").trim().toLowerCase();
+      const useHydrogenNaming = !prefProv || prefProv === "auto" || prefProv === "antigravity";
+      const subagentLabel = prefProv === "local"
+        ? "本机规则"
+        : (useHydrogenNaming ? "Hydrogen 子代理" : `${voiceProviderDisplayName(prefProv)} 轻量助手`);
       return {
         needsBackground: true,
         alwaysAsync: true,
         pendingMeta: {
           action: "subagent_hydrogen",
           executionTier: "subagent_hydrogen",
+          provider: prefProv || (useHydrogenNaming ? "antigravity" : ""),
           focusThreadId: resolvedThreadId || "",
           focusProjectCwd: resolvedCwd || "",
           projectName: targetName,
-          summaryTag: "Hydrogen 子代理处理中",
-          ackReply: "好的，这个需要一点时间处理，我先开一个 Hydrogen 子代理帮你做，过程中会持续同步进展，有结果马上反馈给你。",
+          summaryTag: `${subagentLabel}处理中`,
+          ackReply: useHydrogenNaming
+            ? "好的，这个需要一点时间处理，我先开一个 Hydrogen 子代理帮你做，过程中会持续同步进展，有结果马上反馈给你。"
+            : `好的，我先用${subagentLabel}帮你分析整理，有结果马上反馈给你。`,
         },
         execute: async ({ batchId = "", utteranceId = "", emitProgress = () => {} } = {}) => {
           const res = await this.#runHydrogenSubagent({
@@ -2302,14 +2862,21 @@ export class VoiceCallService {
             snapshot,
             activeThreadId: resolvedThreadId || activeThreadId || snapshot.activeThreadId || "",
             projectCwd: resolvedCwd,
+            preferredProvider: plan.provider || voicePref.voiceProvider || "",
+            preferredModel: plan.model || voicePref.voiceModel || "",
+            preferredProfileId: voicePref.voiceProfileId || "",
             emitProgress,
           });
+          const resProvider = String(res.provider || "antigravity").toLowerCase();
+          const resLabel = resProvider === "antigravity"
+            ? "Hydrogen 子代理"
+            : (resProvider === "local" ? "本机规则" : `${voiceProviderDisplayName(resProvider)} 子代理`);
           const spokenSummary = stripSpeechNoise(res.summary || "已完成分析。", 220);
           if (callId && spokenSummary) {
             this.#recordCompletedResult(callId, {
               threadId: `subagent:${batchId || randomUUID().slice(0, 8)}`,
               projectCwd: resolvedCwd,
-              projectName: "Hydrogen 子代理",
+              projectName: resLabel,
               title: stripSpeechNoise(taskText, 40) || "子代理分析",
               status: "completed",
               lastResultSummary: spokenSummary,
@@ -2322,9 +2889,10 @@ export class VoiceCallService {
             executionTier: "subagent_hydrogen",
             focusThreadId: resolvedThreadId || "",
             focusProjectCwd: resolvedCwd,
+            provider: resProvider,
             model: res.model || DEFAULT_VOICE_HYDROGEN_MODEL,
-            summaryTag: "Hydrogen 子代理已完成",
-            spokenFeedback: `Hydrogen 子代理有结果了：${spokenSummary}`,
+            summaryTag: `${resLabel}已完成`,
+            spokenFeedback: `${resLabel}有结果了：${spokenSummary}`,
             shouldSpeak: true,
             priority: "normal",
           };
@@ -2921,6 +3489,114 @@ export class VoiceCallService {
     ].slice(0, 12);
   }
 
+  async #runHubVoiceSubagent({
+    target,
+    instruction = "",
+    snapshot = {},
+    threadSnippet = "",
+    targetCwd = "",
+  }) {
+    if (typeof this.#hub?.startThread !== "function") {
+      return {
+        provider: "local",
+        model: "local-rules",
+        summary: buildLocalSubagentSummary({ instruction, snapshot, threadSnippet }),
+      };
+    }
+
+    const compactProjects = (snapshot?.projects || []).slice(0, 6).map((p) => ({
+      name: p.alias || p.name,
+      liveCount: p.liveCount,
+      pendingCount: p.pendingCount,
+      threads: (p.threads || []).slice(0, 2).map((t) => ({
+        title: t.title,
+        live: t.live,
+        preview: t.preview,
+      })),
+    }));
+    const subPrompt = [
+      `${VOICE_CALL_TAG} 你是 Agent Control 的语音后台只读分析助手（${target.displayName}）。`,
+      "请基于以下控制快照与会话摘录，在严禁修改任何代码文件的前提下，直接帮用户完成分析、整理、排查或结论总结。",
+      "输出要求：用 2~4 句自然流畅的中文电话口语给出清晰结论与建议，不要包含 Markdown 符号、代码块或文件路径斜杠。",
+      `用户请求：${instruction}`,
+      ...(threadSnippet ? [`当前聚焦会话最近输出：${threadSnippet}`] : []),
+      `<CONTEXT_SNAPSHOT>\n${JSON.stringify({ projects: compactProjects, pendingRequests: snapshot?.pendingRequests || [] })}\n</CONTEXT_SNAPSHOT>`,
+    ].join("\n");
+
+    const started = await this.#hub.startThread({
+      provider: target.provider,
+      profileId: target.profileId || "default",
+      cwd: targetCwd || this.#workspaceDir,
+      model: target.model || undefined,
+      ...(target.effort ? { effort: target.effort } : {}),
+      text: subPrompt,
+      permissionMode: "turbo",
+    });
+
+    const createdThreadId = String(started?.thread?.id || "").trim();
+    if (!createdThreadId) {
+      throw new Error(`${target.displayName} 子代理未返回会话 ID`);
+    }
+
+    let summary = "";
+    await new Promise((resolveDone, rejectDone) => {
+      let settled = false;
+      const cleanup = () => {
+        clearTimeout(timeoutTimer);
+        clearInterval(pollTimer);
+        this.#pendingSubagentThreads.delete(createdThreadId);
+      };
+      const finish = (text) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolveDone(String(text || "").trim());
+      };
+      const fail = (err) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        rejectDone(err);
+      };
+
+      const timeoutTimer = setTimeout(() => {
+        fail(new Error(`${target.displayName} 子代理分析超时`));
+      }, 45_000);
+
+      const pollTimer = setInterval(async () => {
+        if (settled || this.#closed) {
+          fail(new Error("语音服务已关闭"));
+          return;
+        }
+        if (typeof this.#hub?.readThread !== "function") return;
+        const readRes = await this.#hub.readThread(createdThreadId, { limit: 4 }).catch(() => null);
+        const latestThread = readRes?.thread;
+        const turns = Array.isArray(latestThread?.turns) ? latestThread.turns : [];
+        const lastTurn = turns[turns.length - 1];
+        if (lastTurn && lastTurn.status && lastTurn.status !== "inProgress" && lastTurn.status !== "running") {
+          const snippet = pickLatestAssistantSnippet(readRes);
+          if (snippet || lastTurn.status === "completed") {
+            finish(snippet || "已完成分析整理。");
+          }
+        }
+      }, 900);
+      pollTimer.unref?.();
+
+      this.#pendingSubagentThreads.set(createdThreadId, {
+        resolve: finish,
+        reject: fail,
+      });
+    }).then((text) => {
+      summary = text;
+    });
+
+    return {
+      provider: target.provider,
+      model: target.model || started?.thread?.model || "",
+      summary: stripSpeechNoise(summary || "", 260) || "已完成分析整理。",
+    };
+  }
+
   async #runHydrogenSubagent({
     callId = "",
     batchId = "",
@@ -2929,10 +3605,26 @@ export class VoiceCallService {
     snapshot = {},
     activeThreadId = "",
     projectCwd = "",
+    preferredProvider = "",
+    preferredModel = "",
+    preferredProfileId = "",
     emitProgress = () => {},
   } = {}) {
-    const model = await this.resolveHydrogenModel().catch(() => DEFAULT_VOICE_HYDROGEN_MODEL);
-    const effort = /\b(low|fast|lite)\b|-low\b/i.test(model) ? "low" : "";
+    const target = await this.resolveVoiceTarget({
+      callId,
+      voiceProvider: preferredProvider,
+      voiceModel: preferredModel,
+      voiceProfileId: preferredProfileId,
+    }).catch(async () => ({
+      provider: "antigravity",
+      profileId: "cli",
+      model: await this.resolveHydrogenModel().catch(() => DEFAULT_VOICE_HYDROGEN_MODEL),
+      effort: "low",
+      shortLabel: "Hydrogen",
+      displayName: "Hydrogen",
+    }));
+    const model = target.model || DEFAULT_VOICE_HYDROGEN_MODEL;
+    const effort = target.effort || (/\b(low|fast|lite)\b|-low\b/i.test(model) ? "low" : "");
     const targetCwd = projectCwd && existsSync(projectCwd) ? projectCwd : this.#workspaceDir;
     let threadSnippet = "";
     if (activeThreadId && typeof this.#hub?.readThread === "function") {
@@ -2940,6 +3632,9 @@ export class VoiceCallService {
       threadSnippet = pickLatestAssistantSnippet(threadRes);
     }
 
+    const progressPrefix = target.provider === "antigravity"
+      ? "Hydrogen 子代理进展"
+      : `${target.shortLabel} 进展`;
     const stepMessages = [
       "正在收集相关会话与上下文信息",
       "正在深入分析并整理结论，很快给你结果",
@@ -2953,7 +3648,7 @@ export class VoiceCallService {
       lastTickAt = Date.now();
       const msg = stepMessages[Math.min(tickStep, stepMessages.length - 1)];
       tickStep += 1;
-      emitProgress(`Hydrogen 子代理进展：${msg}。`);
+      emitProgress(`${progressPrefix}：${msg}。`);
     }, this.#subagentProgressIntervalMs);
 
     try {
@@ -2963,6 +3658,7 @@ export class VoiceCallService {
           batchId,
           utteranceId,
           instruction,
+          provider: target.provider,
           model,
           effort,
           cwd: targetCwd,
@@ -2974,9 +3670,28 @@ export class VoiceCallService {
           },
         });
         return {
+          provider: target.provider,
           model,
           summary: String(out?.summary || out?.text || out || "").trim(),
         };
+      }
+
+      if (target.provider === "local") {
+        return {
+          provider: "local",
+          model: "local-rules",
+          summary: buildLocalSubagentSummary({ instruction, snapshot, threadSnippet }),
+        };
+      }
+
+      if (target.provider !== "antigravity") {
+        return await this.#runHubVoiceSubagent({
+          target,
+          instruction,
+          snapshot,
+          threadSnippet,
+          targetCwd,
+        });
       }
 
       const client = await this.#ensureClient();
@@ -3037,7 +3752,7 @@ export class VoiceCallService {
       }
 
       const finalText = stripSpeechNoise(subBuffer.text || "", 260) || "已完成分析整理。";
-      return { model, summary: finalText };
+      return { provider: "antigravity", model, summary: finalText };
     } finally {
       clearInterval(progressTimer);
     }
@@ -3085,6 +3800,15 @@ export class VoiceCallService {
       resultText = pickLatestAssistantSnippet(readRes);
     }
     const cleanResultSummary = stripSpeechNoise(resultText, 240);
+
+    const subagentWaiter = this.#pendingSubagentThreads.get(threadId);
+    if (subagentWaiter) {
+      if (rawStatus === "failed") {
+        subagentWaiter.reject(new Error(evt.error || "语音后台分析子代理执行失败"));
+      } else {
+        subagentWaiter.resolve(cleanResultSummary || "已完成分析整理。");
+      }
+    }
 
     for (const state of this.#callStates.values()) {
       const delegated = state.delegatedTasks?.get(threadId);
@@ -3177,8 +3901,17 @@ export class VoiceCallService {
     text = "",
     snapshot,
   }) {
-    const cleanProvider = ["antigravity", "codex", "claude"].includes(provider) ? provider : "antigravity";
     const available = Array.isArray(snapshot?.availableProfiles) ? snapshot.availableProfiles : [];
+    const fallbackAutoProvider = VOICE_LIGHT_PROVIDER_PRIORITY.find((prov) =>
+      available.some((p) => p.provider === prov && p.authenticated !== false),
+    ) || VOICE_LIGHT_PROVIDER_PRIORITY.find((prov) =>
+      available.some((p) => p.provider === prov),
+    ) || available.find((p) => p.authenticated !== false)?.provider
+      || available[0]?.provider
+      || "antigravity";
+    const cleanProvider = ["antigravity", "codex", "claude", "grok"].includes(provider)
+      ? provider
+      : fallbackAutoProvider;
     const candidates = available.filter((p) => p.provider === cleanProvider);
     const chosenProfile = candidates.find((p) => p.authenticated !== false)
       || candidates[0]
@@ -3405,6 +4138,9 @@ export class VoiceCallService {
     audioMimeType = "audio/wav",
     transcriptText = "",
     activeThreadId = "",
+    voiceProvider = "",
+    voiceModel = "",
+    voiceProfileId = "",
     mode = "turn",
     autoExecute = true,
     asyncDispatch = false,
@@ -3412,6 +4148,13 @@ export class VoiceCallService {
   } = {}) {
     const cleanCallId = String(callId || "").trim() || `call-${randomUUID().slice(0, 8)}`;
     const callState = this.#ensureCallState(cleanCallId);
+    if (voiceProvider || voiceModel || voiceProfileId) {
+      callState.voicePref = {
+        voiceProvider: String(voiceProvider || "").trim(),
+        voiceModel: String(voiceModel || "").trim(),
+        voiceProfileId: String(voiceProfileId || "").trim(),
+      };
+    }
     const cleanAudio = String(audioBase64 || "").replace(/^data:[^;]+;base64,/, "").trim();
     const cleanTranscript = String(transcriptText || "").trim();
     const asrBinName = basename(String(this.#env?.VOICE_ASR_BIN || "").trim());
@@ -3644,7 +4387,7 @@ export class VoiceCallService {
           }
         } else {
           batchId = `batch-${randomUUID().slice(0, 10)}`;
-          if (!plan.spokenReply && prepared.pendingMeta?.ackReply) {
+          if (prepared.pendingMeta?.ackReply && (!plan.spokenReply || prepared.pendingMeta?.action === "subagent_hydrogen")) {
             plan.spokenReply = prepared.pendingMeta.ackReply;
           }
           executed = {
@@ -3653,6 +4396,7 @@ export class VoiceCallService {
             batchId,
             action: prepared.pendingMeta.action,
             executionTier: prepared.pendingMeta.executionTier || executionTier,
+            ...(prepared.pendingMeta.provider ? { provider: prepared.pendingMeta.provider } : {}),
             dispatchMode: prepared.pendingMeta.dispatchMode || "",
             immediate: Boolean(prepared.pendingMeta.immediate),
             focusThreadId: prepared.pendingMeta.focusThreadId,
@@ -3819,6 +4563,10 @@ export class VoiceCallService {
     this.#ttsCache.clear();
     this.#activeSessionTurn.clear();
     this.#activeSubagentSessions.clear();
+    for (const waiter of this.#pendingSubagentThreads.values()) {
+      waiter.reject(new Error("语音通话服务已关闭"));
+    }
+    this.#pendingSubagentThreads.clear();
     this.#resetAsrWorker("语音通话服务已关闭");
     if (this.#client) {
       await this.#client.close().catch(() => {});

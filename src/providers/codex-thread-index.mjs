@@ -205,6 +205,46 @@ export function normalizeCodexIndexedRow(row) {
   };
 }
 
+function enrichIndexedCodexRowHints(item) {
+  if (!item || item.threadSource === "subagent" || !item.rolloutPath) return false;
+  const hints = readCodexRolloutPromptHintsSync(item.rolloutPath, item.firstUserMessage);
+  if (hints) {
+    if (hints.firstUserText && !item.firstUserText) item.firstUserText = hints.firstUserText;
+    if (hints.lastUserText) item.lastUserText = hints.lastUserText;
+    if (hints.hasFollowUpTurns) item.hasFollowUpTurns = true;
+    if (!item.preview) item.preview = hints.firstUserText || hints.lastUserText || "";
+  }
+  return true;
+}
+
+const INDEXED_THREAD_COLUMNS = `
+  id, rollout_path, created_at, updated_at, source, model_provider,
+  cwd, title, archived, first_user_message, model, reasoning_effort,
+  thread_source, preview, name, git_sha, git_branch, git_origin_url
+`;
+
+export function readIndexedThreadById(codexHome, rawId) {
+  const id = String(rawId || "").trim();
+  if (!id) return null;
+  const dbFile = indexDbPath(codexHome);
+  if (!existsSync(dbFile)) return null;
+  const db = new DatabaseSync(dbFile, { readOnly: true });
+  try {
+    const row = db.prepare(`
+      SELECT ${INDEXED_THREAD_COLUMNS}
+      FROM threads
+      WHERE id = ?
+      LIMIT 1
+    `).get(id);
+    if (!row) return null;
+    const item = normalizeCodexIndexedRow(row);
+    enrichIndexedCodexRowHints(item);
+    return item;
+  } finally {
+    db.close();
+  }
+}
+
 export function readIndexedThreads(codexHome, {
   limit = 400,
   includeArchived = false,
@@ -215,10 +255,7 @@ export function readIndexedThreads(codexHome, {
   try {
     const whereClause = includeArchived ? "1=1" : "archived = 0";
     const sql = `
-      SELECT
-        id, rollout_path, created_at, updated_at, source, model_provider,
-        cwd, title, archived, first_user_message, model, reasoning_effort,
-        thread_source, preview, name, git_sha, git_branch, git_origin_url
+      SELECT ${INDEXED_THREAD_COLUMNS}
       FROM threads
       WHERE ${whereClause}
       ORDER BY updated_at DESC
@@ -228,14 +265,9 @@ export function readIndexedThreads(codexHome, {
     const normalized = rows.map(normalizeCodexIndexedRow);
     let hintProbed = 0;
     for (const item of normalized) {
-      if (item.threadSource === "subagent" || !item.rolloutPath || hintProbed >= 80) continue;
-      hintProbed += 1;
-      const hints = readCodexRolloutPromptHintsSync(item.rolloutPath, item.firstUserMessage);
-      if (hints) {
-        if (hints.firstUserText && !item.firstUserText) item.firstUserText = hints.firstUserText;
-        if (hints.lastUserText) item.lastUserText = hints.lastUserText;
-        if (hints.hasFollowUpTurns) item.hasFollowUpTurns = true;
-        if (!item.preview) item.preview = hints.firstUserText || hints.lastUserText || "";
+      if (hintProbed >= 80) break;
+      if (enrichIndexedCodexRowHints(item)) {
+        hintProbed += 1;
       }
     }
     return normalized;

@@ -9,26 +9,36 @@ import { decodeTailCursor, readLargeThreadPreview } from "./codex-large-preview.
 export const LARGE_THREAD_BYTES = 2 * 1024 * 1024;
 const ACTIVITY_SCAN_BYTES = 256 * 1024;
 
-function parseTurnStartTimestamps(chunk) {
+function parseTurnRolloutMeta(chunk) {
   const times = new Map();
+  const contexts = new Map();
   for (const line of chunk.split("\n")) {
-    if (!line.includes('"task_started"')) continue;
+    const hasStarted = line.includes('"task_started"');
+    const hasContext = line.includes('"turn_context"');
+    if (!hasStarted && !hasContext) continue;
     try {
       const record = JSON.parse(line);
       const payload = record?.payload;
-      if (record?.type === "event_msg" && payload?.type === "task_started" && payload.turn_id) {
+      if (!payload || typeof payload !== "object") continue;
+      if (hasStarted && record?.type === "event_msg" && payload.type === "task_started" && payload.turn_id) {
         const startedAt = Number(payload.started_at) || Math.floor(Date.parse(record.timestamp || "") / 1000);
         if (Number.isFinite(startedAt) && startedAt > 0) times.set(payload.turn_id, startedAt);
+      } else if (hasContext && record?.type === "turn_context" && payload.turn_id) {
+        const model = String(payload.model || "").trim();
+        const effort = String(payload.effort || payload.reasoning_effort || "").trim().toLowerCase();
+        if (model || effort) {
+          contexts.set(payload.turn_id, { model, effort });
+        }
       }
     } catch {
       // Ignore malformed trailing lines.
     }
   }
-  return times;
+  return { times, contexts };
 }
 
-export async function readRecentRolloutTurnTimes(rolloutPath, maxBytes = ACTIVITY_SCAN_BYTES) {
-  if (!rolloutPath) return new Map();
+export async function readRecentRolloutTurnMeta(rolloutPath, maxBytes = ACTIVITY_SCAN_BYTES) {
+  if (!rolloutPath) return { times: new Map(), contexts: new Map() };
   let file;
   try {
     file = await open(rolloutPath, "r");
@@ -36,12 +46,17 @@ export async function readRecentRolloutTurnTimes(rolloutPath, maxBytes = ACTIVIT
     const start = Math.max(0, size - maxBytes);
     const buf = Buffer.allocUnsafe(size - start);
     if (buf.length) await file.read(buf, 0, buf.length, start);
-    return parseTurnStartTimestamps(buf.toString("utf8"));
+    return parseTurnRolloutMeta(buf.toString("utf8"));
   } catch {
-    return new Map();
+    return { times: new Map(), contexts: new Map() };
   } finally {
     await file?.close().catch(() => {});
   }
+}
+
+export async function readRecentRolloutTurnTimes(rolloutPath, maxBytes = ACTIVITY_SCAN_BYTES) {
+  const meta = await readRecentRolloutTurnMeta(rolloutPath, maxBytes);
+  return meta.times;
 }
 
 function normalizeCodexTurns(turns = [], automationNames = null) {
@@ -75,7 +90,8 @@ function stripTurnSourceIndexes(turns = []) {
 }
 
 export async function loadCodexThreadHistory({
-  client,
+  client = null,
+  getClient = null,
   rawId,
   indexedThread = null,
   cursor = null,
@@ -123,20 +139,34 @@ export async function loadCodexThreadHistory({
     };
   }
 
-  const result = await client.request("thread/read", {
-    threadId: rawId,
-    includeTurns: true,
-  });
+  const activeClient = client || (typeof getClient === "function" ? await getClient() : null);
+  if (!activeClient) {
+    throw new Error("Codex 客户端不可用");
+  }
+  const [result, preloadedMeta] = await Promise.all([
+    activeClient.request("thread/read", {
+      threadId: rawId,
+      includeTurns: true,
+    }),
+    rolloutPath ? readRecentRolloutTurnMeta(rolloutPath) : Promise.resolve(null),
+  ]);
   const thread = result?.thread || result || { id: rawId, turns: [] };
   if (Array.isArray(thread.turns)) {
     thread.turns = normalizeCodexTurns(thread.turns, automationNames);
   }
   const resolvedRolloutPath = thread.path || thread.rolloutPath || rolloutPath;
   if (Array.isArray(thread.turns) && resolvedRolloutPath) {
-    const times = await readRecentRolloutTurnTimes(resolvedRolloutPath);
+    const meta = (preloadedMeta && resolvedRolloutPath === rolloutPath)
+      ? preloadedMeta
+      : await readRecentRolloutTurnMeta(resolvedRolloutPath);
     for (const turn of thread.turns) {
-      if (!turn.startedAt && times.has(turn.id)) {
-        turn.startedAt = times.get(turn.id);
+      if (!turn.startedAt && meta.times.has(turn.id)) {
+        turn.startedAt = meta.times.get(turn.id);
+      }
+      const ctx = meta.contexts.get(turn.id);
+      if (ctx) {
+        if (!turn.model && ctx.model) turn.model = ctx.model;
+        if (!turn.effort && ctx.effort) turn.effort = ctx.effort;
       }
     }
   }

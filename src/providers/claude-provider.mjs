@@ -218,10 +218,28 @@ export class ClaudeProvider {
         }
       }
 
-      const [account, endpoint] = await Promise.all([
-        readClaudePublicAccount(cliDir, homeDir, profile.cockpitAccount || null),
-        readClaudePublicEndpoint(cliDir),
-      ]);
+      let endpoint = await readClaudePublicEndpoint(cliDir);
+      if (boundEmail && !endpoint.endpointHost) {
+        const currentAuth = cliDir === defaultCliHome ? defaultCliAuth
+          : await readClaudeCliAuthStatus({ configDir: cliDir, env: this.#env }).catch(() => null);
+        if (!currentAuth?.loggedIn || String(currentAuth.email || "").toLowerCase() !== boundEmail) {
+          const candidates = new Set([
+            defaultCliHome,
+            ...discovered.flatMap((p) => [p.cliConfigDir || p.home, p.dedicatedCliConfigDir]),
+          ]);
+          for (const candidate of candidates) {
+            if (!candidate || candidate === cliDir || !existsSync(candidate)) continue;
+            const auth = candidate === defaultCliHome ? defaultCliAuth
+              : await readClaudeCliAuthStatus({ configDir: candidate, env: this.#env }).catch(() => null);
+            if (auth?.loggedIn && String(auth.email || "").toLowerCase() === boundEmail) {
+              cliDir = candidate;
+              endpoint = await readClaudePublicEndpoint(cliDir);
+              break;
+            }
+          }
+        }
+      }
+      const account = await readClaudePublicAccount(cliDir, homeDir, profile.cockpitAccount || null);
       return {
         ...profile,
         historyDir,

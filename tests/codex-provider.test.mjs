@@ -9,7 +9,8 @@ import { crc32, deflateSync } from "node:zlib";
 import { readLargeThreadPreview } from "../src/providers/codex-large-preview.mjs";
 import { CodexProvider } from "../src/providers/codex-provider.mjs";
 import { readRolloutActivitySnapshot } from "../src/providers/codex-thread-activity.mjs";
-import { parseCodexQueuedPayload, readIndexedThreads } from "../src/providers/codex-thread-index.mjs";
+import { loadCodexThreadHistory } from "../src/providers/codex-thread-history.mjs";
+import { parseCodexQueuedPayload, readIndexedThreadById, readIndexedThreads } from "../src/providers/codex-thread-index.mjs";
 import { ProviderHub } from "../src/provider-hub.mjs";
 import { createAgentControlServer } from "../src/server.mjs";
 
@@ -77,11 +78,27 @@ test("codex-thread-index, large-preview, and activity read SQLite/rollout fixtur
   assert.equal(rows.length, 2);
   assert.equal(rows[1].id, "thr-main");
   assert.equal(rows[0].threadSource, "subagent");
+  const singleRow = readIndexedThreadById(dir, "thr-main");
+  assert.equal(singleRow?.id, "thr-main");
+  assert.equal(singleRow?.rolloutPath, rolloutFile);
+  assert.equal(readIndexedThreadById(dir, "missing-id"), null);
 
   const preview = await readLargeThreadPreview(rolloutFile, { limit: 5 });
   assert.equal(preview.turns.length, 1);
   assert.equal(preview.turns[0].status, "completed");
   assert.equal(preview.turns[0].items[1].text, "预览内容已完成");
+
+  const lazyLarge = await loadCodexThreadHistory({
+    getClient: () => {
+      throw new Error("large preview should not start app-server client");
+    },
+    rawId: "thr-main",
+    indexedThread: singleRow,
+    largeBytesThreshold: 1,
+    limit: 5,
+  });
+  assert.equal(lazyLarge.thread.largeHistory, true);
+  assert.equal(lazyLarge.thread.turns.length, 1);
 
   const act = await readRolloutActivitySnapshot(rolloutFile);
   assert.equal(act.changed, true);
@@ -726,4 +743,175 @@ test("Codex normalizer cleans pasted files, ambient browser wrappers, and collap
   assert.equal(collapsed[2].quietHeartbeatGroup.automationName, "番茄每天随机续发三章");
   assert.equal(collapsed[2]._offset, 2048);
   assert.equal(collapsed[2]._firstSourceIndex, 2);
+});
+
+test("CodexProvider detects external running Codex turns from response_item tail beyond 256KB", async (t) => {
+  const dir = await mkdtemp(resolve(os.tmpdir(), "ac-codex-ext-live-"));
+  const codexHome = resolve(dir, "codex-default");
+  await mkdir(codexHome, { recursive: true });
+  t.after(() => rm(dir, { recursive: true, force: true }));
+
+  const threadId = "01a1e999-0000-7000-8000-000000000099";
+  const rolloutPath = resolve(codexHome, `rollout-${threadId}.jsonl`);
+  const filler = "x".repeat(4000);
+  const lines = [
+    JSON.stringify({ timestamp: "2026-11-16T07:48:38.000Z", type: "event_msg", payload: { type: "task_started", turn_id: "t-long-1" } }),
+    JSON.stringify({ timestamp: "2026-11-16T07:48:39.000Z", type: "event_msg", payload: { type: "user_message", message: "排查客户历史文件解冻" } }),
+  ];
+  // Push task_started well past MAX_TAIL_BYTES (256KB) so tail-only reading only sees response_item + item_completed.
+  for (let i = 0; i < 80; i += 1) {
+    lines.push(JSON.stringify({
+      timestamp: "2026-11-16T08:30:00.000Z",
+      type: "response_item",
+      payload: { type: "custom_tool_call_output", call_id: `c-${i}`, output: filler },
+    }));
+  }
+  lines.push(
+    JSON.stringify({
+      timestamp: new Date().toISOString(),
+      type: "response_item",
+      payload: { type: "reasoning", summary: [{ type: "summary_text", text: "Verifying OSS ACL permissions" }] },
+    }),
+    JSON.stringify({
+      timestamp: new Date().toISOString(),
+      type: "response_item",
+      payload: { type: "custom_tool_call", name: "exec", input: "curl -sI https://example.com" },
+    }),
+    JSON.stringify({
+      timestamp: new Date().toISOString(),
+      type: "event_msg",
+      payload: { type: "token_count", info: {} },
+    }),
+  );
+  await writeFile(rolloutPath, `${lines.join("\n")}\n`, "utf8");
+
+  const nowSec = Math.floor(Date.now() / 1000);
+  const db = new DatabaseSync(resolve(codexHome, "state_5.sqlite"));
+  db.exec(`
+    CREATE TABLE threads (
+      id TEXT PRIMARY KEY,
+      rollout_path TEXT,
+      created_at INTEGER,
+      updated_at INTEGER,
+      source TEXT,
+      model_provider TEXT,
+      cwd TEXT,
+      title TEXT,
+      archived INTEGER,
+      git_sha TEXT,
+      git_branch TEXT,
+      git_origin_url TEXT,
+      first_user_message TEXT,
+      model TEXT,
+      reasoning_effort TEXT,
+      thread_source TEXT,
+      preview TEXT,
+      name TEXT
+    );
+  `);
+  db.prepare(`
+    INSERT INTO threads (id, rollout_path, created_at, updated_at, source, model_provider, cwd, title, archived, first_user_message, model, reasoning_effort, thread_source, preview, name)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(threadId, rolloutPath, nowSec - 600, nowSec, "vscode", "openai", "/tmp/customer-proj", "陈琰·历史文件需解冻", 0, "排查客户历史文件解冻", "gpt-5.4", "high", "user", "排查客户历史文件解冻", "");
+  db.close();
+
+  const provider = new CodexProvider({
+    env: {
+      ...process.env,
+      CODEX_BIN: MOCK_CODEX_BIN,
+      AGENT_CONTROL_CODEX_HOMES: JSON.stringify([{ id: "default", label: "Codex 默认", home: codexHome }]),
+    },
+  });
+  t.after(() => provider.close());
+
+  const listed = await provider.listThreads("default");
+  const item = listed.find((th) => th.rawId === threadId);
+  assert.equal(item?.live, true);
+  assert.equal(item?.livePhase, "调用 exec");
+
+  const actLive = await provider.getActivity("default", threadId);
+  assert.equal(actLive.live, true);
+  assert.equal(actLive.activity?.status, "running");
+  assert.equal(actLive.activity?.phase, "调用 exec");
+
+  const actUnchanged = await provider.getActivity("default", threadId, { cursor: actLive.cursor });
+  assert.equal(actUnchanged.changed, false);
+  assert.equal(actUnchanged.live, true);
+  assert.equal(actUnchanged.activity?.status, "running");
+
+  const loaded = await provider.readThread("default", threadId, { limit: 5 });
+  assert.equal(loaded.thread.live, true);
+  assert.equal(loaded.activity?.status, "running");
+
+  // Once task_complete arrives, listThreads and getActivity must transition to live=false immediately.
+  await writeFile(rolloutPath, `${lines.join("\n")}\n${JSON.stringify({
+    timestamp: new Date().toISOString(),
+    type: "event_msg",
+    payload: { type: "task_complete", turn_id: "t-long-1", last_agent_message: "已解冻完成" },
+  })}\n`, "utf8");
+
+  const actDone = await provider.getActivity("default", threadId, { cursor: actLive.cursor });
+  assert.equal(actDone.live, false);
+  assert.equal(actDone.changed, true);
+  assert.equal(actDone.activity?.status, "completed");
+
+  const actDoneUnchanged = await provider.getActivity("default", threadId, { cursor: actDone.cursor });
+  assert.equal(actDoneUnchanged.changed, false);
+  assert.equal(actDoneUnchanged.live, false);
+  assert.equal(actDoneUnchanged.activity?.status, "completed");
+
+  const listedDone = await provider.listThreads("default");
+  assert.equal(listedDone.find((th) => th.rawId === threadId)?.live, false);
+});
+
+test("codex-thread-history and codex-large-preview enrich per-turn model and effort from turn_context", async (t) => {
+  const dir = await mkdtemp(resolve(os.tmpdir(), "ac-codex-turn-model-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+
+  const rolloutPath = resolve(dir, "rollout-model.jsonl");
+  const lines = [
+    JSON.stringify({ timestamp: "2026-11-16T08:00:00Z", type: "event_msg", payload: { type: "task_started", turn_id: "turn-m1", started_at: 1794816000 } }),
+    JSON.stringify({ timestamp: "2026-11-16T08:00:01Z", type: "turn_context", payload: { turn_id: "turn-m1", model: "gpt-6.1-sol", effort: "high" } }),
+    JSON.stringify({ timestamp: "2026-11-16T08:00:02Z", type: "event_msg", payload: { type: "user_message", message: "第一轮" } }),
+    JSON.stringify({ timestamp: "2026-11-16T08:00:04Z", type: "event_msg", payload: { type: "agent_message", message: "完成第一轮" } }),
+    JSON.stringify({ timestamp: "2026-11-16T08:00:05Z", type: "event_msg", payload: { type: "task_complete", turn_id: "turn-m1" } }),
+  ];
+  await writeFile(rolloutPath, `${lines.join("\n")}\n`, "utf8");
+
+  const preview = await readLargeThreadPreview(rolloutPath, { limit: 10 });
+  assert.equal(preview.turns.length, 1);
+  assert.equal(preview.turns[0].model, "gpt-6.1-sol");
+  assert.equal(preview.turns[0].effort, "high");
+
+  const fakeClient = {
+    async request(method) {
+      assert.equal(method, "thread/read");
+      return {
+        thread: {
+          id: "t-model-1",
+          rolloutPath,
+          turns: [
+            {
+              id: "turn-m1",
+              status: "completed",
+              items: [
+                { type: "userMessage", id: "u-1", content: [{ type: "text", text: "第一轮" }] },
+                { type: "agentMessage", id: "a-1", text: "完成第一轮" },
+              ],
+            },
+          ],
+        },
+      };
+    },
+  };
+
+  const fullLoaded = await loadCodexThreadHistory({
+    client: fakeClient,
+    rawId: "t-model-1",
+    indexedThread: { id: "t-model-1", rolloutPath },
+    detail: "full",
+  });
+  assert.equal(fullLoaded.thread.turns[0].startedAt, 1794816000);
+  assert.equal(fullLoaded.thread.turns[0].model, "gpt-6.1-sol");
+  assert.equal(fullLoaded.thread.turns[0].effort, "high");
 });

@@ -2028,3 +2028,55 @@ test("readAntigravityLiveActivity stays live past terminal grace while async tas
   });
   assert.equal(restartedAct.live, false);
 });
+
+test("antigravity-history captures per-turn models (including dual-model switches) and thread model", async (t) => {
+  const dir = await mkdtemp(resolve(os.tmpdir(), "ac-agy-models-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+
+  const rawId = "agy-models-session-1";
+  const logsDir = resolve(dir, "brain", rawId, ".system_generated", "logs");
+  await mkdir(logsDir, { recursive: true });
+  const lines = [
+    JSON.stringify({
+      step_index: 0,
+      type: "USER_INPUT",
+      source: "USER_EXPLICIT",
+      status: "DONE",
+      created_at: "2026-11-16T08:00:00Z",
+      content: "先用规划模型拆解，再交给执行模型",
+    }),
+    JSON.stringify({
+      step_index: 1,
+      type: "PLANNER_RESPONSE",
+      status: "DONE",
+      created_at: "2026-11-16T08:00:02Z",
+      model: "gemini-pro-orchestrator",
+      tool_calls: [{ id: "tc-1", name: "run_command", args: { CommandLine: "npm run check" } }],
+    }),
+    JSON.stringify({
+      step_index: 2,
+      type: "GENERIC",
+      status: "DONE",
+      created_at: "2026-11-16T08:00:04Z",
+      content: "Syntax OK",
+    }),
+    JSON.stringify({
+      step_index: 3,
+      type: "PLANNER_RESPONSE",
+      status: "DONE",
+      created_at: "2026-11-16T08:00:06Z",
+      model: "gemini-4-hydrogen-low",
+      content: "已完成检查并交回成果。",
+    }),
+  ];
+  await writeFile(resolve(logsDir, "transcript.jsonl"), `${lines.join("\n")}\n`, "utf8");
+
+  const parsed = parseAntigravityTranscript(lines, { rawId });
+  assert.equal(parsed.turns.length, 1);
+  assert.equal(parsed.turns[0].model, "gemini-4-hydrogen-low");
+  assert.deepEqual(parsed.turns[0].models, ["gemini-pro-orchestrator", "gemini-4-hydrogen-low"]);
+
+  const loaded = await readAntigravityThreadHistory(dir, rawId);
+  assert.equal(loaded.thread.model, "gemini-4-hydrogen-low");
+  assert.deepEqual(loaded.thread.turns[0].models, ["gemini-pro-orchestrator", "gemini-4-hydrogen-low"]);
+});

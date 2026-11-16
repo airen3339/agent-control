@@ -59,6 +59,7 @@ import {
   providerVisualMeta,
   renderAgentTelemetryBarHtml,
   renderProfilePillsHtml,
+  renderProviderPillsHtml,
   renderQuotaOverviewHtml,
   resolveModelsForProvider,
   resolveVisibleTelemetryKeys,
@@ -877,8 +878,9 @@ test("formatTokensPerSec and renderAgentTelemetryBarHtml render 4-agent HUD, 5h/
 
 test("dual Claude instances, selectable telemetry picker, identity hints, and mobile topbar summary work cleanly", () => {
   const nowSec = 1_794_680_000;
-  assert.equal(formatProfileIdentityHint({ account: { email: "alice@example.com" } }), "alice@example.com");
-  assert.equal(formatProfileIdentityHint({ account: { email: "bob@example.com" } }), "bob@example.com");
+  assert.equal(formatProfileIdentityHint({ account: { email: "alice@example.com" } }), "alic...com");
+  assert.equal(formatProfileIdentityHint({ account: { email: "bob@example.com" } }), "bob...com");
+  assert.equal(formatProfileIdentityHint({ account: { email: "fpf19910417@gmail.com" } }), "fpf1...com");
 
   const profiles = [
     {
@@ -1006,7 +1008,9 @@ test("dual Claude instances, selectable telemetry picker, identity hints, and mo
   const fullBar = renderAgentTelemetryBarHtml(profiles, telemetry, { pickerOpen: true, nowSec });
   assert.match(fullBar, /Codex · personal/);
   assert.match(fullBar, /Claude · example/);
-  assert.match(fullBar, /claude hotmail/);
+  assert.match(fullBar, /claude hotmail \(bob\.\.\.com\)/);
+  assert.match(fullBar, /class="telemetry-provider-glyph is-claude is-running"/);
+  assert.doesNotMatch(fullBar, /class="telemetry-card-id">\s*<span class="telemetry-live-dot/);
   assert.match(fullBar, /92%/);
   assert.match(fullBar, /21%/);
   assert.match(fullBar, /28%/);
@@ -1185,7 +1189,7 @@ test("telemetry bar deduplicates cloned quota buckets and keeps default view ult
   assert.equal((expandedBar.match(/telemetry-db-label">5h 窗口</g) || []).length, 1);
 });
 
-test("compact mobile visual helpers and index.html preserve all existing IDs at version 20261116g", async () => {
+test("compact mobile visual helpers and index.html preserve all existing IDs and asset version alignment", async () => {
   assert.equal(compactModelBadgeLabel("Orchestrator (Carbon)"), "Carbon");
   assert.equal(compactModelBadgeLabel("gemini-pro-orchestrator"), "Carbon");
   assert.equal(compactModelBadgeLabel("Gemini 4 Carbon (High)"), "Carbon H");
@@ -1219,10 +1223,13 @@ test("compact mobile visual helpers and index.html preserve all existing IDs at 
 
   const indexPath = fileURLToPath(new URL("../public/index.html", import.meta.url));
   const html = await readFile(indexPath, "utf8");
-  assert.match(html, /name="ac-ui-version" content="20261116g"/);
-  assert.match(html, /href="\.\/app\.css\?v=20261116g"/);
-  assert.match(html, /href="\.\/project-workspace\.css\?v=20261116g"/);
-  assert.match(html, /src="\.\/app\.js\?v=20261116g"/);
+  const versionMatch = html.match(/name="ac-ui-version" content="([^"]+)"/);
+  assert.ok(versionMatch?.[1], "index.html should declare ac-ui-version");
+  const uiVersion = versionMatch[1];
+  assert.ok(html.includes(`href="./app.css?v=${uiVersion}"`));
+  assert.ok(html.includes(`href="./project-workspace.css?v=${uiVersion}"`));
+  assert.ok(html.includes(`src="./app.js?v=${uiVersion}"`));
+  assert.doesNotMatch(html, /id="composerProbeProfilesBtn"/);
   assert.match(html, /id="telemetryTopbarBtn"[^>]*hidden/);
   assert.match(html, /id="activeProjectCrumb"[^>]*hidden/);
   assert.match(html, /id="agentQuotaStrip"[^>]*hidden/);
@@ -1264,9 +1271,11 @@ test("compact mobile visual helpers and index.html preserve all existing IDs at 
     "liveDetailText",
     "composerProviderSelect",
     "composerProfileSelect",
-    "composerProbeProfilesBtn",
     "composerProfilePills",
     "cfgChipProfileText",
+    "newModalTitle",
+    "newProviderPills",
+    "newProviderSelect",
     "newModalProbeProfilesBtn",
     "newProfilePills",
     "modelSelect",
@@ -1305,6 +1314,21 @@ test("compact mobile visual helpers and index.html preserve all existing IDs at 
   assert.equal(projectBaseName("C:\\dev\\agent-control\\"), "agent-control");
   assert.equal(projectBaseName("C:\\"), "C:\\");
   assert.equal(projectBaseName("\\\\nas\\share\\repo\\"), "repo");
+
+  const providerPillsHtml = renderProviderPillsHtml({
+    selectedProvider: "codex",
+    profiles: [
+      { id: "desktop", provider: "antigravity", health: { status: "healthy" } },
+      { id: "default", provider: "codex", health: { status: "healthy" } },
+      { id: "default", provider: "claude", health: { status: "cooldown" } },
+    ],
+  });
+  assert.match(providerPillsHtml, /data-select-provider="antigravity"[^>]*aria-checked="false"/);
+  assert.match(providerPillsHtml, /class="provider-pill-btn is-selected"[^>]*data-select-provider="codex"[^>]*aria-checked="true"/);
+  assert.match(providerPillsHtml, /data-select-provider="claude"[^>]*aria-checked="false"/);
+  assert.match(providerPillsHtml, /data-select-provider="grok"[^>]*aria-checked="false"/);
+  assert.match(providerPillsHtml, /profile-status-dot is-healthy/);
+  assert.match(providerPillsHtml, /profile-status-dot is-cooldown/);
 });
 
 test("mergeActiveTurnIntoHistory and dedupeAdjacentTurns avoid duplicate live user bubbles without merging distinct repeated turns", () => {
@@ -2408,7 +2432,7 @@ test("sidebar hierarchy, preview deduplication, completed blue dots, and minimal
   );
   assert.equal(codexAllChip?.glyph, "");
   assert.match(codexAllChip?.iconSvg || "", /<svg[^>]*is-codex/);
-  assert.equal(codexAllChip?.text, "Codex");
+  assert.equal(codexAllChip?.text, "");
   assert.equal(codexAllChip?.tone, "codex");
   assert.equal(codexAllChip?.title, "Codex · Codex · codex");
 
@@ -2416,14 +2440,73 @@ test("sidebar hierarchy, preview deduplication, completed blue dots, and minimal
     compactThreadSourceChip({ provider: "antigravity", profileId: "desktop", profileLabel: "Antigravity 桌面" }, { providerFilter: "antigravity", profiles }),
     { glyph: "", text: "桌面", tone: "antigravity", title: "Antigravity · Antigravity 桌面" },
   );
-  assert.equal(
-    compactThreadSourceChip({ provider: "codex", profileId: "codex", profileLabel: "Codex · codex" }, { providerFilter: "codex", profiles }),
-    null,
-  );
+  const codexFilteredChip = compactThreadSourceChip({ provider: "codex", profileId: "codex", profileLabel: "Codex · codex" }, { providerFilter: "codex", profiles });
+  assert.equal(codexFilteredChip?.text, "");
+  assert.match(codexFilteredChip?.iconSvg || "", /<svg[^>]*is-codex/);
   assert.equal(
     compactThreadSourceChip({ provider: "antigravity", profileId: "desktop", profileLabel: "Antigravity 桌面" }, { providerFilter: "antigravity", profileFilter: "antigravity:desktop", profiles }),
     null,
   );
+
+  // 2b. Multi-account Codex profiles show explicit account attribution on both default and secondary accounts.
+  const dualCodexProfiles = [
+    {
+      provider: "codex",
+      id: "default",
+      label: "Codex 默认",
+      installed: true,
+      account: { signedIn: true, email: "fpf19910417@gmail.com" },
+    },
+    {
+      provider: "codex",
+      id: "guuguo",
+      label: "Codex · guuguo",
+      installed: true,
+      account: { signedIn: true, email: "guuguo@qq.com" },
+    },
+  ];
+  assert.equal(compactProfileChipText(dualCodexProfiles[0]), "fpf...417");
+  assert.equal(compactProfileChipText(dualCodexProfiles[1]), "guuguo");
+
+  const dualDefaultCodexTabChip = compactThreadSourceChip(
+    { provider: "codex", profileId: "default", profileLabel: "Codex 默认" },
+    { providerFilter: "codex", profiles: dualCodexProfiles },
+  );
+  assert.equal(dualDefaultCodexTabChip?.text, "fpf...417");
+  assert.equal(dualDefaultCodexTabChip?.tone, "codex");
+  assert.match(dualDefaultCodexTabChip?.title || "", /fpf19910417@gmail\.com/);
+
+  const dualWorkCodexTabChip = compactThreadSourceChip(
+    { provider: "codex", profileId: "guuguo", profileLabel: "Codex · guuguo" },
+    { providerFilter: "codex", profiles: dualCodexProfiles },
+  );
+  assert.equal(dualWorkCodexTabChip?.text, "guuguo");
+
+  const dualDefaultAllChip = compactThreadSourceChip(
+    { provider: "codex", profileId: "default", profileLabel: "Codex 默认" },
+    { providerFilter: "all", profiles: dualCodexProfiles },
+  );
+  assert.equal(dualDefaultAllChip?.text, "fpf...417");
+
+  const dualBoardHtml = renderProjectBoardHtml({
+    groups: [
+      {
+        cwd: "/tmp/proj",
+        name: "proj",
+        rawName: "proj",
+        pinned: true,
+        pendingCount: 0,
+        liveCount: 0,
+        threads: [
+          { id: "codex:default:t1", provider: "codex", profileId: "default", profileLabel: "Codex 默认", title: "任务一", updatedAt: 1000 },
+          { id: "codex:guuguo:t2", provider: "codex", profileId: "guuguo", profileLabel: "Codex · guuguo", title: "任务二", updatedAt: 999 },
+        ],
+      },
+    ],
+    profiles: dualCodexProfiles,
+  });
+  assert.match(dualBoardHtml, /fpf\.\.\.417/);
+  assert.match(dualBoardHtml, /guuguo/);
 
   // 3. renderSidebarThreadListHtml distinguishes project headers & child tree rail, hides duplicate preview,
   //    renders live radar dot + completed blue dot, and folds groups > 8 items.
@@ -2438,6 +2521,7 @@ test("sidebar hierarchy, preview deduplication, completed blue dots, and minimal
       title: "Remote Control Codex Project Design",
       preview: "Remote Control Codex Project Design",
       live: true,
+      queuedCount: 1,
       updatedAt: nowSec - 10,
     },
     {
@@ -2469,17 +2553,60 @@ test("sidebar hierarchy, preview deduplication, completed blue dots, and minimal
     projectsMeta: { "/workspace/demo/studio": { pinned: true } },
   });
   const liveMap = new Map([["antigravity:desktop:live-1", { phase: "正在执行命令", detail: "npm test" }]]);
+  const unreadMap = new Map([["codex:codex:done-2", { status: "completed", summary: "刚跑完", at: nowSec * 1000 }]]);
   const sidebarHtml = renderSidebarThreadListHtml(groups, {
     activeThreadId: "antigravity:desktop:done-1",
     profiles,
     liveActivityByThread: liveMap,
+    recentCompletedByThread: unreadMap,
   });
 
   assert.match(sidebarHtml, /class="project-group-head"/);
   assert.match(sidebarHtml, /class="project-group-items"/);
-  assert.match(sidebarHtml, /class="thread-status-dot is-live"/);
+  assert.match(sidebarHtml, /class="thread-status-dot is-live(?: [^"]*)?"/);
+  assert.match(sidebarHtml, /class="thread-status-dot is-done is-recent"/);
+  assert.match(sidebarHtml, /class="thread-item[^"]*is-recent-done" data-thread-id="codex:codex:done-2"/);
   assert.match(sidebarHtml, /class="thread-status-dot is-done"/);
-  assert.match(sidebarHtml, /class="thread-item-sub is-live-sub">正在执行命令 · npm test</);
+  assert.match(sidebarHtml, /class="thread-item-sub is-live-sub"[^>]*>正在执行命令 · npm test</);
+  const liveRow = sidebarHtml.match(/<button[^>]*data-thread-id="antigravity:desktop:live-1"[^>]*>([\s\S]*?)<\/button>/)?.[1] || "";
+  assert.ok(liveRow);
+  assert.match(liveRow, /class="thread-status-dot is-live is-agent-live is-antigravity"[^>]*><svg class="ac-icon ac-provider-icon is-antigravity"/);
+  assert.doesNotMatch(liveRow, /thread-item-time|刚刚/);
+  assert.ok(liveRow.indexOf("thread-item-tags") > liveRow.indexOf("thread-item-sub"));
+  assert.match(liveRow, /class="thread-item-secondary">\s*<span class="thread-item-sub[^>]*>[^<]*<\/span>\s*<span class="thread-item-tags">/);
+  assert.match(liveRow.slice(liveRow.indexOf("thread-item-tags")), /thread-queued-pill[\s\S]*thread-micro-tag is-antigravity is-text-only"[^>]*>桌面<\/span>/);
+
+  // Single-account live Codex thread shows animated Codex glyph at left and omits redundant right-side agent chip.
+  const singleCodexLiveGroups = buildProjectGroups([
+    {
+      id: "codex:codex:running-only",
+      provider: "codex",
+      profileId: "codex",
+      profileLabel: "Codex · codex",
+      cwd: "/workspace/demo/codex-only",
+      title: "Codex 独立运行任务",
+      live: true,
+      updatedAt: nowSec - 5,
+    },
+  ], {
+    projectsMeta: { "/workspace/demo/codex-only": { pinned: true } },
+  });
+  const singleCodexLiveHtml = renderSidebarThreadListHtml(singleCodexLiveGroups, {
+    profiles: [{ provider: "codex", id: "codex", label: "Codex · codex", installed: true }],
+    autoFoldProjects: false,
+    nowMs: nowSec * 1000,
+  });
+  assert.match(singleCodexLiveHtml, /class="thread-status-dot is-live is-agent-live is-codex"[^>]*><svg class="ac-icon ac-provider-icon is-codex"/);
+  assert.doesNotMatch(singleCodexLiveHtml, /class="thread-micro-tag/);
+  const readSidebarHtml = renderSidebarThreadListHtml(groups, {
+    activeThreadId: "codex:codex:done-2",
+    profiles,
+    recentCompletedByThread: new Map(),
+  });
+  const readRow = readSidebarHtml.match(/<button[^>]*data-thread-id="codex:codex:done-2"[^>]*>([\s\S]*?)<\/button>/)?.[1] || "";
+  assert.match(readRow, /class="thread-status-dot is-done"/);
+  assert.doesNotMatch(readRow, /is-recent/);
+  assert.match(readRow, /thread-item-time/);
   // Duplicate title "故事设定与数据整理" must appear once (only as title, not duplicated in .thread-item-sub).
   assert.equal((sidebarHtml.match(/故事设定与数据整理/g) || []).length, 1);
   // Massive group > 8 folds cleanly with an expand button for the remaining 4 items.
@@ -2511,7 +2638,7 @@ test("sidebar hierarchy, preview deduplication, completed blue dots, and minimal
     nowMs: nowSec * 1000,
     searchText: "旧副标题",
   });
-  assert.match(searchSidebarHtml, /class="thread-item-sub ">额外旧副标题关键词</);
+  assert.match(searchSidebarHtml, /class="thread-item-sub "[^>]*>额外旧副标题关键词</);
 });
 
 test("markdown renders GFM tables, headerless pipe tables, alerts, task lists, nested lists, math, details, copyable code, and blocks XSS", () => {
@@ -3377,7 +3504,11 @@ test("telemetry toggle stops propagation across re-render and places desktop com
   const actionsIdx = indexHtml.indexOf('class="topbar-actions"');
   const slotIdx = indexHtml.indexOf('id="topbarTelemetrySlot"');
   const boardBtnIdx = indexHtml.indexOf('id="boardToggleBtn"');
-  assert.ok(actionsIdx > 0 && slotIdx > actionsIdx && boardBtnIdx > slotIdx);
+  assert.ok(actionsIdx > 0 && slotIdx > actionsIdx);
+  assert.ok(boardBtnIdx > indexHtml.indexOf('id="sidebar"') && boardBtnIdx < indexHtml.indexOf('</aside>'));
+  assert.equal((indexHtml.match(/id="boardToggleBtn"/g) || []).length, 1);
+  assert.match(indexHtml, /id="boardToggleBtn"[^>]*class="[^"]*sidebar-view-btn/);
+  assert.match(appJs, /\$\("boardToggleBtn"\)\.addEventListener\("click",\s*\(\) => openProjectBoardView\(\)\)/);
 
   assert.match(appCss, /@media\s*\(min-width:\s*961px\)[\s\S]*?\.agent-telemetry-bar:not\(\.is-expanded\)\s*\{\s*display:\s*none\s*!important;/);
   assert.match(appCss, /@media\s*\(max-width:\s*960px\)[\s\S]*?\.topbar-telemetry-slot\s*\{\s*display:\s*none\s*!important;/);
@@ -3430,7 +3561,8 @@ test("image-only user turns strip Antigravity XML wrappers and single-profile ch
     { provider: "antigravity", profileId: "desktop", profileLabel: "Antigravity" },
     { providerFilter: "all", profiles: singleAgyProfiles },
   );
-  assert.equal(chip?.text, "Agy");
+  assert.equal(chip?.text, "");
+  assert.match(chip?.iconSvg || "", /<svg[^>]*is-antigravity/);
   assert.equal(compactProfileChipText({ provider: "antigravity", id: "desktop", label: "Antigravity" }), "桌面");
 
   const appJs = await readFile(fileURLToPath(new URL("../public/app.js", import.meta.url)), "utf8");
@@ -3924,4 +4056,107 @@ test("renderTurnHtml renders Claude <task-notification>, <cross-session-message>
   assert.match(crossAndBashHtml, /class="msg-row msg-claude-bash"/);
   assert.match(crossAndBashHtml, /\$ git status -s/);
   assert.match(crossAndBashHtml, /M README\.md/);
+});
+
+test("renderTurnHtml renders per-turn model badges, inline interrupted resume button, and Claude copy-login button", async () => {
+  const { formatTurnModelBadge, renderTurnHtml } = await import("../public/markdown.js");
+
+  assert.deepEqual(
+    formatTurnModelBadge({
+      models: ["gemini-pro-orchestrator", "gemini-4-hydrogen-low"],
+    }),
+    {
+      label: "Carbon → Hydrogen L",
+      title: "gemini-pro-orchestrator → gemini-4-hydrogen-low",
+    },
+  );
+  assert.deepEqual(
+    formatTurnModelBadge({ model: "gpt-6.1-sol", effort: "high" }),
+    {
+      label: "GPT-6.1-SOL · H",
+      title: "gpt-6.1-sol (high)",
+    },
+  );
+  assert.deepEqual(
+    formatTurnModelBadge({}, "claude-opus-5-5", "medium"),
+    {
+      label: "Opus 5.5 · M",
+      title: "claude-opus-5-5 (medium)",
+    },
+  );
+  assert.equal(formatTurnModelBadge({}), null);
+
+  const interruptedToolTurnHtml = renderTurnHtml({
+    id: "turn-interrupted-tool",
+    status: "completed",
+    models: ["gemini-pro-orchestrator", "gemini-4-hydrogen-high"],
+    items: [
+      { type: "userMessage", id: "u-int", content: [{ type: "text", text: "重构下状态吗" }] },
+      { type: "commandExecution", id: "cmd-int", command: "npm run check", status: "completed" },
+    ],
+  }, {
+    agentLabel: "Antigravity",
+    threadId: "antigravity:desktop:t-int",
+    showIncompleteSummaryHint: true,
+    supersededByNextTurn: false,
+  });
+
+  assert.match(interruptedToolTurnHtml, /class="process-model-pill"[^>]*>Carbon → Hydrogen H<\/span>/);
+  assert.match(interruptedToolTurnHtml, /class="turn-resume-inline-btn" data-resume-interrupted-turn="1">▶ 继续执行<\/button>/);
+
+  const goalSuspendedHtml = renderTurnHtml({
+    id: "turn-goal-suspended",
+    status: "completed",
+    model: "claude-opus-5-5",
+    items: [
+      { type: "userMessage", id: "u-goal", content: [{ type: "text", text: "跑完全部验收" }] },
+      { type: "commandExecution", id: "cmd-goal", command: "npm test", status: "completed" },
+    ],
+  }, {
+    agentLabel: "Claude Code",
+    threadId: "claude:default:t-goal",
+    showIncompleteSummaryHint: true,
+    supersededByNextTurn: false,
+    goalSuspended: true,
+  });
+  assert.match(goalSuspendedHtml, /class="process-model-pill"[^>]*>Opus 5\.5<\/span>/);
+  assert.match(goalSuspendedHtml, /data-resume-interrupted-turn="1">▶ 恢复 Goal<\/button>/);
+
+  const agentReplyHtml = renderTurnHtml({
+    id: "turn-reply-model",
+    status: "completed",
+    model: "claude-sonnet-5-5",
+    effort: "medium",
+    items: [
+      { type: "userMessage", id: "u-rep", content: [{ type: "text", text: "你好" }] },
+      { type: "agentMessage", id: "a-rep", text: "已处理完成", phase: "final_answer" },
+    ],
+  }, {
+    agentLabel: "Claude Code",
+    threadId: "claude:default:t-rep",
+  });
+  assert.match(agentReplyHtml, /<span class="msg-role">Claude Code<\/span>\s*<span class="turn-model-tag"[^>]*>Sonnet 5\.5 · M<\/span>/);
+
+  const pillsHtml = renderProfilePillsHtml([
+    {
+      id: "claude-hotmail",
+      provider: "claude",
+      label: "Claude · claude hotmail",
+      account: { signedIn: true, email: "guodeqing@hotmail.com", planType: "Pro" },
+      health: {
+        status: "unavailable",
+        reasonCode: "auth",
+        shortReason: "CLI未登录",
+        detail: "CLI未登录：请执行 CLAUDE_CONFIG_DIR=~/.claude-claude-hotmail claude auth login --email guodeqing@hotmail.com",
+      },
+    },
+    {
+      id: "default",
+      provider: "codex",
+      label: "Codex 默认",
+      account: { signedIn: true, email: "codex@example.com" },
+      health: { status: "available" },
+    },
+  ]);
+  assert.match(pillsHtml, /data-copy-login-cmd="CLAUDE_CONFIG_DIR=~\/\.claude-claude-hotmail claude auth login --email guodeqing@hotmail\.com"[^>]*>复制登录<\/button>/);
 });

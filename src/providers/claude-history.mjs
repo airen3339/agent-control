@@ -601,6 +601,9 @@ export function parseClaudeJsonlTranscript(lines, { rawId = "", fallbackCwd = ""
         model = String(msg.model).trim();
       }
       const turn = ensureTurn(entry.uuid, ts);
+      if (isValidClaudeModelId(msg.model) && (!entry.isSidechain || !turn.model)) {
+        turn.model = String(msg.model).trim();
+      }
       const msgKey = String(msg.id || entry.uuid || turn.items.length);
       const content = Array.isArray(msg.content) ? msg.content : [];
       const hasToolUse = content.some((b) => b?.type === "tool_use");

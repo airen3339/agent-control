@@ -1,4 +1,4 @@
-import { iconSvg, providerIconSvg } from "./icons.js?v=20261116a";
+import { iconSvg, providerIconSvg } from "./icons.js?v=20261116o";
 
 export const PROVIDER_META = Object.freeze({
   all: { id: "all", label: "全部", short: "全部" },
@@ -727,10 +727,45 @@ function compactEmailDomainShort(email = "") {
   return clean.slice(atIdx + 1).split(".")[0] || "";
 }
 
+export function abbreviateMiddleText(value = "", { head = 3, tail = 3, maxLen = 8 } = {}) {
+  const clean = String(value || "").trim();
+  if (!clean) return "";
+  const chars = Array.from(clean);
+  if (chars.length <= maxLen) return clean;
+  let h = Math.max(1, Number(head) || 3);
+  let t = Math.max(1, Number(tail) || 3);
+  if (chars.length <= h + t + 2) {
+    h = Math.max(1, Math.min(h, Math.floor((maxLen - 2) / 2)));
+    t = Math.max(1, Math.min(t, maxLen - 2 - h));
+  }
+  while (h > 1 && chars[h - 1] === "@") h -= 1;
+  while (t > 1 && (chars[chars.length - t] === "." || chars[chars.length - t] === "@")) t -= 1;
+  if (chars.length <= h + t + 1) return clean;
+  return `${chars.slice(0, h).join("")}...${chars.slice(-t).join("")}`;
+}
+
+export function compactProfileDisplayLabel(label = "", provider = "") {
+  const clean = String(label || "").trim();
+  if (!clean) return "";
+  const prefixMatch = clean.match(/^((?:Antigravity|Codex|Claude\s*Code|Claude|Grok)(?:\s*[·:/\-]\s*|\s+))(.*)$/i);
+  if (prefixMatch) {
+    const prefix = prefixMatch[1];
+    const rest = prefixMatch[2].trim();
+    if (!rest || /^(默认|default|桌面|desktop|cli|命令行)$/i.test(rest)) return clean;
+    const shortRest = abbreviateMiddleText(rest, { head: 3, tail: 3, maxLen: 8 });
+    return shortRest === rest ? clean : `${prefix.trimEnd()} ${shortRest}`.replace(/\s{2,}/g, " ");
+  }
+  const lower = clean.toLowerCase();
+  if (lower === String(provider || "").trim().toLowerCase() || /^(默认|default|桌面|desktop|cli|命令行)$/i.test(clean)) {
+    return clean;
+  }
+  return abbreviateMiddleText(clean, { head: 3, tail: 3, maxLen: 8 });
+}
+
 function formatTelemetryCardTitle(provider, profile, totalForProvider) {
   const meta = providerVisualMeta(provider);
   const alias = String(profile?.health?.alias || "").trim();
-  if (alias) return alias;
+  if (alias) return abbreviateMiddleText(alias, { head: 4, tail: 3, maxLen: 10 });
   if (totalForProvider <= 1) return meta.short;
 
   const rawLabel = String(profile?.label || profile?.id || "").trim();
@@ -738,7 +773,7 @@ function formatTelemetryCardTitle(provider, profile, totalForProvider) {
   if (profile?.id === "default" || rawLabel === `${meta.short} 默认` || rawLabel === `${meta.label} 默认`) {
     return domainShort ? `${meta.short} · ${domainShort}` : `${meta.short} 默认`;
   }
-  return rawLabel || `${meta.short} · ${profile?.id || ""}`;
+  return compactProfileDisplayLabel(rawLabel, provider) || `${meta.short} · ${abbreviateMiddleText(profile?.id || "", { head: 3, tail: 3, maxLen: 8 })}`;
 }
 
 export function buildSelectableTelemetryItems(profiles = []) {
@@ -819,7 +854,11 @@ export function buildSelectableTelemetryItems(profiles = []) {
         shortTitle = dom ? `${shortTitle} (${dom})` : `${shortTitle} (${p.id})`;
       }
       const identity = formatProfileIdentityHint(p);
-      const baseLabel = String(p.health?.alias || p.label || shortTitle).trim() || shortTitle;
+      const baseLabel = String(
+        p.health?.alias
+          ? abbreviateMiddleText(p.health.alias, { head: 4, tail: 3, maxLen: 10 })
+          : (compactProfileDisplayLabel(p.label, prov) || shortTitle),
+      ).trim() || shortTitle;
       const pickerLabel = identity && !baseLabel.toLowerCase().includes(identity.toLowerCase())
         ? `${baseLabel} (${identity})`
         : baseLabel;
@@ -1029,7 +1068,9 @@ function renderTelemetryDrawerHtml(profiles, byProvider, { providerFilter, nowSe
       const qTone = q?.statusTone || q?.status || "ok";
       const win = resolveQuotaWindowsForUi(q);
       const identity = formatProfileIdentityHint(p);
-      const titleName = p.health?.alias || p.label || p.id || meta.label;
+      const titleName = p.health?.alias
+        ? abbreviateMiddleText(p.health.alias, { head: 4, tail: 3, maxLen: 10 })
+        : (compactProfileDisplayLabel(p.label, prov) || abbreviateMiddleText(p.id, { head: 3, tail: 3, maxLen: 8 }) || meta.label);
       const subParts = [];
       const planLabel = String(q?.planLabel || "").trim();
       if (planLabel && !titleName.toLowerCase().includes(planLabel.toLowerCase())) subParts.push(planLabel);
@@ -1268,7 +1309,6 @@ export function renderAgentTelemetryBarHtml(profiles = [], telemetry = null, {
   const isExpandedMode = Boolean(expanded || pickerOpen);
   if (!isExpandedMode) {
     const compactEntries = selectCompactTelemetryEntries(entries, { activeProvider, activeProfileId });
-    const hiddenExtraCount = Math.max(0, renderCardItems.length - compactEntries.length);
     const shownRunning = compactEntries.reduce((sum, e) => sum + e.running, 0);
     const shownQueued = compactEntries.reduce((sum, e) => sum + e.queued, 0);
     const hiddenRunning = Math.max(0, totalRunning - shownRunning);
@@ -1283,10 +1323,9 @@ export function renderAgentTelemetryBarHtml(profiles = [], telemetry = null, {
         : (queued > 0 ? `${queued} 排队` : "");
       const tpsText = tokensPerSec > 0 ? `${formatTokensPerSec(tokensPerSec)} tok/s` : "";
       const { summaryText, tone } = formatSimplifiedQuotaSummary(prov, item.profiles, nowSec);
-      const dotClass = running > 0 ? "is-running" : (queued > 0 ? "is-queued" : "");
+      const glyphStateClass = running > 0 ? "is-running" : (queued > 0 ? "is-queued" : "");
       return `<button type="button" class="telemetry-compact-pill ${running > 0 ? "is-running" : ""} ${isCurrent ? "is-current" : ""}" data-telemetry-item-key="${escapeAttrHtml(item.key)}" data-telemetry-toggle title="点击展开全部 Agent 监控与额度详情">`
-        + `<span class="telemetry-live-dot ${dotClass}" aria-hidden="true"></span>`
-        + `<span class="telemetry-provider-glyph is-${escapeAttrHtml(meta.tone)}">${providerIconSvg(prov, { size: 12 })}</span>`
+        + `<span class="telemetry-provider-glyph is-${escapeAttrHtml(meta.tone)}${glyphStateClass ? ` ${glyphStateClass}` : ""}">${providerIconSvg(prov, { size: 12 })}</span>`
         + `<span class="telemetry-compact-name">${escapeAttrHtml(item.shortTitle)}</span>`
         + (runText ? `<span class="telemetry-compact-run ${running > 0 ? "is-running" : "is-queued"}">${escapeAttrHtml(runText)}</span>` : "")
         + (tpsText ? `<span class="telemetry-compact-tps">${escapeAttrHtml(tpsText)}</span>` : "")
@@ -1305,14 +1344,9 @@ export function renderAgentTelemetryBarHtml(profiles = [], telemetry = null, {
         + `</button>`
       : "";
 
-    const expandLabel = hiddenExtraCount > 0 ? `详情 (${renderCardItems.length})` : "详情";
     return `<div class="telemetry-bar-shell is-compact">
       <div class="telemetry-compact-row">
         <div class="telemetry-compact-items">${pillsHtml || `<span class="telemetry-summary-title">Agent 就绪</span>`}${overflowPillHtml}</div>
-        <div class="telemetry-summary-actions">
-          <button type="button" class="telemetry-action-btn" data-telemetry-refresh ${refreshing ? "disabled" : ""} title="手动刷新 Agent 额度与状态" aria-label="刷新额度">${refreshing ? "…" : iconSvg("refresh", { size: 12 })}</button>
-          <button type="button" class="telemetry-action-btn" data-telemetry-toggle aria-expanded="false"><span>${escapeAttrHtml(expandLabel)}</span>${iconSvg("chevron-down", { size: 11 })}</button>
-        </div>
       </div>
     </div>`;
   }
@@ -1329,11 +1363,11 @@ export function renderAgentTelemetryBarHtml(profiles = [], telemetry = null, {
       ? `${running} 运行${queued > 0 ? ` · ${queued}排队` : ""}`
       : (queued > 0 ? `${queued} 排队` : "空闲");
 
+    const cardGlyphStateClass = running > 0 ? "is-running" : (queued > 0 ? "is-queued" : "");
     return `<div class="telemetry-agent-card ${running > 0 ? "is-running" : ""} ${isFiltered ? "is-filtered" : ""}" data-telemetry-item-key="${escapeAttrHtml(item.key)}" data-telemetry-toggle title="点击展开/收起 ${escapeAttrHtml(item.pickerLabel)} 详情">
       <div class="telemetry-card-top">
         <div class="telemetry-card-id">
-          <span class="telemetry-live-dot ${running > 0 ? "is-running" : queued > 0 ? "is-queued" : ""}" aria-hidden="true"></span>
-          <span class="telemetry-provider-glyph is-${escapeAttrHtml(meta.tone)}">${providerIconSvg(prov, { size: 12 })}</span>
+          <span class="telemetry-provider-glyph is-${escapeAttrHtml(meta.tone)}${cardGlyphStateClass ? ` ${cardGlyphStateClass}` : ""}">${providerIconSvg(prov, { size: 12 })}</span>
           <span class="telemetry-provider-name">${escapeAttrHtml(item.shortTitle)}</span>
         </div>
         <div class="telemetry-card-metrics">
@@ -1522,38 +1556,52 @@ export function findFailoverCandidateProfile(profiles = [], provider = "", faile
 export function formatProfileIdentityHint(profile) {
   if (!profile) return "";
   const alias = String(profile.health?.alias || "").trim();
-  if (alias) return alias.slice(0, 22);
+  if (alias) return abbreviateMiddleText(alias, { head: 4, tail: 3, maxLen: 10 });
   const email = String(profile.account?.email || "").trim();
   if (email) {
-    if (email.length <= 24) return email;
-    const atIdx = email.indexOf("@");
-    if (atIdx > 0) {
-      const local = email.slice(0, atIdx);
-      const domain = email.slice(atIdx + 1).split(".")[0] || email.slice(atIdx + 1);
-      return `${local.slice(0, 14)}@${domain.slice(0, 8)}`;
-    }
-    return email.slice(0, 24);
+    return abbreviateMiddleText(email, { head: 4, tail: 3, maxLen: 9 });
   }
   const endpoint = String(profile.endpointLabel || "").trim();
-  if (endpoint) return endpoint.slice(0, 24);
-  if (profile.identityLabel) return String(profile.identityLabel).slice(0, 22);
+  if (endpoint) return abbreviateMiddleText(endpoint, { head: 4, tail: 4, maxLen: 12 });
+  if (profile.identityLabel) return abbreviateMiddleText(String(profile.identityLabel), { head: 3, tail: 3, maxLen: 9 });
   return "";
 }
 
-export function compactProfileChipText(profile) {
+function compactAccountHandle(profile, maxLen = 8) {
+  const email = String(profile?.account?.email || "").trim();
+  if (email) {
+    const atIdx = email.indexOf("@");
+    const handle = (atIdx > 0 ? email.slice(0, atIdx) : email).trim();
+    if (handle) return abbreviateMiddleText(handle, { head: 3, tail: 3, maxLen });
+  }
+  const name = String(profile?.account?.name || profile?.identityLabel || "").trim();
+  if (name && !/^(默认|default)$/i.test(name)) {
+    return abbreviateMiddleText(name, { head: 3, tail: 3, maxLen });
+  }
+  return "";
+}
+
+export function compactProfileChipText(profile, { maxLen = 8 } = {}) {
   if (!profile) return "";
   const alias = String(profile.health?.alias || "").trim();
-  if (alias) return alias.length > 9 ? alias.slice(0, 9) : alias;
+  if (alias) return abbreviateMiddleText(alias, { head: 3, tail: 3, maxLen });
+  const provider = String(profile.provider || "").trim().toLowerCase();
   const label = String(profile.label || "").trim();
   const stripped = label
     .replace(/^(Codex|Claude\s*Code|Claude|Antigravity|Grok)\s*[·:/\-]?\s*/i, "")
     .trim();
-  if (stripped) return stripped.length > 9 ? stripped.slice(0, 9) : stripped;
+  const isGenericStripped = !stripped
+    || (provider && stripped.toLowerCase() === provider)
+    || /^(默认|default)$/i.test(stripped);
+  if (!isGenericStripped) return abbreviateMiddleText(stripped, { head: 3, tail: 3, maxLen });
   if (profile.id === "desktop") return "桌面";
   if (profile.id === "cli") return "CLI";
-  if (label) return label.length > 9 ? label.slice(0, 9) : label;
+  const accountHandle = compactAccountHandle(profile, maxLen);
+  if (accountHandle) return accountHandle;
+  if (stripped) return abbreviateMiddleText(stripped, { head: 3, tail: 3, maxLen });
+  if (label) return abbreviateMiddleText(label, { head: 3, tail: 3, maxLen });
   const fallback = String(profile.id || "默认").trim();
-  return fallback.length > 9 ? fallback.slice(0, 9) : fallback;
+  return abbreviateMiddleText(fallback, { head: 3, tail: 3, maxLen });
 }
 
 function extractCompactVariantLabel(thread) {
@@ -1569,7 +1617,7 @@ function extractCompactVariantLabel(thread) {
   if (!cleaned) return "";
   const lower = cleaned.toLowerCase();
   if (lower === provider || /^(默认|default)$/i.test(cleaned)) return "";
-  return cleaned.length > 6 ? cleaned.slice(0, 6) : cleaned;
+  return abbreviateMiddleText(cleaned, { head: 3, tail: 3, maxLen: 8 });
 }
 
 export function compactThreadSourceChip(thread, {
@@ -1579,12 +1627,39 @@ export function compactThreadSourceChip(thread, {
 } = {}) {
   if (profileFilter && profileFilter !== "all") return null;
   const provider = String(thread?.provider || "antigravity");
+  const providerLower = provider.toLowerCase();
   const meta = providerVisualMeta(provider);
   const scopedProfiles = filterProfilesByProvider(profiles, provider).filter((p) => p?.installed !== false);
+  const matchedProfile = scopedProfiles.find((p) => p.id === thread?.profileId)
+    || profiles.find((p) => String(p?.provider || "").toLowerCase() === providerLower && p?.id === thread?.profileId)
+    || null;
   const shortVariant = extractCompactVariantLabel(thread);
-  const title = `${meta.label}${thread?.profileLabel ? ` · ${thread.profileLabel}` : ""}`;
+  const hasMultiProfiles = scopedProfiles.length >= 2;
+  const multiAccountChip = hasMultiProfiles
+    ? (compactProfileChipText(matchedProfile, { maxLen: 8 })
+      || shortVariant
+      || (/^(default|默认)$/i.test(String(thread?.profileId || "")) ? "默认" : abbreviateMiddleText(String(thread?.profileId || ""), { head: 3, tail: 3, maxLen: 8 }))
+      || "默认")
+    : "";
+  const emailHint = String(matchedProfile?.account?.email || "").trim();
+  const baseTitle = `${meta.label}${thread?.profileLabel ? ` · ${thread.profileLabel}` : ""}`;
+  const title = emailHint && !baseTitle.includes(emailHint)
+    ? `${baseTitle} (${emailHint})`
+    : baseTitle;
+
+  if (scopedProfiles.length === 1) {
+    return { glyph: "", iconSvg: meta.iconSvg, text: "", tone: meta.tone, title };
+  }
 
   if (providerFilter && providerFilter !== "all") {
+    if (hasMultiProfiles) {
+      return {
+        glyph: "",
+        text: multiAccountChip,
+        tone: meta.tone,
+        title,
+      };
+    }
     if (!shortVariant) return null;
     if (scopedProfiles.length > 0 && scopedProfiles.length <= 1) return null;
     return {
@@ -1597,17 +1672,19 @@ export function compactThreadSourceChip(thread, {
 
   let text = meta.short;
   if (provider === "antigravity") {
-    const hasMultiOrExplicitVariant = scopedProfiles.length >= 2
+    const hasMultiOrExplicitVariant = hasMultiProfiles
       || /桌面|desktop|\bcli\b|命令行/i.test(String(thread?.profileLabel || ""));
-    text = (hasMultiOrExplicitVariant && shortVariant) ? shortVariant : meta.short;
+    text = (hasMultiOrExplicitVariant && (multiAccountChip || shortVariant))
+      ? (multiAccountChip || shortVariant)
+      : meta.short;
   } else if (provider === "codex") {
-    text = shortVariant || "Codex";
+    text = hasMultiProfiles ? multiAccountChip : (shortVariant || "Codex");
   } else if (provider === "claude") {
-    text = shortVariant || "Claude";
+    text = hasMultiProfiles ? multiAccountChip : (shortVariant || "Claude");
   } else if (provider === "grok") {
-    text = shortVariant || "Grok";
-  } else if (shortVariant) {
-    text = shortVariant;
+    text = hasMultiProfiles ? multiAccountChip : (shortVariant || "Grok");
+  } else if (hasMultiProfiles || shortVariant) {
+    text = multiAccountChip || shortVariant;
   }
 
   return {
@@ -1623,7 +1700,7 @@ export function profileOptionLabel(profile) {
   if (!profile) return "默认";
   const meta = profileHealthVisualMeta(profile);
   const idHint = formatProfileIdentityHint(profile);
-  const name = profile.label || profile.id || "默认";
+  const name = compactProfileDisplayLabel(profile.label || profile.id || "默认", profile.provider);
   const parts = [name];
   if (idHint && !name.includes(idHint)) parts.push(idHint);
   if (meta.status !== "unknown" && meta.badgeText) parts.push(meta.badgeText);
@@ -1656,6 +1733,13 @@ export function renderProfilePillsHtml(profiles = [], {
     const quotaPlan = String(quota?.planLabel || "").trim();
     const quotaPct = quota?.primary?.remainingPercent;
     const hasQuotaPct = typeof quotaPct === "number" && Number.isFinite(quotaPct);
+    const authCmdMatch = (
+      p.provider === "claude"
+      && (meta.badgeText === "CLI未登录" || p.health?.reasonCode === "auth")
+    )
+      ? String(p.health?.detail || "").match(/((?:CLAUDE_CONFIG_DIR=\S+\s+)?claude auth login(?:\s+--email\s+\S+)?)/i)
+      : null;
+    const copyLoginCmd = authCmdMatch?.[1] ? authCmdMatch[1].trim() : "";
     const subParts = [];
     if (hint) subParts.push(hint);
     if (quotaPlan && quotaPlan !== "未登录" && !subParts.includes(quotaPlan)) subParts.push(quotaPlan);
@@ -1664,7 +1748,7 @@ export function renderProfilePillsHtml(profiles = [], {
     else subParts.push(meta.badgeText);
     if (!isProbing && quotaSummary && quotaSummary !== meta.badgeText) subParts.push(quotaSummary);
     const subText = subParts.filter(Boolean).join(" · ");
-    const displayName = p.label || p.id || "默认";
+    const displayName = compactProfileDisplayLabel(p.label || p.id || "默认", p.provider);
     const toneClass = quota?.statusTone ? `tone-${quota.statusTone}` : "";
 
     return `
@@ -1685,6 +1769,14 @@ export function renderProfilePillsHtml(profiles = [], {
           </span>
         </button>
         <div class="profile-pill-actions">
+          ${copyLoginCmd ? `
+            <button
+              type="button"
+              class="profile-pill-action-btn is-copy-login"
+              data-copy-login-cmd="${escapeAttrHtml(copyLoginCmd)}"
+              title="复制终端登录命令：${escapeAttrHtml(copyLoginCmd)}"
+            >复制登录</button>
+          ` : ""}
           <button
             type="button"
             class="profile-pill-action-btn"
@@ -1712,6 +1804,37 @@ export function renderProfilePillsHtml(profiles = [], {
 export function filterProfilesByProvider(profiles = [], provider = "all") {
   if (!provider || provider === "all") return profiles;
   return profiles.filter((p) => p.provider === provider);
+}
+
+const NEW_THREAD_PROVIDER_ORDER = ["antigravity", "codex", "claude", "grok"];
+
+export function renderProviderPillsHtml({
+  selectedProvider = "antigravity",
+  profiles = [],
+  providerOrder = NEW_THREAD_PROVIDER_ORDER,
+} = {}) {
+  const cleanSelected = String(selectedProvider || "antigravity").trim().toLowerCase();
+  return (Array.isArray(providerOrder) ? providerOrder : NEW_THREAD_PROVIDER_ORDER).map((provider) => {
+    const visual = providerVisualMeta(provider);
+    const list = sortProfilesByAvailability(filterProfilesByProvider(profiles, provider));
+    const best = pickBestAvailableProfile(list);
+    const healthMeta = best ? profileHealthVisualMeta(best) : { dotClass: "is-unknown", badgeText: "未配置" };
+    const isSelected = provider === cleanSelected;
+    return `
+      <button
+        type="button"
+        class="provider-pill-btn${isSelected ? " is-selected" : ""}"
+        data-select-provider="${escapeAttrHtml(provider)}"
+        role="radio"
+        aria-checked="${isSelected ? "true" : "false"}"
+        title="${escapeAttrHtml(`${visual.label}${best ? ` · ${healthMeta.badgeText}` : ""}`)}"
+      >
+        <span class="provider-pill-icon" aria-hidden="true">${visual.iconSvg || ""}</span>
+        <span class="provider-pill-label">${escapeAttrHtml(visual.label)}</span>
+        <span class="profile-status-dot ${healthMeta.dotClass}" aria-hidden="true"></span>
+      </button>
+    `;
+  }).join("");
 }
 
 export function ensurePreferredModelInList(models = [], provider = "", preferredModel = "") {
@@ -1779,9 +1902,9 @@ function shortQuotaProfileLabel(profile) {
   }
   const metaShort = providerVisualMeta(provider).short;
   if (provider === "antigravity") {
-    return `${metaShort} ${cleaned.length > 6 ? cleaned.slice(0, 6) : cleaned}`;
+    return `${metaShort} ${abbreviateMiddleText(cleaned, { head: 3, tail: 3, maxLen: 8 })}`;
   }
-  return cleaned.length > 10 ? cleaned.slice(0, 10) : cleaned;
+  return abbreviateMiddleText(cleaned, { head: 3, tail: 3, maxLen: 8 });
 }
 
 export function renderQuotaOverviewHtml(profiles = [], {
@@ -1847,7 +1970,8 @@ export function renderQuotaOverviewHtml(profiles = [], {
       const q = p.quota || {};
       const tone = q.statusTone || "unknown";
       const planLabel = String(q.planLabel || "").trim();
-      const accountLabel = String(q.accountLabel || "").trim();
+      const rawAccountLabel = String(q.accountLabel || "").trim();
+      const accountLabel = rawAccountLabel ? abbreviateMiddleText(rawAccountLabel, { head: 4, tail: 3, maxLen: 9 }) : "";
       const buckets = Array.isArray(q.buckets) && q.buckets.length
         ? q.buckets
         : (q.primary ? [q.primary] : []);
@@ -1887,7 +2011,7 @@ export function renderQuotaOverviewHtml(profiles = [], {
           <div class="quota-detail-card-head">
             <span class="quota-detail-title">
               <span class="is-${escapeAttrHtml(visual.tone)}">${providerIconSvg(p.provider, { size: 13 })}</span>
-              <strong>${escapeAttrHtml(p.label || p.id)}</strong>
+              <strong>${escapeAttrHtml(compactProfileDisplayLabel(p.label || p.id, p.provider))}</strong>
               ${planLabel ? `<span class="quota-plan-pill">${escapeAttrHtml(planLabel)}</span>` : ""}
               ${creditsText ? `<span class="quota-plan-pill is-credits">${creditsText}</span>` : ""}
             </span>

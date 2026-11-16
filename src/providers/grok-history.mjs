@@ -617,6 +617,8 @@ export async function readGrokThreadHistory(
       if (entry.model_id) modelFromChat = String(entry.model_id).trim();
       if (entry.reasoning_effort) effortFromChat = String(entry.reasoning_effort).trim().toLowerCase();
       const turn = ensureTurn();
+      if (entry.model_id) turn.model = String(entry.model_id).trim();
+      if (entry.reasoning_effort) turn.effort = String(entry.reasoning_effort).trim().toLowerCase();
       const text = typeof entry.content === "string" ? entry.content : "";
       if (text) {
         turn.items.push({

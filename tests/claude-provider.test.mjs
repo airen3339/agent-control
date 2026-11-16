@@ -692,6 +692,8 @@ test("claudeEnvironment preserves default keychain path and Cockpit desktop inst
   };
   delete testEnv.CLAUDE_CONFIG_DIR;
   await writeFile(resolve(defaultClaudeDir, ".mock-probe-error"), "CLI_LOGGED_OUT", "utf8");
+  await mkdir(customDir, { recursive: true });
+  await writeFile(resolve(customDir, ".mock-probe-error"), "CLI_LOGGED_OUT", "utf8");
   const providerLoggedOut = new ClaudeProvider({
     env: testEnv,
   });
@@ -708,6 +710,11 @@ test("claudeEnvironment preserves default keychain path and Cockpit desktop inst
     const health = classifyProfileError(err);
     assert.equal(health.shortReason, "CLI未登录");
     assert.match(health.detail, /claude auth login --email user@icloud\.com/);
+    return true;
+  });
+
+  await assert.rejects(() => providerLoggedOut.probeProfile("claude-hotmail"), (err) => {
+    assert.match(err.message, /执行 CLAUDE_CONFIG_DIR=~\/\.claude-claude-hotmail claude auth login --email user@hotmail\.com/);
     return true;
   });
 
@@ -741,6 +748,25 @@ test("claudeEnvironment preserves default keychain path and Cockpit desktop inst
   // Desktop history owned by hotmail remains readable despite dedicated/default CLI configDir split.
   const hotThreads = await providerHotmailAuthed.listThreads("claude-hotmail");
   assert.ok(hotThreads.some((th) => th.rawId === histSessId));
+
+  // An existing CLI profile for the same desktop account is reusable without moving credentials.
+  const existingCliDir = resolve(fakeHome, ".claude-work");
+  await mkdir(resolve(existingCliDir, "projects"), { recursive: true });
+  await writeFile(resolve(existingCliDir, ".mock-auth-status.json"), JSON.stringify({
+    loggedIn: true,
+    authMethod: "claude.ai",
+    email: "user@hotmail.com",
+  }), "utf8");
+  await writeFile(resolve(defaultClaudeDir, ".mock-probe-error"), "CLI_LOGGED_OUT", "utf8");
+  await mkdir(customDir, { recursive: true });
+  await writeFile(resolve(customDir, ".mock-probe-error"), "CLI_LOGGED_OUT", "utf8");
+  const providerExistingCli = new ClaudeProvider({ env: testEnv });
+  t.after(() => providerExistingCli.close());
+  const existingProfiles = await providerExistingCli.listProfiles();
+  assert.equal(existingProfiles.find((p) => p.id === "claude-hotmail")?.cliConfigDir, existingCliDir);
+  assert.equal(existingProfiles.find((p) => p.id === "default")?.cliConfigDir, defaultClaudeDir);
+  assert.equal((await providerExistingCli.probeProfile("claude-hotmail")).email, "user@hotmail.com");
+  await assert.rejects(() => providerExistingCli.probeProfile("default"), /CLI未登录/);
 });
 
 test("claude-history keeps structured <task-notification>/<cross-session-message>/<bash-input> clean in previews while preserving turn structure", async (t) => {
@@ -826,4 +852,33 @@ test("claude-history keeps structured <task-notification>/<cross-session-message
   const notifTurnText = parsed1.turns[1].items[0].content[0].text;
   assert.doesNotMatch(notifTurnText, /SYSTEM NOTIFICATION - NOT USER INPUT/);
   assert.match(notifTurnText, /<task-notification>\n<task-id>b3zgdt09y<\/task-id>/);
+});
+
+test("claude-history attaches per-turn primary model while ignoring sidechain overrides", () => {
+  const parsed = parseClaudeJsonlTranscript([
+    JSON.stringify({
+      type: "user",
+      uuid: "u-1",
+      cwd: "/tmp/m",
+      timestamp: "2026-11-16T08:10:00Z",
+      message: { role: "user", content: "分析问题" },
+    }),
+    JSON.stringify({
+      type: "assistant",
+      uuid: "a-1",
+      timestamp: "2026-11-16T08:10:03Z",
+      message: { id: "m-1", model: "claude-opus-5-5", content: [{ type: "text", text: "主模型结论" }] },
+    }),
+    JSON.stringify({
+      type: "assistant",
+      uuid: "a-side",
+      isSidechain: true,
+      timestamp: "2026-11-16T08:10:04Z",
+      message: { id: "m-side", model: "claude-haiku-4-5", content: [{ type: "text", text: "子任务" }] },
+    }),
+  ], { rawId: "sess-model-check" });
+
+  assert.equal(parsed.model, "claude-opus-5-5");
+  assert.equal(parsed.turns.length, 1);
+  assert.equal(parsed.turns[0].model, "claude-opus-5-5");
 });

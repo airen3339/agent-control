@@ -398,15 +398,40 @@ function resolveThreadDotClass(thread, recentCompletedByThread = null) {
   return "is-done";
 }
 
-function renderTaskSlotHtml(thread, activeThreadId, { selectionMode = false, selectedSet = null } = {}) {
+function renderThreadStatusMarkerHtml(thread, recentCompletedByThread = null) {
+  const dotClass = resolveThreadDotClass(thread, recentCompletedByThread);
+  if ((thread?.pendingCount || 0) === 0 && thread?.live) {
+    const provider = String(thread.provider || "antigravity");
+    const meta = providerVisualMeta(provider);
+    return `<span class="thread-status-dot is-live is-agent-live is-${escapeHtml(meta.tone)}" aria-hidden="true">${providerIconSvg(provider, { size: 12 })}</span>`;
+  }
+  return `<span class="thread-status-dot ${dotClass}" aria-hidden="true"></span>`;
+}
+
+function renderThreadCompactChipHtml(thread, chip) {
+  if (!chip) return "";
+  const isLive = Boolean(thread?.live) && (thread?.pendingCount || 0) === 0;
+  const text = String(chip.text || "").trim();
+  const hasGlyph = Boolean(chip.iconSvg || chip.glyph);
+  if (isLive && !text) return "";
+  const glyphHtml = (!isLive && hasGlyph)
+    ? `<span class="micro-glyph" aria-hidden="true">${chip.iconSvg || escapeHtml(chip.glyph)}</span>`
+    : "";
+  const iconOnlyClass = (!text && glyphHtml) ? " is-icon-only" : "";
+  const textOnlyClass = (text && !glyphHtml) ? " is-text-only" : "";
+  return `<span class="thread-micro-tag is-${escapeHtml(chip.tone)}${iconOnlyClass}${textOnlyClass}" title="${escapeHtml(chip.title)}">${glyphHtml}${escapeHtml(text)}</span>`;
+}
+
+function renderTaskSlotHtml(thread, activeThreadId, { selectionMode = false, selectedSet = null, profiles = [] } = {}) {
   const isSelected = thread.id === activeThreadId;
   const isBatchChecked = Boolean(selectionMode && selectedSet?.has(thread.id));
   const title = thread.title || "新会话";
   const timeText = formatCompactRelativeTime(thread.updatedAt);
   const pendingCount = thread.pendingCount || 0;
   const queuedCount = thread.queuedCount || 0;
-  const dotClass = resolveThreadDotClass(thread);
-  const chip = compactThreadSourceChip(thread);
+  const markerHtml = renderThreadStatusMarkerHtml(thread);
+  const chip = compactThreadSourceChip(thread, { profiles });
+  const chipHtml = renderThreadCompactChipHtml(thread, chip);
   const statusBadges = [];
   if (pendingCount > 0) {
     statusBadges.push(`<span class="board-status-pill is-pending">待确认 ${pendingCount}</span>`);
@@ -436,10 +461,10 @@ function renderTaskSlotHtml(thread, activeThreadId, { selectionMode = false, sel
       <div class="board-task-main">
         <div class="board-task-top">
           ${selectionMode ? renderBatchCheckHtml({ checked: isBatchChecked }) : ""}
-          <span class="thread-status-dot ${dotClass}" aria-hidden="true"></span>
+          ${markerHtml}
           <span class="board-task-title">${escapeHtml(title)}</span>
           ${statusBadges.join("")}
-          ${chip ? `<span class="thread-micro-tag is-${escapeHtml(chip.tone)}" title="${escapeHtml(chip.title)}">${chip.glyph ? `<span class="micro-glyph">${escapeHtml(chip.glyph)}</span>` : ""}${escapeHtml(chip.text)}</span>` : ""}
+          ${chipHtml}
           <span class="board-task-time">${escapeHtml(timeText)}</span>
         </div>
         ${preview ? `<div class="board-task-preview">${escapeHtml(preview)}</div>` : ""}
@@ -552,14 +577,16 @@ function renderSidebarProjectGroupHtml(group, {
         const queuedCount = t.queuedCount || 0;
         const isDone = !t.live && pendingCount === 0;
         const isRecentDone = isDone && Boolean(recentCompletedByThread?.has?.(t.id));
-        const dotClass = resolveThreadDotClass(t, recentCompletedByThread);
+        const markerHtml = renderThreadStatusMarkerHtml(t, recentCompletedByThread);
         const chip = compactThreadSourceChip(t, { providerFilter, profileFilter, profiles });
+        const chipHtml = renderThreadCompactChipHtml(t, chip);
         const title = t.title || "新会话";
         const liveAct = t.live ? liveActivityByThread?.get?.(t.id) : null;
         let subText = "";
         let isLiveSub = false;
-        if (t.live && liveAct?.phase) {
-          subText = liveAct.detail ? `${liveAct.phase} · ${liveAct.detail}` : liveAct.phase;
+        if (t.live) {
+          const phase = liveAct?.phase || t.livePhase || `${providerVisualMeta(t.provider).short} 执行中`;
+          subText = liveAct?.detail ? `${phase} · ${liveAct.detail}` : phase;
           isLiveSub = true;
         } else if (hasQuery) {
           subText = dedupeThreadPreview(title, t.preview || "");
@@ -579,17 +606,21 @@ function renderSidebarProjectGroupHtml(group, {
           <button type="button" class="${itemClasses}" data-thread-id="${escapeHtml(t.id)}"${selectionMode ? ` aria-pressed="${isBatchChecked ? "true" : "false"}"` : ""}>
             <span class="thread-item-top">
               ${selectionMode ? renderBatchCheckHtml({ checked: isBatchChecked }) : ""}
-              <span class="thread-status-dot ${dotClass}" aria-hidden="true"></span>
+              ${markerHtml}
               <span class="thread-item-title">${escapeHtml(title)}</span>
-              <span class="thread-item-right">
+              ${!t.live ? `<span class="thread-item-time">${escapeHtml(formatCompactRelativeTime(t.updatedAt))}</span>` : ""}
+            </span>
+            ${subText || pendingCount || queuedCount || t.goalState?.active || chipHtml ? `
+              <span class="thread-item-secondary">
+                ${subText ? `<span class="thread-item-sub ${isLiveSub ? "is-live-sub" : ""}" title="${escapeHtml(subText)}">${escapeHtml(subText)}</span>` : ""}
+                ${pendingCount || queuedCount || t.goalState?.active || chipHtml ? `<span class="thread-item-tags">
                 ${pendingCount ? `<span class="thread-pending-pill" title="待确认 ${pendingCount} 项">${pendingCount}</span>` : ""}
                 ${queuedCount ? `<span class="thread-queued-pill" title="排队中 ${queuedCount} 条">排队 ${queuedCount}</span>` : ""}
                 ${t.goalState?.active ? `<span class="goal-micro-tag" title="Goal 自动推进中">${iconSvg("target", { size: 11 })}</span>` : ""}
-                ${chip ? `<span class="thread-micro-tag is-${escapeHtml(chip.tone)}" title="${escapeHtml(chip.title)}">${chip.iconSvg || chip.glyph ? `<span class="micro-glyph" aria-hidden="true">${chip.iconSvg || escapeHtml(chip.glyph)}</span>` : ""}${escapeHtml(chip.text)}</span>` : ""}
-                <span class="thread-item-time">${escapeHtml(formatCompactRelativeTime(t.updatedAt))}</span>
+                ${chipHtml}
+                </span>` : ""}
               </span>
-            </span>
-            ${subText ? `<span class="thread-item-sub ${isLiveSub ? "is-live-sub" : ""}">${escapeHtml(subText)}</span>` : ""}
+            ` : ""}
           </button>
         `;
       }).join("")}
@@ -619,7 +650,7 @@ function renderSidebarProjectGroupHtml(group, {
         <span class="project-group-right">
           ${group.pendingCount > 0 ? `<span class="group-stat-pill is-pending" title="待确认 ${group.pendingCount}">${group.pendingCount}</span>` : ""}
           ${group.liveCount > 0 ? `<span class="group-stat-pill is-live" title="${group.liveCount} 个运行中"><span class="group-live-dot" aria-hidden="true"></span>${group.liveCount}</span>` : ""}
-          ${!selectionMode ? `<button type="button" class="project-group-add" data-new-in-cwd="${escapeHtml(cwd)}" title="在此项目新建会话" aria-label="在此项目新建会话">${iconSvg("plus", { size: 12 })}</button>` : ""}
+          ${!selectionMode ? `<button type="button" class="project-group-add" data-new-in-cwd="${escapeHtml(cwd)}" title="在此项目新建会话（可选 Codex 等智能体）" aria-label="在此项目新建会话（可选 Codex 等智能体）">${iconSvg("plus", { size: 12 })}</button>` : ""}
           <span class="project-group-count">${selectionMode && groupSel?.selectedCount ? `${groupSel.selectedCount}/${allItems.length}` : allItems.length}</span>
         </span>
       </div>
@@ -733,6 +764,7 @@ function renderProjectCardHtml(group, {
   expanded = false,
   selectionMode = false,
   selectedThreadIds = null,
+  profiles = [],
 } = {}) {
   const visibleCount = expanded ? group.threads.length : 4;
   const shownThreads = group.threads.slice(0, visibleCount);
@@ -793,7 +825,7 @@ function renderProjectCardHtml(group, {
         </div>
       </div>
       <div class="board-task-list">
-        ${shownThreads.map((t) => renderTaskSlotHtml(t, activeThreadId, { selectionMode, selectedSet })).join("")}
+        ${shownThreads.map((t) => renderTaskSlotHtml(t, activeThreadId, { selectionMode, selectedSet, profiles })).join("")}
       </div>
       ${hiddenCount > 0 ? `
         <button type="button" class="board-expand-tasks-btn" data-expand-project-cwd="${escapeHtml(group.cwd)}">
@@ -818,6 +850,7 @@ export function renderProjectBoardHtml({
   searchText = "",
   selectionMode = false,
   selectedThreadIds = null,
+  profiles = [],
 } = {}) {
   const pinnedGroups = groups.filter((g) => g.pinned);
   const unpinnedGroups = groups.filter((g) => !g.pinned);
@@ -903,6 +936,7 @@ export function renderProjectBoardHtml({
             expanded: expandedProjects.has(g.cwd),
             selectionMode,
             selectedThreadIds,
+            profiles,
           })).join("")}
         </div>
       </section>
@@ -924,6 +958,7 @@ export function renderProjectBoardHtml({
             expanded: expandedProjects.has(g.cwd),
             selectionMode,
             selectedThreadIds,
+            profiles,
           })).join("")}
         </div>
         ${hiddenOtherCount > 0 ? `

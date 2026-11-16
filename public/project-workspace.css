@@ -243,7 +243,16 @@
   font-weight: 600;
 }
 
-.thread-item-right {
+.thread-item-secondary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 13.5px;
+  min-width: 0;
+  max-width: calc(100% - 13.5px);
+}
+
+.thread-item-tags {
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -259,14 +268,14 @@
 
 .thread-item-sub {
   display: block;
-  margin-left: 13.5px;
+  flex: 1;
+  min-width: 0;
   font-size: 11px;
   line-height: 1.35;
   color: var(--text-muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: calc(100% - 13.5px);
 }
 
 .thread-item-sub.is-live-sub {
@@ -285,15 +294,25 @@
 .thread-status-dot.is-done {
   width: 6px;
   height: 6px;
-  background: #4c8dff;
-  box-shadow: 0 0 0 2px rgba(76, 141, 255, 0.14);
-  opacity: 0.88;
+  background: transparent;
+  border: 1px solid rgba(148, 163, 184, 0.65);
+  box-sizing: border-box;
+  box-shadow: none;
+  opacity: 0.72;
 }
 
 .thread-status-dot.is-done.is-recent {
-  background: #60a5fa;
+  width: 7px;
+  height: 7px;
+  background: #4c8dff;
+  border: 0;
   opacity: 1;
-  box-shadow: 0 0 0 2.5px rgba(96, 165, 250, 0.25), 0 0 8px rgba(76, 141, 255, 0.55);
+  box-shadow: 0 0 0 2.5px rgba(76, 141, 255, 0.24), 0 0 8px rgba(76, 141, 255, 0.62);
+}
+
+.thread-item.is-recent-done .thread-item-title {
+  color: #e6f0ff;
+  font-weight: 550;
 }
 
 .thread-status-dot.is-live {
@@ -312,6 +331,63 @@
   will-change: transform, opacity;
 }
 
+.thread-status-dot.is-live.is-agent-live {
+  width: 14px;
+  height: 14px;
+  background: transparent;
+  box-shadow: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.thread-status-dot.is-live.is-agent-live::after {
+  inset: -1px;
+  border-color: rgba(52, 211, 153, 0.65);
+}
+
+.thread-status-dot.is-live.is-agent-live svg {
+  width: 12px;
+  height: 12px;
+  display: block;
+  transform-origin: center;
+  animation: acAgentRunPulse 1.7s ease-in-out infinite;
+  filter: drop-shadow(0 0 4px rgba(52, 211, 153, 0.52));
+}
+
+.thread-status-dot.is-live.is-agent-live.is-antigravity {
+  color: #c4b5fd;
+}
+
+.thread-status-dot.is-live.is-agent-live.is-antigravity svg {
+  animation: acAgentStarRun 2.6s ease-in-out infinite;
+  filter: drop-shadow(0 0 5px rgba(167, 139, 250, 0.65));
+}
+
+.thread-status-dot.is-live.is-agent-live.is-codex {
+  color: #34d399;
+}
+
+.thread-status-dot.is-live.is-agent-live.is-claude {
+  color: #fbbf24;
+  filter: drop-shadow(0 0 4px rgba(251, 191, 36, 0.45));
+}
+
+.thread-status-dot.is-live.is-agent-live.is-grok {
+  color: #38bdf8;
+}
+
+@keyframes acAgentRunPulse {
+  0%, 100% { transform: scale(0.92); opacity: 0.88; }
+  50% { transform: scale(1.1); opacity: 1; }
+}
+
+@keyframes acAgentStarRun {
+  0% { transform: rotate(0deg) scale(0.92); opacity: 0.88; }
+  50% { transform: rotate(90deg) scale(1.12); opacity: 1; }
+  100% { transform: rotate(180deg) scale(0.92); opacity: 0.88; }
+}
+
 .thread-status-dot.is-pending {
   background: #f59e0b;
   box-shadow: 0 0 6px rgba(245, 158, 11, 0.58);
@@ -321,7 +397,7 @@
 .thread-micro-tag {
   display: inline-flex;
   align-items: center;
-  gap: 1.5px;
+  gap: 2px;
   font-size: 9.5px;
   line-height: 1.25;
   padding: 1px 4px;
@@ -332,6 +408,16 @@
   font-weight: 500;
   white-space: nowrap;
   flex-shrink: 0;
+}
+
+.thread-micro-tag.is-icon-only {
+  padding: 0 1px;
+  background: transparent;
+  gap: 0;
+}
+
+.thread-micro-tag.is-text-only {
+  padding: 1px 4px;
 }
 
 .thread-micro-tag.is-antigravity .micro-glyph {
@@ -1069,6 +1155,31 @@
   background: rgba(47, 179, 112, 0.14);
   padding: 1px 6px;
   border-radius: 999px;
+}
+
+.voice-model-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.voice-model-select {
+  appearance: auto;
+  max-width: 210px;
+  padding: 2px 6px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text);
+  font-size: 11px;
+  line-height: 1.3;
+  cursor: pointer;
+}
+
+.voice-model-select:focus-visible {
+  outline: 1px solid var(--accent);
 }
 
 .voice-model-badge {

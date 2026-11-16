@@ -27,6 +27,18 @@ export function resolveComposerSubmission({
   return { action: "queue", canSubmit: true, buttonLabel: "加入排队" };
 }
 
+export async function submitComposerRequest(post, { action, payload, options } = {}) {
+  if (action !== "queue") {
+    try {
+      const result = await post("api/turn", { ...payload, steer: action === "steer" }, options);
+      return { action, result };
+    } catch (error) {
+      if (action !== "turn" || error?.code !== "thread_busy") throw error;
+    }
+  }
+  return { action: "queue", result: await post("api/thread/queue", payload, options) };
+}
+
 export function extractGoalDirective(text = "") {
   const trimmed = String(text || "").trim();
   const match = trimmed.match(/^\/goal(?:\s+([\s\S]*))?$/i);

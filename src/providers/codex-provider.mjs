@@ -18,6 +18,7 @@ import {
   readCodexAutomationNames,
   readCodexQueuedCountsByThread,
   readCodexQueuedItems,
+  readIndexedThreadById,
   readIndexedThreads,
 } from "./codex-thread-index.mjs";
 import { CodexThreadWriterRegistry } from "./codex-thread-writer.mjs";
@@ -360,6 +361,8 @@ export class CodexProvider {
       rolloutPath: rawThread.rolloutPath || rawThread.path || "",
       archived: Boolean(rawThread.archived),
       live: Boolean(this.#writers.getActive(rawId) || rawThread.live),
+      ...(rawThread.livePhase ? { livePhase: String(rawThread.livePhase) } : {}),
+      ...(rawThread.liveDetail ? { liveDetail: String(rawThread.liveDetail) } : {}),
       gitInfo: rawThread.gitInfo || null,
       turns: rawThread.turns,
       largeHistory: Boolean(rawThread.largeHistory),
@@ -376,6 +379,26 @@ export class CodexProvider {
       const res = await client.request("thread/list", { limit, archived: includeArchived });
       rows = res?.data || res?.threads || [];
     }
+    const nowSec = Math.floor(Date.now() / 1000);
+    const recentCandidates = [];
+    for (const row of rows) {
+      if (!row?.rolloutPath) continue;
+      if (recentCandidates.length >= 16) break;
+      const updatedSec = toTimestampSeconds(row.updatedAt);
+      if (updatedSec > 0 && (nowSec - updatedSec) <= 15 * 60) {
+        recentCandidates.push(row);
+      }
+    }
+    if (recentCandidates.length) {
+      await Promise.all(recentCandidates.map(async (row) => {
+        const snap = await readRolloutActivitySnapshot(row.rolloutPath).catch(() => null);
+        if (snap?.activity?.status === "running") {
+          row.live = true;
+          row.livePhase = snap.activity.phase || "Codex 执行中";
+          row.liveDetail = snap.activity.text || "";
+        }
+      }));
+    }
     const nativeQueuedCounts = readCodexQueuedCountsByThread(profile.home);
     return visibleControlThreads(rows.map((row) => this.#normalizeThread(profile, {
       ...row,
@@ -391,8 +414,7 @@ export class CodexProvider {
 
   async resolveThreadContext(profileId, rawId) {
     const profile = await this.#getProfile(profileId);
-    const indexed = (readIndexedThreads(profile.home, { limit: 600, includeArchived: true }) || [])
-      .find((item) => item.id === rawId) || null;
+    const indexed = readIndexedThreadById(profile.home, rawId);
     if (!indexed) return null;
     return {
       cwd: indexed.cwd || os.homedir(),
@@ -402,22 +424,29 @@ export class CodexProvider {
 
   async readThread(profileId, rawId, { cursor = null, detail = "auto", limit = 12 } = {}) {
     const profile = await this.#getProfile(profileId);
-    const indexed = (readIndexedThreads(profile.home, { limit: 600, includeArchived: true }) || [])
-      .find((item) => item.id === rawId) || null;
+    const indexed = readIndexedThreadById(profile.home, rawId);
     const automationNames = readCodexAutomationNames(profile.home);
-    const client = await this.#getClient(profileId);
-    const { thread, nextCursor } = await loadCodexThreadHistory({
-      client,
-      rawId,
-      indexedThread: indexed,
-      cursor,
-      detail,
-      limit,
-      automationNames,
-    });
+    const indexedRolloutPath = indexed?.rolloutPath || indexed?.path || "";
+    const [{ thread, nextCursor }, preloadedActivitySnapshot] = await Promise.all([
+      loadCodexThreadHistory({
+        getClient: () => this.#getClient(profileId),
+        rawId,
+        indexedThread: indexed,
+        cursor,
+        detail,
+        limit,
+        automationNames,
+      }),
+      indexedRolloutPath ? readRolloutActivitySnapshot(indexedRolloutPath) : Promise.resolve(null),
+    ]);
     const compositeId = formatCompositeThreadId("codex", profile.id, rawId);
     const nativeQueuedTurns = readCodexQueuedItems(profile.home, rawId)
       .map((item) => ({ ...item, threadId: compositeId }));
+    const resolvedRolloutPath = indexedRolloutPath || thread.rolloutPath || thread.path || "";
+    const activitySnapshot = (preloadedActivitySnapshot && resolvedRolloutPath === indexedRolloutPath)
+      ? preloadedActivitySnapshot
+      : await readRolloutActivitySnapshot(resolvedRolloutPath);
+    const isLive = Boolean(this.#writers.getActive(rawId) || activitySnapshot?.activity?.status === "running");
     const normalized = this.#normalizeThread(profile, {
       ...indexed,
       ...thread,
@@ -426,8 +455,10 @@ export class CodexProvider {
       lastUserText: thread.lastUserText || indexed?.lastUserText || "",
       hasFollowUpTurns: Boolean(thread.hasFollowUpTurns || indexed?.hasFollowUpTurns),
       nativeQueuedCount: nativeQueuedTurns.length,
+      live: isLive,
+      ...(isLive && activitySnapshot?.activity?.phase ? { livePhase: activitySnapshot.activity.phase } : {}),
+      ...(isLive && activitySnapshot?.activity?.text ? { liveDetail: activitySnapshot.activity.text } : {}),
     });
-    const activitySnapshot = await readRolloutActivitySnapshot(normalized.rolloutPath);
     const queueSig = nativeQueuedTurns.map((item) => item.id).join(",");
     const baseCursor = String(activitySnapshot.cursor || "");
     const combinedCursor = queueSig ? `${baseCursor}|q=${queueSig}` : baseCursor;
@@ -445,8 +476,7 @@ export class CodexProvider {
     const compositeId = formatCompositeThreadId("codex", profile.id, rawId);
     let resolvedPath = rolloutPath;
     if (!resolvedPath) {
-      const indexed = (readIndexedThreads(profile.home, { limit: 400, includeArchived: true }) || [])
-        .find((item) => item.id === rawId);
+      const indexed = readIndexedThreadById(profile.home, rawId);
       resolvedPath = indexed?.rolloutPath || "";
     }
     const baseInCursor = typeof cursor === "string" ? cursor.replace(/\|q=.*$/, "") : cursor;

@@ -22,6 +22,7 @@ import {
   minAudibleDurationMs,
   normalizeSpokenChineseText,
   pickPreferredHydrogenModel,
+  pickPreferredVoiceModel,
 } from "../src/voice-call-service.mjs";
 import {
   createVadTurnDetector,
@@ -32,8 +33,11 @@ import {
   humanizeVoiceDeliveryReason,
   matchVoiceTarget,
   minVoiceAudibleMs,
+  normalizeVoiceConfig,
   normalizeVoiceTtsPayload,
+  parseVoiceModelSelectionKey,
   renderVoiceCallTranscriptHtml,
+  renderVoiceModelSelectOptionsHtml,
   renderVoiceUnheardBannerHtml,
 } from "../public/voice-copilot.js";
 
@@ -1643,4 +1647,194 @@ test("Voice normalization, short-name/homophone routing, real-cwd subagent, unre
   assert.equal(antiSnowballTurn.spokenReply.includes("更早之前的内容"), false);
   const compMatches = antiSnowballTurn.spokenReply.match(/另外补播刚才未听到的提醒：/g) || [];
   assert.equal(compMatches.length, 1);
+});
+
+test("VoiceCallService supports optional lightweight models (Claude/Codex/local rules) without Gemini", async (t) => {
+  const dir = await mkdtemp(resolve(os.tmpdir(), "ac-voice-multi-model-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+
+  assert.equal(
+    pickPreferredVoiceModel("claude", [
+      { id: "claude-opus-4-6", displayName: "Opus 4.6" },
+      { id: "claude-haiku-4-5", displayName: "Haiku 4.5" },
+      { id: "claude-sonnet-4-5", displayName: "Sonnet 4.5" },
+    ]),
+    "claude-haiku-4-5",
+  );
+  assert.equal(
+    pickPreferredVoiceModel("codex", [
+      { id: "gpt-5.4", displayName: "GPT-5.4", isDefault: true },
+      { id: "gpt-5.4-mini", displayName: "GPT-5.4 Mini" },
+    ]),
+    "gpt-5.4-mini",
+  );
+
+  assert.deepEqual(
+    parseVoiceModelSelectionKey("codex:default:gpt-5.4-mini"),
+    { key: "codex:default:gpt-5.4-mini", voiceProvider: "codex", voiceProfileId: "default", voiceModel: "gpt-5.4-mini" },
+  );
+  assert.equal(normalizeVoiceConfig({ preferredModelKey: "claude:default:claude-haiku-4-5" }).preferredModelKey, "claude:default:claude-haiku-4-5");
+  const selectHtml = renderVoiceModelSelectOptionsHtml(
+    [
+      { key: "auto", label: "自动优选轻量模型" },
+      { key: "codex:default:gpt-5.4-mini", label: "Codex · GPT-5.4 Mini (轻量)" },
+      { key: "local:local-rules", label: "仅本机规则（零模型）" },
+    ],
+    "codex:default:gpt-5.4-mini",
+  );
+  assert.match(selectHtml, /value="codex:default:gpt-5\.4-mini" selected/);
+
+  const startedThreads = [];
+  const events = [];
+  let svc;
+  const hub = {
+    async listThreads() {
+      return {
+        threads: [
+          { id: "codex:default:t-1", provider: "codex", cwd: "/dev/demo", title: "示例项目", live: false, updatedAt: 1000 },
+        ],
+        projectsMeta: {},
+      };
+    },
+    async listProvidersAndProfiles() {
+      return {
+        profiles: [
+          { provider: "claude", id: "default", label: "Claude 默认", installed: true, authenticated: true },
+          { provider: "codex", id: "default", label: "Codex 默认", installed: true, authenticated: true },
+        ],
+      };
+    },
+    async listModels(provider) {
+      if (provider === "claude") {
+        return {
+          items: [
+            { id: "claude-sonnet-4-5", displayName: "Sonnet 4.5" },
+            { id: "claude-haiku-4-5", displayName: "Haiku 4.5" },
+          ],
+        };
+      }
+      if (provider === "codex") {
+        return {
+          items: [
+            { id: "gpt-5.4", displayName: "GPT-5.4", isDefault: true },
+            { id: "gpt-5.4-mini", displayName: "GPT-5.4 Mini" },
+          ],
+        };
+      }
+      return { items: [] };
+    },
+    async listPendingRequests() {
+      return { requests: [] };
+    },
+    async readThread(threadId) {
+      if (threadId === "codex:default:sub-1") {
+        return {
+          thread: {
+            id: threadId,
+            turns: [
+              {
+                id: "turn-1",
+                status: "completed",
+                items: [{ type: "agentMessage", text: "测试发现是依赖版本不一致导致失败，建议锁定版本号。" }],
+              },
+            ],
+          },
+        };
+      }
+      return { thread: { id: threadId, turns: [] } };
+    },
+    async startThread(args) {
+      startedThreads.push(args);
+      const threadId = `${args.provider}:default:sub-1`;
+      setTimeout(() => {
+        void svc.handleHubEvent("provider_event", {
+          type: "turn_completed",
+          threadId,
+          lastAgentMessage: "测试发现是依赖版本不一致导致失败，建议锁定版本号。",
+        });
+      }, 25);
+      return { thread: { id: threadId, model: args.model || "" } };
+    },
+  };
+
+  svc = new VoiceCallService({
+    hub,
+    dataDir: dir,
+    onEvent: (eventName, payload) => events.push({ eventName, payload }),
+    env: {
+      ...process.env,
+      EDGE_TTS_BIN: "none",
+      MACOS_SAY_BIN: "none",
+      VOICE_ASR_BIN: MOCK_VOICE_ASR_BIN,
+    },
+  });
+  t.after(() => svc.close());
+
+  // 1. Without Antigravity/Gemini, auto picks Claude Haiku lightweight model and exposes modelOptions.
+  const startedAuto = await svc.startCall({ callId: "call-no-gemini" });
+  assert.equal(startedAuto.dispatchProvider, "claude");
+  assert.equal(startedAuto.dispatchModel, "claude-haiku-4-5");
+  assert.ok(startedAuto.modelOptions.some((opt) => opt.key === "codex:default:gpt-5.4-mini"));
+  assert.ok(startedAuto.modelOptions.some((opt) => opt.key === "local:local-rules"));
+
+  // 2. Switching explicitly to Codex lightweight model executes subagent via Codex without Gemini.
+  const startedCodex = await svc.startCall({
+    callId: "call-no-gemini",
+    voiceProvider: "codex",
+    voiceProfileId: "default",
+    voiceModel: "gpt-5.4-mini",
+  });
+  assert.equal(startedCodex.dispatchProvider, "codex");
+  assert.equal(startedCodex.dispatchModel, "gpt-5.4-mini");
+
+  const subRes = await svc.handleTurn({
+    callId: "call-no-gemini",
+    transcriptText: "帮我深入分析一下刚才为什么失败了",
+    autoExecute: true,
+    asyncDispatch: true,
+    tts: false,
+  });
+  assert.equal(subRes.dispatchPending, true);
+  assert.match(subRes.spokenReply, /Codex/);
+
+  for (let i = 0; i < 60; i += 1) {
+    if (events.some((e) => e.eventName === "voice_dispatch" && e.payload?.batchId === subRes.batchId && e.payload?.status === "dispatched")) {
+      break;
+    }
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  assert.equal(startedThreads.length, 1);
+  assert.equal(startedThreads[0].provider, "codex");
+  assert.equal(startedThreads[0].model, "gpt-5.4-mini");
+  assert.match(startedThreads[0].text, /^\[AC_VOICE_CALL\]/);
+
+  const doneEvt = events.find(
+    (e) => e.eventName === "voice_dispatch" && e.payload?.batchId === subRes.batchId && e.payload?.status === "dispatched",
+  );
+  assert.match(doneEvt?.payload?.spokenFeedback || "", /依赖版本不一致导致失败/);
+
+  // 3. Selecting local-only rules works with zero LLM calls.
+  const localRes = await svc.handleTurn({
+    callId: "call-local-only",
+    voiceProvider: "local",
+    voiceModel: "local-rules",
+    transcriptText: "帮我分析一下当前各个项目的整体情况",
+    autoExecute: true,
+    asyncDispatch: false,
+    tts: false,
+  });
+  assert.equal(localRes.ok, true);
+  assert.equal(localRes.executed?.provider, "local");
+  for (let i = 0; i < 40; i += 1) {
+    if (events.some((e) => e.eventName === "voice_dispatch" && e.payload?.batchId === localRes.batchId && e.payload?.status === "dispatched")) {
+      break;
+    }
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  const localDoneEvt = events.find(
+    (e) => e.eventName === "voice_dispatch" && e.payload?.batchId === localRes.batchId && e.payload?.status === "dispatched",
+  );
+  assert.match(localDoneEvt?.payload?.spokenFeedback || "", /本机规则/);
+  assert.equal(localDoneEvt?.payload?.model, "local-rules");
+  assert.equal(startedThreads.length, 1);
 });
