@@ -7,6 +7,11 @@ INSTALL_DIR="${AGENT_CONTROL_HOME:-$HOME/.local/share/agent-control/app}"
 PORT="${PORT:-43310}"
 LOCAL_BIN="$HOME/.local/bin"
 
+REMOTE_MODE="${AGENT_CONTROL_REMOTE:-auto}"
+RELAY_URL="${AGENT_CONTROL_RELAY_URL:-}"
+RELAY_INVITE="${AGENT_CONTROL_RELAY_INVITE:-}"
+RELAY_LABEL="${AGENT_CONTROL_HOST_LABEL:-}"
+
 INSTALL_SERVICE="true"
 INSTALL_APP="true"
 OPEN_AFTER="true"
@@ -20,17 +25,37 @@ Agent Control 一键安装脚本 (macOS / Linux)
   或本地仓库运行: ./install.sh [选项]
 
 选项:
-  --dir <路径>    指定安装目录（默认: ~/.local/share/agent-control/app）
-  --port <端口>   指定本地控制台端口（默认: 43310）
-  --no-service    仅拉取依赖，不注册开机后台服务
-  --no-app        macOS 不构建安装 /Applications/Agent Control.app
-  --no-open       安装完成后不自动打开界面
-  -h, --help      显示帮助信息
+  --remote <模式>   远程隧道方案: cloudflare | relay | local（默认交互选择，非交互默认 cloudflare）
+  --relay-url <URL> 自托管固定中继地址（配合 --remote relay 使用）
+  --invite <邀请码> 自托管固定中继配对邀请码
+  --label <名称>    本机在远程列表的显示名称
+  --dir <路径>      指定安装目录（默认: ~/.local/share/agent-control/app）
+  --port <端口>     指定本地控制台端口（默认: 43310）
+  --no-service      仅拉取依赖，不注册开机后台服务
+  --no-app          macOS 不构建安装 /Applications/Agent Control.app
+  --no-open         安装完成后不自动打开界面
+  -h, --help        显示帮助信息
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --remote)
+      REMOTE_MODE="${2:?--remote 需要提供模式: cloudflare|relay|local}"
+      shift 2
+      ;;
+    --relay-url)
+      RELAY_URL="${2:?--relay-url 需要提供 URL}"
+      shift 2
+      ;;
+    --invite)
+      RELAY_INVITE="${2:?--invite 需要提供邀请码}"
+      shift 2
+      ;;
+    --label)
+      RELAY_LABEL="${2:?--label 需要提供主机名}"
+      shift 2
+      ;;
     --dir)
       INSTALL_DIR="${2:?--dir 需要提供路径}"
       shift 2
@@ -67,6 +92,45 @@ OS_NAME="$(uname -s)"
 if [[ "$OS_NAME" != "Darwin" && "$OS_NAME" != "Linux" ]]; then
   echo "[错误] install.sh 仅支持 macOS 与 Linux。Windows 用户请使用 install.ps1。" >&2
   exit 1
+fi
+
+case "$REMOTE_MODE" in
+  auto|cloudflare|relay|local) ;;
+  *)
+    echo "[错误] --remote 仅支持 cloudflare | relay | local，收到: $REMOTE_MODE" >&2
+    exit 1
+    ;;
+esac
+
+if [[ "$REMOTE_MODE" == "auto" ]]; then
+  if [[ -r /dev/tty && -w /dev/tty && "${AGENT_CONTROL_NONINTERACTIVE:-0}" != "1" ]]; then
+    echo "" > /dev/tty
+    echo "请选择手机远程接入方案（安装后可随时在页面或命令行切换）：" > /dev/tty
+    echo "  [1] Cloudflare 免费临时隧道（推荐，安装 cloudflared；免服务器免注册，每次地址随机）" > /dev/tty
+    echo "  [2] 自托管固定中继（连接自己的 relay 服务器；域名固定、自动重连，需自备服务器）" > /dev/tty
+    echo "  [3] 仅本机使用（不安装额外隧道组件，后续可随时用 agent-control remote 切换）" > /dev/tty
+    printf "请输入选项 [1/2/3]（默认 1）: " > /dev/tty
+    IFS= read -r choice < /dev/tty || choice=""
+    case "${choice:-1}" in
+      1) REMOTE_MODE="cloudflare" ;;
+      2) REMOTE_MODE="relay" ;;
+      3) REMOTE_MODE="local" ;;
+      *) REMOTE_MODE="cloudflare" ;;
+    esac
+  else
+    REMOTE_MODE="cloudflare"
+  fi
+fi
+
+if [[ "$REMOTE_MODE" == "relay" && -z "$RELAY_URL" && -r /dev/tty && -w /dev/tty && "${AGENT_CONTROL_NONINTERACTIVE:-0}" != "1" ]]; then
+  echo "" > /dev/tty
+  echo "若已部署自托管中继，可现在直接配对（留空回车可跳过，稍后在界面配对）：" > /dev/tty
+  printf "  中继地址（如 https://relay.example.com）: " > /dev/tty
+  IFS= read -r RELAY_URL < /dev/tty || RELAY_URL=""
+  if [[ -n "$RELAY_URL" ]]; then
+    printf "  配对邀请码: " > /dev/tty
+    IFS= read -r RELAY_INVITE < /dev/tty || RELAY_INVITE=""
+  fi
 fi
 
 find_node_bin() {
@@ -119,6 +183,43 @@ if ! command -v npm >/dev/null 2>&1; then
   exit 1
 fi
 
+install_cloudflared_if_missing() {
+  if command -v cloudflared >/dev/null 2>&1; then
+    echo "已检测到 cloudflared: $(command -v cloudflared)"
+    return 0
+  fi
+  if [[ "$OS_NAME" == "Darwin" ]]; then
+    if command -v brew >/dev/null 2>&1; then
+      echo "正在通过 Homebrew 安装 cloudflared..."
+      if brew install cloudflared; then
+        return 0
+      fi
+    fi
+    echo "[警告] 自动安装 cloudflared 失败，可稍后手动执行: brew install cloudflared" >&2
+    return 1
+  fi
+  local arch cf_arch url dest
+  arch="$(uname -m)"
+  case "$arch" in
+    x86_64|amd64) cf_arch="amd64" ;;
+    aarch64|arm64) cf_arch="arm64" ;;
+    *)
+      echo "[警告] 暂不支持自动下载 $arch 架构的 cloudflared，请手动安装。" >&2
+      return 1
+      ;;
+  esac
+  url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${cf_arch}"
+  mkdir -p "$LOCAL_BIN"
+  dest="$LOCAL_BIN/cloudflared"
+  echo "正在下载 cloudflared ($cf_arch) 到 $dest..."
+  if curl -fsSL --retry 2 --connect-timeout 15 "$url" -o "$dest"; then
+    chmod +x "$dest"
+    return 0
+  fi
+  echo "[警告] 下载 cloudflared 失败，可稍后手动安装或切换为自托管固定中继。" >&2
+  return 1
+}
+
 SCRIPT_DIR=""
 if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
   SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -127,7 +228,7 @@ fi
 APP_DIR=""
 if [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/src/server.mjs" && -f "$SCRIPT_DIR/package.json" ]]; then
   APP_DIR="$SCRIPT_DIR"
-  echo "[1/4] 检测到本地源码目录，直接使用: $APP_DIR"
+  echo "[1/5] 检测到本地源码目录，直接使用: $APP_DIR"
 else
   if ! command -v git >/dev/null 2>&1; then
     echo "[错误] 缺少 git，请先安装 git（macOS 可执行 xcode-select --install 或 brew install git）。" >&2
@@ -135,18 +236,18 @@ else
   fi
   mkdir -p "$(dirname "$INSTALL_DIR")"
   if [[ -d "$INSTALL_DIR/.git" ]]; then
-    echo "[1/4] 正在更新 Agent Control 源码: $INSTALL_DIR"
+    echo "[1/5] 正在更新 Agent Control 源码: $INSTALL_DIR"
     git -C "$INSTALL_DIR" fetch --depth 1 origin "$REPO_BRANCH"
     git -C "$INSTALL_DIR" checkout -B "$REPO_BRANCH" "origin/$REPO_BRANCH" >/dev/null 2>&1 || git -C "$INSTALL_DIR" reset --hard "origin/$REPO_BRANCH"
   else
-    echo "[1/4] 正在克隆 Agent Control 仓库到: $INSTALL_DIR"
+    echo "[1/5] 正在克隆 Agent Control 仓库到: $INSTALL_DIR"
     rm -rf "$INSTALL_DIR"
     git clone --depth 1 --branch "$REPO_BRANCH" "$REPO_URL" "$INSTALL_DIR"
   fi
   APP_DIR="$INSTALL_DIR"
 fi
 
-echo "[2/4] 正在安装运行依赖..."
+echo "[2/5] 正在安装运行依赖..."
 (
   cd "$APP_DIR"
   npm install --omit=dev --no-audit --no-fund
@@ -170,17 +271,119 @@ Agent Control 命令行工具
   agent-control [命令]
 
 命令:
-  open        打开桌面应用或本地控制台页面（默认）
-  start       安装并启动后台常驻服务
-  restart     重启后台常驻服务
-  stop        停止并移除后台常驻服务
-  status      查看运行状态与监听端口
-  logs        查看最近服务日志
-  run         前台运行服务（调试用）
-  desktop     macOS 重新编译并安装 /Applications/Agent Control.app
-  update      从 GitHub 拉取最新版本并重启服务
-  uninstall   卸载 Agent Control
+  open                 打开桌面应用或本地控制台页面（默认）
+  start                安装并启动后台常驻服务
+  restart              重启后台常驻服务
+  stop                 停止并移除后台常驻服务
+  status               查看运行状态与监听端口
+  logs                 查看最近服务日志
+  run                  前台运行服务（调试用）
+  desktop              macOS 重新编译并安装 /Applications/Agent Control.app
+  remote <子命令>      切换或查看远程隧道方案:
+                         status              查看当前隧道与中继状态
+                         cloudflare [--start] 准备 Cloudflare 免费隧道（可选立即启动）
+                         relay [--url U --code C] 绑定自托管固定中继
+                         unpair              解除固定中继配对
+                         stop                停止当前 Cloudflare 临时隧道
+  update               从 GitHub 拉取最新版本并重启服务
+  uninstall            卸载 Agent Control
 HELP
+}
+
+api_req() {
+  local method="\$1"
+  local path="\$2"
+  local body="\${3:-}"
+  if [[ -n "\$body" ]]; then
+    curl -fsS -X "\$method" -H "Content-Type: application/json" -d "\$body" "http://127.0.0.1:\${PORT}\${path}"
+  else
+    curl -fsS -X "\$method" "http://127.0.0.1:\${PORT}\${path}"
+  fi
+}
+
+ensure_cloudflared() {
+  if command -v cloudflared >/dev/null 2>&1; then
+    echo "cloudflared 已就绪: \$(command -v cloudflared)"
+    return 0
+  fi
+  if [[ "\$(uname -s)" == "Darwin" ]]; then
+    if command -v brew >/dev/null 2>&1; then
+      brew install cloudflared
+      return \$?
+    fi
+    echo "请先安装 Homebrew 或手动执行: brew install cloudflared" >&2
+    return 1
+  fi
+  local arch cf_arch dest="\$HOME/.local/bin/cloudflared"
+  arch="\$(uname -m)"
+  case "\$arch" in
+    x86_64|amd64) cf_arch="amd64" ;;
+    aarch64|arm64) cf_arch="arm64" ;;
+    *) echo "暂不支持 \$arch 架构自动下载 cloudflared" >&2; return 1 ;;
+  esac
+  mkdir -p "\$HOME/.local/bin"
+  curl -fsSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-\${cf_arch}" -o "\$dest"
+  chmod +x "\$dest"
+  echo "已安装 cloudflared 到 \$dest"
+}
+
+handle_remote() {
+  local sub="\${1:-status}"
+  shift || true
+  case "\$sub" in
+    status)
+      api_req GET "/api/remote"
+      echo ""
+      ;;
+    cloudflare)
+      ensure_cloudflared
+      if [[ "\${1:-}" == "--start" ]]; then
+        api_req POST "/api/tunnel/start" "{}"
+        echo ""
+      else
+        echo "已准备 Cloudflare 免费隧道，可在界面「手机远程」点击一键开启，或执行: agent-control remote cloudflare --start"
+      fi
+      ;;
+    relay)
+      local r_url="" r_code="" r_label=""
+      while [[ \$# -gt 0 ]]; do
+        case "\$1" in
+          --url) r_url="\${2:-}"; shift 2 ;;
+          --code|--invite) r_code="\${2:-}"; shift 2 ;;
+          --label) r_label="\${2:-}"; shift 2 ;;
+          *) echo "未知参数: \$1" >&2; exit 2 ;;
+        esac
+      done
+      if [[ -z "\$r_url" && -r /dev/tty ]]; then
+        printf "请输入中继地址 (如 https://relay.example.com): " > /dev/tty
+        IFS= read -r r_url < /dev/tty || r_url=""
+      fi
+      if [[ -z "\$r_code" && -r /dev/tty ]]; then
+        printf "请输入配对邀请码: " > /dev/tty
+        IFS= read -r r_code < /dev/tty || r_code=""
+      fi
+      if [[ -z "\$r_url" || -z "\$r_code" ]]; then
+        echo "需要提供 --url 和 --code" >&2
+        exit 1
+      fi
+      local payload
+      payload="\$("\$NODE_BIN" -e 'console.log(JSON.stringify({relayUrl:process.argv[1],inviteCode:process.argv[2],label:process.argv[3]||""}))' "\$r_url" "\$r_code" "\$r_label")"
+      api_req POST "/api/remote/pair" "\$payload"
+      echo ""
+      ;;
+    unpair)
+      api_req POST "/api/remote/unpair" "{}"
+      echo ""
+      ;;
+    stop)
+      api_req POST "/api/tunnel/stop" "{}"
+      echo ""
+      ;;
+    *)
+      echo "未知 remote 子命令: \$sub (支持 status | cloudflare | relay | unpair | stop)" >&2
+      exit 2
+      ;;
+  esac
 }
 
 cmd="\${1:-open}"
@@ -213,6 +416,9 @@ case "\$cmd" in
   desktop)
     PORT="\$PORT" bash "\$APP_DIR/desktop/macos/build-app.sh" --install
     ;;
+  remote)
+    handle_remote "\$@"
+    ;;
   update)
     if [[ -d "\$APP_DIR/.git" ]]; then
       git -C "\$APP_DIR" pull --ff-only
@@ -239,24 +445,31 @@ esac
 EOF
 chmod +x "$CLI_PATH"
 
+if [[ "$REMOTE_MODE" == "cloudflare" ]]; then
+  echo "[3/5] 正在配置 Cloudflare 免费临时隧道 (cloudflared)..."
+  install_cloudflared_if_missing || true
+else
+  echo "[3/5] 已选择远程模式: $REMOTE_MODE（跳过自动安装 cloudflared，后续随时可用 agent-control remote cloudflare 补装）"
+fi
+
 if [[ "$INSTALL_SERVICE" == "true" ]]; then
-  echo "[3/4] 正在注册并启动本地后台服务 (端口 $PORT)..."
+  echo "[4/5] 正在注册并启动本地后台服务 (端口 $PORT)..."
   PORT="$PORT" "$NODE_BIN" "$APP_DIR/scripts/service.mjs" install
 else
-  echo "[3/4] 已跳过后台服务安装 (--no-service)"
+  echo "[4/5] 已跳过后台服务安装 (--no-service)"
 fi
 
 INSTALLED_APP_PATH=""
 if [[ "$OS_NAME" == "Darwin" && "$INSTALL_APP" == "true" ]]; then
   if command -v swiftc >/dev/null 2>&1; then
-    echo "[4/4] 正在构建并安装 macOS 原生桌面端 (/Applications/Agent Control.app)..."
+    echo "[5/5] 正在构建并安装 macOS 原生桌面端 (/Applications/Agent Control.app)..."
     PORT="$PORT" bash "$APP_DIR/desktop/macos/build-app.sh" --install
     INSTALLED_APP_PATH="/Applications/Agent Control.app"
   else
-    echo "[4/4] 未检测到 swiftc，已跳过原生 .app 构建（可随时安装 Xcode CLI Tools 后执行: agent-control desktop）"
+    echo "[5/5] 未检测到 swiftc，已跳过原生 .app 构建（可随时安装 Xcode CLI Tools 后执行: agent-control desktop）"
   fi
 else
-  echo "[4/4] 已完成 CLI 与服务部署。"
+  echo "[5/5] 已完成 CLI 与服务部署。"
 fi
 
 HEALTH_OK="false"
@@ -270,6 +483,19 @@ if [[ "$INSTALL_SERVICE" == "true" ]] && command -v curl >/dev/null 2>&1; then
   done
 fi
 
+RELAY_PAIR_NOTE=""
+if [[ "$REMOTE_MODE" == "relay" && -n "$RELAY_URL" && -n "$RELAY_INVITE" && "$HEALTH_OK" == "true" ]]; then
+  echo "正在配对自托管固定中继..."
+  PAIR_PAYLOAD="$("$NODE_BIN" -e 'console.log(JSON.stringify({relayUrl:process.argv[1],inviteCode:process.argv[2],label:process.argv[3]||""}))' "$RELAY_URL" "$RELAY_INVITE" "$RELAY_LABEL")"
+  if curl -fsS -X POST -H "Content-Type: application/json" -d "$PAIR_PAYLOAD" "http://127.0.0.1:${PORT}/api/remote/pair" >/dev/null; then
+    RELAY_PAIR_NOTE="已完成固定中继配对 ($RELAY_URL)"
+  else
+    RELAY_PAIR_NOTE="自动配对失败，请在界面「手机远程 -> 自托管固定中继」中重试"
+  fi
+elif [[ "$REMOTE_MODE" == "relay" ]]; then
+  RELAY_PAIR_NOTE="待配对（可在界面「手机远程 -> 自托管固定中继」或执行 agent-control remote relay 完成绑定）"
+fi
+
 echo ""
 echo "=================================================="
 echo "  Agent Control 安装完成"
@@ -280,6 +506,10 @@ if [[ -n "$INSTALLED_APP_PATH" ]]; then
   echo "  桌面应用: $INSTALLED_APP_PATH"
 fi
 echo "  命令行工具: $CLI_PATH"
+echo "  远程接入模式: $REMOTE_MODE（可在界面「手机远程」或 agent-control remote 随时切换）"
+if [[ -n "$RELAY_PAIR_NOTE" ]]; then
+  echo "  中继状态: $RELAY_PAIR_NOTE"
+fi
 if [[ "$INSTALL_SERVICE" == "true" ]]; then
   if [[ "$HEALTH_OK" == "true" ]]; then
     echo "  服务状态: 运行中 (http://127.0.0.1:${PORT}/health 正常)"
@@ -289,10 +519,12 @@ if [[ "$INSTALL_SERVICE" == "true" ]]; then
 fi
 echo ""
 echo "  常用命令:"
-echo "    agent-control open      打开控制台"
-echo "    agent-control status    查看服务状态"
-echo "    agent-control update    一键升级到最新版"
-echo "    agent-control uninstall 卸载"
+echo "    agent-control open                打开控制台"
+echo "    agent-control remote status       查看当前隧道/中继状态"
+echo "    agent-control remote cloudflare   切换/准备 Cloudflare 免费隧道"
+echo "    agent-control remote relay        切换/绑定自托管固定中继"
+echo "    agent-control update              一键升级到最新版"
+echo "    agent-control uninstall           卸载"
 if [[ ":$PATH:" != *":$LOCAL_BIN:"* ]]; then
   echo ""
   echo "  提示: 请将 ~/.local/bin 加入 PATH，或直接使用 $CLI_PATH"

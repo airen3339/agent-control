@@ -33,9 +33,22 @@ irm https://raw.githubusercontent.com/guuguo/agent-control/main/install.ps1 | ie
 ```
 
 安装完成后会：
-1. 自动配置开机自启后台服务（macOS LaunchAgent / Linux systemd / Windows 计划任务，默认监听 `http://127.0.0.1:43310`）；
-2. **macOS 额外自动构建并安装 `/Applications/Agent Control.app`**（原生 `WKWebView` 桌面壳，点击 Dock 图标即可打开，关闭窗口自动后台常驻）；
-3. 安装命令行工具 `agent-control`（支持 `open`、`status`、`restart`、`logs`、`update`、`uninstall`）。
+1. 引导选择远程接入方式（**Cloudflare 免费临时隧道** / **自托管固定中继** / **仅本机使用**，安装后可随时切换，无需重装）；
+2. 自动配置开机自启后台服务（macOS LaunchAgent / Linux systemd / Windows 计划任务，默认监听 `http://127.0.0.1:43310`）；
+3. **macOS 额外自动构建并安装 `/Applications/Agent Control.app`**（原生 `WKWebView` 桌面壳，点击 Dock 图标即可打开，关闭窗口自动后台常驻）；
+4. 安装命令行工具 `agent-control`（支持 `open`、`status`、`remote`、`restart`、`logs`、`update`、`uninstall`）。
+
+### 远程方案选择与利弊对比（支持随时切换）
+
+| 方案 | 优点 | 缺点 / 前提 | 适用人群 |
+| --- | --- | --- | --- |
+| **Cloudflare 免费临时隧道**（默认推荐） | 免服务器、免注册账号、免买域名；安装时自动配好 `cloudflared`，点一下 5 秒生成二维码；关闭即焚更安全 | 每次重新开启隧道域名随机变化（`*.trycloudflare.com`），需重新扫码；依赖本机能访问 Cloudflare 边缘节点 | 临时外出查看进度、零服务器门槛体验 |
+| **自托管固定中继**（Own Relay） | 拥有固定公网域名，扫码配对一次可长期添加到手机桌面；电脑重启后自动重连；国内云主机直连稳定 | 需要自备一台有公网 HTTPS 域名的服务器/容器部署 `relay/relay-server.mjs` 并签发邀请码 | 每天高频手机遥控、团队或长期个人固定入口 |
+| **仅本机使用** | 零外网暴露与额外组件，安装最快 | 仅限当前电脑使用；需要手机远程时可随时切回上面任意一种 | 只在桌面端统一管理本地多智能体 |
+
+> **如何非交互指定或安装后切换**：
+> - 安装时直接指定：`curl -fsSL https://raw.githubusercontent.com/guuguo/agent-control/main/install.sh | bash -s -- --remote cloudflare`（或 `--remote relay --relay-url https://你的中继 --invite 邀请码` / `--remote local`）。
+> - 安装后随时切换：**方法 1** 在界面右上角「手机远程」弹窗内直接点选开启/绑定；**方法 2** 在终端执行 `agent-control remote cloudflare` 或 `agent-control remote relay --url ... --code ...`。
 
 ---
 
